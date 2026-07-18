@@ -103,8 +103,19 @@ pub fn wall_between(
                 cone_or_cylinder(center, radius, za, r_hi, zb)
             }
         };
+        // A cylinder/cone's analytic normal points away from its axis (+radial).
+        // Whether that is the material-free side depends on the arc's bulge: on
+        // a CCW loop a CCW-swept arc (a1 > a0) is a convex bulge whose centre
+        // sits on the material side iff the loop interior is material. A
+        // CW-swept arc (a concave corner) has its centre on the OTHER side, so
+        // its sense flips relative to the per-call `outward` flag. Lines keep
+        // `outward` (their plane normal is already loop-oriented above).
+        let sense = match segs_lo[k] {
+            Seg::Arc { a0, a1, .. } => outward == (a1 > a0),
+            _ => outward,
+        };
         let lp = Loop::new(vec![(be, bd), (vb.0, vb.1), (te, !td), (va.0, !va.1)]);
-        b.face(surface, outward, lp, vec![]);
+        b.face(surface, sense, lp, vec![]);
     }
 }
 

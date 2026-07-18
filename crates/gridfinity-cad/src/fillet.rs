@@ -117,7 +117,6 @@ pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, Str
         } else {
             1.0
         };
-
         // Face normals vary along a curved edge: evaluate locally at each end.
         let (na0, nb0) = (face_outward(fa, p0), face_outward(fb, p0));
         let (na1, nb1) = (face_outward(fa, p1), face_outward(fb, p1));
@@ -199,7 +198,9 @@ pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, Str
     }
 
     let s = b.build();
-    s.validate().map_err(|e| format!("blend: rebuilt solid invalid: {e}"))?;
+    if let Err(e) = s.validate() {
+        return Err(format!("blend: rebuilt solid invalid: {e}"));
+    }
     Ok(s)
 }
 

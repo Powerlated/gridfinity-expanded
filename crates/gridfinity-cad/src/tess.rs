@@ -138,7 +138,6 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
             .map(|&(s, e)| (s..e).collect())
             .collect();
         let mut tris = triangulate(&uv, &outer, &holes);
-
         // Drop degenerate ears (zero uv-area): earcut clips collinear boundary
         // points as zero-area triangles, which would otherwise overlap the
         // neighbouring face and break watertightness. The real (non-degenerate)
@@ -148,6 +147,11 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
                 - (uv[b].y - uv[a].y) * (uv[c].x - uv[a].x);
             cr.abs() > 1e-10
         });
+        // Earcut also *skips* collinear boundary vertices, leaving triangles
+        // whose boundary edge is one long chord where the neighbouring face
+        // (sampling the same shared edges) emits several sub-edges. Split such
+        // chords back through the skipped boundary points so both faces agree.
+        let tris = split_boundary_chords(tris, &uv, &loop_spans);
 
         // Decide winding ONCE per face: the uv→3D orientation is uniform across
         // a single (developable) face, so an area-weighted vote over all its
@@ -178,6 +182,100 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
 // Planar faces (possibly with holes) are triangulated in uv by `earcutr` — a
 // robust, pure-Rust ear-cutter. It operates on a flat coordinate array; we map
 // its output indices back to the shared `pts` index space.
+
+/// Split triangle edges that chord across collinear boundary vertices.
+///
+/// Earcut drops collinear boundary points from its working polygon, so a
+/// triangle can span a straight boundary run in one hop while the face on the
+/// other side of those edges emits each sub-segment individually (its samples
+/// come from the same per-edge cache but its loop turns a corner there, so the
+/// points aren't collinear *for it*). Any triangle edge joining two vertices of
+/// the same loop with only collinear boundary points between them is fanned
+/// through those points, restoring the edge balance.
+fn split_boundary_chords(
+    tris: Vec<[usize; 3]>,
+    uv: &[Vec2],
+    loop_spans: &[(usize, usize)],
+) -> Vec<[usize; 3]> {
+    let span_of = |i: usize| loop_spans.iter().position(|&(s, e)| i >= s && i < e);
+    // Boundary vertices already referenced by the triangulation: a chord may
+    // only be fanned through vertices earcut *dropped*, otherwise we would
+    // duplicate triangles it already emitted around them.
+    let mut used = vec![false; uv.len()];
+    // Walk the loop from `from` to `to`; return the skipped indices if every
+    // one is unused and lies on the segment between the endpoints (in uv).
+    let walk = |used: &[bool], from: usize, to: usize, s: usize, e: usize| -> Option<Vec<usize>> {
+        let len = e - s;
+        let mut v = Vec::new();
+        let mut i = (from - s + 1) % len;
+        while i != (to - s) % len {
+            v.push(s + i);
+            i = (i + 1) % len;
+        }
+        if v.is_empty() {
+            return None;
+        }
+        let (pa, pb) = (uv[from], uv[to]);
+        let d = Vec2::new(pb.x - pa.x, pb.y - pa.y);
+        let l2 = d.x * d.x + d.y * d.y;
+        if l2 <= 0.0 {
+            return None;
+        }
+        for &m in &v {
+            if used[m] {
+                return None;
+            }
+            let r = Vec2::new(uv[m].x - pa.x, uv[m].y - pa.y);
+            let cr = r.x * d.y - r.y * d.x;
+            if cr.abs() > 1e-4 * l2.sqrt() {
+                return None; // not collinear: a genuine interior chord
+            }
+            let t = (r.x * d.x + r.y * d.y) / l2;
+            if !(0.0..=1.0).contains(&t) {
+                return None;
+            }
+        }
+        Some(v)
+    };
+
+    let mut work = tris;
+    for t in &work {
+        for &i in t {
+            used[i] = true;
+        }
+    }
+    let mut out = Vec::with_capacity(work.len());
+    'tri: while let Some(t) = work.pop() {
+        for k in 0..3 {
+            let (a, b, c) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
+            let (Some(sa), Some(sb)) = (span_of(a), span_of(b)) else {
+                continue;
+            };
+            if sa != sb {
+                continue;
+            }
+            let (s, e) = loop_spans[sa];
+            let chain = walk(&used, a, b, s, e).or_else(|| {
+                walk(&used, b, a, s, e).map(|mut v| {
+                    v.reverse();
+                    v
+                })
+            });
+            if let Some(chain) = chain {
+                let mut prev = a;
+                for &m in &chain {
+                    used[m] = true;
+                    work.push([prev, m, c]);
+                    prev = m;
+                }
+                work.push([prev, b, c]);
+                continue 'tri;
+            }
+        }
+        out.push(t);
+    }
+    out
+}
 
 /// Structured-grid tessellation of a non-planar 4-sided face whose outer loop
 /// edges run along the surface's iso-u / iso-v parametre lines (the common
