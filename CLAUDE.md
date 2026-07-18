@@ -1,0 +1,88 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+A minimalistic **analytic-surface B-rep CAD kernel** (not CSG) plus a parametric **Gridfinity**
+model built on it, with an **egui** front-end that previews the model in 3D and exports binary STL.
+It reproduces the purpose of the TypeScript reference at `../gridfinity-expanded` (parametric
+Gridfinity generator + watertight STL) as a small Rust workspace.
+
+## Commands
+
+```bash
+cargo build                      # build both crates
+cargo test -p gridfinity-cad     # engine unit tests (geometry correctness lives here)
+cargo test -p gridfinity-cad <name> -- --nocapture   # run one test, e.g. default_bin_is_valid_watertight_and_sized
+cargo run  -p gridfinity-gui     # launch the app (needs a display + OpenGL/glow)
+cargo build --release
+```
+
+The GUI is `windows_subsystem="windows"` in release, so it opens a window and blocks. To smoke-test
+that it starts without panicking (shader compile / GL context / first mesh upload all happen at
+startup): `timeout 6 ./target/debug/gridfinity-gui.exe`.
+
+## Workspace layout
+
+Two crates (`Cargo.toml` = virtual workspace, edition 2024, resolver 3):
+
+- **`crates/gridfinity-cad`** — the engine library. Deps: `glam` (math) + `earcutr` (used *only*
+  for final planar-face-with-holes triangulation; the B-rep kernel itself is hand-rolled).
+- **`crates/gridfinity-gui`** — the eframe/egui/glow app. Depends on `gridfinity-cad`.
+
+## Engine architecture (the big picture)
+
+Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `tess` → `mesh` → STL.**
+
+- **`geom.rs`** — analytic `Surface` (`Plane`/`Cylinder`/`Cone`/`Torus`) and `Curve`
+  (`Line`/`Circle`). All cylinder/cone/torus axes are **+Z** by design; that constraint is what
+  keeps everything closed-form. Each surface has `point`/`normal`/`project(uv)`; partial surfaces
+  set `ref_dir` to their arc start so `project` angles stay wrap-free.
+- **`topo.rs`** — the B-rep: `Vertex`/`Edge`/`Loop`/`Face`/`Solid`. **Not** half-edge with
+  next/prev pointers — loops are explicit ordered `(EdgeId, forward)` lists, edges are shared.
+  `Builder` interns vertices and edges (edge key = sorted endpoints **+ welded midpoint**, so a
+  circle's two semicircle arcs don't collapse into one edge). `Solid::validate()` enforces the
+  manifold invariant: **every edge used exactly twice, once in each direction** — assert it in
+  tests after any construction change.
+- **`sketch.rs`** — 2D profiles as closed loops of `Line`/`Arc` segments (`rectangle`,
+  `rounded_rect`, `circle`). Corner radii are real arcs. Outer loops CCW.
+- **`build.rs`** — features. Three primitives write into a shared `Builder`: `ring` (profile at a
+  height), `wall_between` (side faces between two rings), `cap`/`loop_of` (planar caps).
+  `extrude`/`prism`/`loft` wrap them. **Orientation convention:** author loops CCW; an `outward`
+  flag says whether material is inside the loop (`true`) or it is a hole/cavity (`false`). `loft`
+  turns arcs whose radius changes with height into `Cone` faces; a straight segment on a loft
+  becomes a *slanted* `Plane` (its normal is computed from the actual 3D quad, not assumed
+  vertical).
+- **`tess.rs`** — analytic faces → triangles. **Watertight by construction:** each edge is sampled
+  once (cached by `EdgeId`), so the two faces sharing it emit identical boundary points. Winding is
+  decided **once per face** (area-weighted vote against the analytic normal) — never per triangle,
+  or curved faces get inconsistent internal edges. Planar-with-holes triangulation uses `earcutr`.
+- **`gridfinity.rs`** — the parametric model + spec constants + `Params`. **The whole bin is built
+  in one `Builder`** so interface edges are shared automatically — there is *no general boolean*;
+  cavity/compartments/holes/base are all constructed directly. Notable model choices: the base is a
+  **single chamfered perimeter foot** spanning the footprint (not one foot per cell); bins are
+  `42·n − 0.5` mm, the `Baseplate` is full `42·n` with a peg-shaped socket per cell; concentric
+  magnet+screw becomes a stepped counterbore.
+
+When adding geometry, keep the manifold invariant: any edge a new face introduces must be paired by
+exactly one other face traversing it the opposite way. `Params` currently drives grid size, height,
+wall/corner/fillet, magnet/screw holes, compartments, and Bin/Baseplate mode. (Floor slope and
+open-edges are intentionally not implemented in the constructive model.)
+
+## GUI notes (important API gotcha)
+
+This project pins **egui/eframe/egui_glow 0.35, which is a redesigned API**, not mainstream egui:
+
+- `eframe::App::ui(&mut self, ui: &mut egui::Ui, frame)` — you get a root **`Ui`**, not a `Context`
+  (there is no `update(ctx, ...)`).
+- Panels are shown *inside* that root ui: `egui::Panel::left(id).show(ui, ...)` / `Panel::right` /
+  `CentralPanel::default().show(ui, ...)`. There is **no `SidePanel`**.
+- Scroll delta is `input.smooth_scroll_delta` (no `raw_scroll_delta`).
+- `NativeOptions` still has `depth_buffer`/`renderer`/`viewport` like mainstream.
+
+`viewport.rs` renders the mesh with one glow shader (smooth shading from analytic vertex normals)
+via `egui::PaintCallback` + `egui_glow::CallbackFn`, inside a scissored depth-cleared, back-face
+culled draw that restores GL state. Back-face culling relies on the engine's outward winding (see
+the `meshes_have_outward_consistent_winding` test). `main.rs` binds `Params` to widgets, regenerates
+(build → tessellate → upload VBO) on change, and exports STL via `rfd` + `Mesh::to_stl_binary`.

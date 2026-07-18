@@ -1,0 +1,12 @@
+[package]
+name = "gridfinity-cad"
+description = "Minimalistic sketch-based parametric CAD kernel + Gridfinity model generator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam = "0.29"
+# Robust, pure-Rust ear-cutting for the final planar-face-with-holes
+# triangulation only. The analytic B-rep kernel itself is hand-rolled.
+earcutr = "0.4"
