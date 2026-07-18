@@ -11,6 +11,7 @@ pub mod layout;
 pub mod math;
 pub mod mesh;
 pub mod printers;
+pub mod region;
 pub mod sketch;
 pub mod tess;
 pub mod topo;
