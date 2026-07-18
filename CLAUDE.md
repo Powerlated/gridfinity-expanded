@@ -70,13 +70,32 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   or curved faces get inconsistent internal edges. Non-planar 4-sided faces whose loop follows
   iso-u/iso-v lines (cylinder walls, cone chamfers, blend patches) take a structured-grid path
   (avoids earcut slivers from collinear boundary runs); everything else, including planar-with-
-  holes, goes through `earcutr` with a zero-uv-area sliver filter.
-- **`gridfinity.rs`** — the parametric model + spec constants + `Params`. **The whole bin is built
-  in one `Builder`** so interface edges are shared automatically — there is *no general boolean*;
-  cavity/compartments/holes/base are all constructed directly. Notable model choices: the base is a
-  **single chamfered perimeter foot** spanning the footprint (not one foot per cell); bins are
-  `42·n − 0.5` mm, the `Baseplate` is full `42·n` with a peg-shaped socket per cell; concentric
-  magnet+screw becomes a stepped counterbore.
+  holes, goes through `earcutr` with a zero-uv-area sliver filter, followed by
+  `split_boundary_chords`: earcut drops collinear boundary vertices, so triangle edges that chord
+  across boundary samples the neighbouring face emits individually are fanned back through the
+  dropped points (only through vertices earcut didn't use — inserting used ones would duplicate
+  triangles).
+- **`rectregion.rs`** — rectilinear region engine: unions/differences of axis-aligned rects
+  resolved on a compressed coordinate grid, traced material-on-the-left (outer CCW, holes CW), then
+  per-corner arc rounding with clamping (`trace_rects`, `shape_loop`). The cavity planner and
+  baseplate outline are built on it.
+- **`gridfinity.rs`** — the parametric model + spec constants + `Params`, a faithful port of the
+  TS reference's `BinConfig`. `Params.bins: Vec<LogicalBin>` holds polyomino cell sets (plus
+  optional floor slope); `Params::rect(gx,gy)` is the rectangular convenience. **Each bin is built
+  in one `Builder`** so interface edges are shared automatically — there is *no general boolean*.
+  Model structure: a boundary walk traces each bin's cells into loops; the outer profile is the
+  pitch lines inset `HALF_TOL=0.25` with `OUTER_R=3.75` convex corners, split at
+  `PEG_TANGENT=4.0` from corners so peg-top edges weld with the wall's bottom ring. The base is
+  **one chamfered connector peg per cell** (three lofted profiles, 0 → `PEG_HEIGHT=4.75`;
+  `PEG_R_MID=1.6` so all three corner arcs share an axis and the chamfers are coaxial cones). Peg
+  ring segments that don't weld to the wall, plus non-shared outer pieces, are stitched
+  (`stitch_loops`) into planar bridge-underside faces at `PEG_HEIGHT` — loops geometrically
+  contained in another become holes of that face (an interior peg's ring must be a hole, not a
+  disk). The cavity plan (`plan_cavity`) mirrors TS `planCavity`: cell rects minus wall/divider
+  strips plus concave-corner patches, traced through `rectregion` and rounded (`rc` convex, `fr`
+  concave so the floor-fillet blend stays tangent-continuous). Bins are `42·n − 0.5` mm, the
+  `Baseplate` is full `42·n` with a peg-shaped through-socket per cell; concentric magnet+screw
+  becomes a stepped counterbore.
 
 The compartment cavities are built **sharp**; the concave floor fillet is applied afterwards as a
 true `blend_edges` rolling-ball blend over each compartment's floor-wall edge loop (skipped when

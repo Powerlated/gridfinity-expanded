@@ -33,6 +33,10 @@ fn main() -> eframe::Result<()> {
 
 struct App {
     params: Params,
+    // Single rectangular logical bin (params.bins[0]); the engine supports
+    // arbitrary polyominoes, the GUI exposes the rectangular case.
+    grid_x: u32,
+    grid_y: u32,
     // Even-division counts (compartments per axis); expanded to divider edges.
     comp_x: u32,
     comp_y: u32,
@@ -54,6 +58,8 @@ impl App {
         let renderer = Arc::new(Mutex::new(Renderer::new(&gl)));
         let mut app = App {
             params: Params::default(),
+            grid_x: 2,
+            grid_y: 2,
             comp_x: 1,
             comp_y: 1,
             slope_on: false,
@@ -87,7 +93,7 @@ impl App {
     fn export_stl(&mut self) {
         let default_name = format!(
             "gridfinity-{}x{}x{}u.stl",
-            self.params.grid_x, self.params.grid_y, self.params.height_units
+            self.grid_x, self.grid_y, self.params.height_units
         );
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name(default_name)
@@ -135,11 +141,15 @@ impl App {
 
         egui::Grid::new("dims").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
             ui.label("Grid X");
-            changed |= ui.add(egui::DragValue::new(&mut p.grid_x).range(1..=12)).changed();
+            let gx = ui.add(egui::DragValue::new(&mut self.grid_x).range(1..=12)).changed();
             ui.end_row();
             ui.label("Grid Y");
-            changed |= ui.add(egui::DragValue::new(&mut p.grid_y).range(1..=12)).changed();
+            let gy = ui.add(egui::DragValue::new(&mut self.grid_y).range(1..=12)).changed();
             ui.end_row();
+            if gx || gy {
+                p.bins[0].cells = gridfinity::rect_cells(self.grid_x, self.grid_y);
+                changed = true;
+            }
             ui.label("Height (7 mm units)");
             changed |= ui.add(egui::DragValue::new(&mut p.height_units).range(1..=30)).changed();
             ui.end_row();
@@ -165,8 +175,8 @@ impl App {
         if divs_changed || changed {
             // Grid size affects the expansion too, so refresh on any dims change.
             p.divider_edges = gridfinity::divisions_to_edges(
-                p.grid_x,
-                p.grid_y,
+                self.grid_x,
+                self.grid_y,
                 self.comp_x.saturating_sub(1),
                 self.comp_y.saturating_sub(1),
             );
@@ -191,7 +201,8 @@ impl App {
                 }
             });
         }
-        p.slope = self.slope_on.then_some(BinSlope { angle_deg: self.slope_angle, dir: self.slope_dir });
+        p.bins[0].slope =
+            self.slope_on.then_some(BinSlope { angle_deg: self.slope_angle, dir: self.slope_dir });
 
         ui.separator();
         ui.label("Fasteners");
