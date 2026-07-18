@@ -6,7 +6,7 @@
 mod viewport;
 
 use eframe::egui;
-use gridfinity_cad::gridfinity::{self, Mode, Params};
+use gridfinity_cad::gridfinity::{self, BinSlope, Mode, Params, SlopeDir};
 use gridfinity_cad::tessellate;
 use std::sync::{Arc, Mutex};
 use viewport::{Camera, Renderer};
@@ -33,6 +33,13 @@ fn main() -> eframe::Result<()> {
 
 struct App {
     params: Params,
+    // Even-division counts (compartments per axis); expanded to divider edges.
+    comp_x: u32,
+    comp_y: u32,
+    // Slope widget state (params.slope is Some only while enabled).
+    slope_on: bool,
+    slope_angle: f32,
+    slope_dir: SlopeDir,
     gl: Arc<eframe::glow::Context>,
     renderer: Arc<Mutex<Renderer>>,
     camera: Camera,
@@ -47,6 +54,11 @@ impl App {
         let renderer = Arc::new(Mutex::new(Renderer::new(&gl)));
         let mut app = App {
             params: Params::default(),
+            comp_x: 1,
+            comp_y: 1,
+            slope_on: false,
+            slope_angle: 20.0,
+            slope_dir: SlopeDir::MinusX,
             gl,
             renderer,
             camera: Camera::default(),
@@ -141,14 +153,45 @@ impl App {
 
         ui.separator();
         ui.label("Compartments");
+        let mut divs_changed = false;
         egui::Grid::new("divs").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-            ui.label("Divisions X");
-            changed |= ui.add(egui::DragValue::new(&mut p.divisions_x).range(1..=10)).changed();
+            ui.label("Across X");
+            divs_changed |= ui.add(egui::DragValue::new(&mut self.comp_x).range(1..=10)).changed();
             ui.end_row();
-            ui.label("Divisions Y");
-            changed |= ui.add(egui::DragValue::new(&mut p.divisions_y).range(1..=10)).changed();
+            ui.label("Across Y");
+            divs_changed |= ui.add(egui::DragValue::new(&mut self.comp_y).range(1..=10)).changed();
             ui.end_row();
         });
+        if divs_changed || changed {
+            // Grid size affects the expansion too, so refresh on any dims change.
+            p.divider_edges = gridfinity::divisions_to_edges(
+                p.grid_x,
+                p.grid_y,
+                self.comp_x.saturating_sub(1),
+                self.comp_y.saturating_sub(1),
+            );
+            changed = true;
+        }
+
+        ui.separator();
+        ui.label("Sloped floor");
+        changed |= ui.checkbox(&mut self.slope_on, "Enable (disables floor fillet)").changed();
+        if self.slope_on {
+            changed |= ui
+                .add(egui::Slider::new(&mut self.slope_angle, 5.0..=45.0).text("angle °"))
+                .changed();
+            ui.horizontal(|ui| {
+                for (dir, label) in [
+                    (SlopeDir::MinusX, "−X"),
+                    (SlopeDir::PlusX, "+X"),
+                    (SlopeDir::MinusY, "−Y"),
+                    (SlopeDir::PlusY, "+Y"),
+                ] {
+                    changed |= ui.selectable_value(&mut self.slope_dir, dir, label).changed();
+                }
+            });
+        }
+        p.slope = self.slope_on.then_some(BinSlope { angle_deg: self.slope_angle, dir: self.slope_dir });
 
         ui.separator();
         ui.label("Fasteners");

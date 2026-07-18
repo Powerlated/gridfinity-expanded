@@ -123,7 +123,7 @@ impl Params {
 
 /// Build evenly spaced divider edges for a `gx × gy` grid: `dx` vertical cuts
 /// and `dy` horizontal cuts, each spanning the full grid.
-fn divisions_to_edges(gx: u32, gy: u32, dx: u32, dy: u32) -> Vec<GridEdge> {
+pub fn divisions_to_edges(gx: u32, gy: u32, dx: u32, dy: u32) -> Vec<GridEdge> {
     let mut out = Vec::new();
     if gx >= 2 {
         let n = dx.min(gx - 1) as i32;
