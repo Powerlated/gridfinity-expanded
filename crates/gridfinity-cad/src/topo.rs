@@ -206,19 +206,20 @@ impl Builder {
         })
     }
 
-    /// Intern a circular-arc edge. `center`/`radius`/`ref_dir` define the
+    /// Intern a circular-arc edge. `center`/`axis`/`radius`/`ref_dir` define the
     /// circle; `a0`/`a1` are the raw (unwrapped) angles at `a`/`b`.
     pub fn arc(
         &mut self,
         a: VertexId,
         b: VertexId,
         center: Vec3,
+        axis: Vec3,
         radius: f32,
         ref_dir: Vec3,
         a0: f32,
         a1: f32,
     ) -> (EdgeId, bool) {
-        let curve = Curve::Circle { center, radius, ref_dir };
+        let curve = Curve::Circle { center, axis, radius, ref_dir };
         let mid = curve.point((a0 + a1) * 0.5);
         self.edge_between(a, b, mid, || Edge {
             curve,

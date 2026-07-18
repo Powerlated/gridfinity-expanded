@@ -1,12 +1,13 @@
 //! Analytic geometry: the exact surfaces faces live on and the exact curves
 //! edges live on. Nothing here is faceted — tessellation happens only in
-//! `tess.rs`. All cylinder/cone/torus axes are the +Z axis, which is what keeps
-//! surface intersection closed-form (see `boolean.rs`).
+//! `tess.rs`.
 //!
-//! Every surface carries a local orthonormal frame so a 3D point maps to a
-//! wrap-free `(u, v)` parameter pair. Faces are constructed with `ref_dir`
-//! pointing at the *start* of their bounding arc, so a partial (quarter- or
-//! half-) surface never straddles the `atan2` branch cut.
+//! Every radial surface (`Cylinder`/`Cone`/`Torus`/`Sphere`) carries its own
+//! `axis` (unit) and a `ref_dir` perpendicular to it. `radial_frame` builds the
+//! orthonormal `(d0, d1)` with `d0` toward `ref_dir` and `d1 = axis × d0`, so a
+//! 3D point maps to a wrap-free `(u, v)` pair. Faces are constructed with
+//! `ref_dir` pointing at the *start* of their bounding arc, so a partial
+//! (quarter- or half-) surface never straddles the `atan2` branch cut.
 
 use crate::math::Vec3;
 use std::f32::consts::PI;
@@ -14,15 +15,22 @@ use std::f32::consts::PI;
 /// A 2D parameter point on a surface.
 pub type Uv = (f32, f32);
 
-/// Right-handed frame `(d0, d1)` spanning the plane perpendicular to +Z, with
-/// `d0` at the given reference direction (projected onto the XY plane).
-fn radial_frame(ref_dir: Vec3) -> (Vec3, Vec3) {
-    let mut d0 = Vec3::new(ref_dir.x, ref_dir.y, 0.0);
-    if d0.length_squared() < 1e-12 {
-        d0 = Vec3::X;
+/// Unit vector perpendicular to `axis`, as close as possible to `hint`.
+pub fn perp_unit(axis: Vec3, hint: Vec3) -> Vec3 {
+    let d = hint - axis * hint.dot(axis);
+    if d.length_squared() < 1e-12 {
+        // hint parallel to axis: pick any perpendicular basis vector.
+        let a = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+        (a - axis * a.dot(axis)).normalize()
+    } else {
+        d.normalize()
     }
-    let d0 = d0.normalize();
-    let d1 = Vec3::Z.cross(d0); // +90° about Z
+}
+
+/// Right-handed frame `(d0, d1)` perpendicular to `axis`, `d0` toward `ref_dir`.
+pub fn radial_frame(axis: Vec3, ref_dir: Vec3) -> (Vec3, Vec3) {
+    let d0 = perp_unit(axis, ref_dir);
+    let d1 = axis.cross(d0);
     (d0, d1)
 }
 
@@ -36,22 +44,28 @@ pub enum Surface {
         u_dir: Vec3,
         v_dir: Vec3,
     },
-    /// Axis +Z through `base`. u = angle from `ref_dir`, v = height along Z.
-    Cylinder { base: Vec3, radius: f32, ref_dir: Vec3 },
-    /// Axis +Z, apex at `apex`, opening as v (height above apex) grows.
-    /// `half_angle` is measured from the axis. u = angle, v = height along Z.
+    /// `base` point on the axis; axis direction `axis`; u = angle from
+    /// `ref_dir`, v = signed distance along `axis`.
+    Cylinder { base: Vec3, axis: Vec3, radius: f32, ref_dir: Vec3 },
+    /// Apex at `apex`, axis `axis`, `half_angle` from the axis. u = angle,
+    /// v = signed distance along `axis` (a frustum on the lower nappe has v<0).
     Cone {
         apex: Vec3,
+        axis: Vec3,
         half_angle: f32,
         ref_dir: Vec3,
     },
-    /// Axis +Z through `center`. u = angle about Z, v = angle about the tube.
+    /// `center` on the axis; u = angle about `axis`, v = angle about the tube.
     Torus {
         center: Vec3,
+        axis: Vec3,
         major_r: f32,
         minor_r: f32,
         ref_dir: Vec3,
     },
+    /// `center`; u = angle about `axis` (longitude), v = angle from `axis`
+    /// (colatitude, 0 at +axis pole, π at −axis pole).
+    Sphere { center: Vec3, axis: Vec3, radius: f32, ref_dir: Vec3 },
 }
 
 impl Surface {
@@ -79,6 +93,31 @@ impl Surface {
         }
     }
 
+    /// Cylinder with axis +Z through `base` (the common vertical case).
+    pub fn cylinder_z(base: Vec3, radius: f32) -> Surface {
+        Surface::Cylinder { base, axis: Vec3::Z, radius, ref_dir: Vec3::X }
+    }
+
+    /// Cylinder with explicit axis.
+    pub fn cylinder(base: Vec3, axis: Vec3, radius: f32, ref_dir: Vec3) -> Surface {
+        Surface::Cylinder { base, axis, radius, ref_dir }
+    }
+
+    /// Cone with axis +Z, apex at `apex`.
+    pub fn cone_z(apex: Vec3, half_angle: f32) -> Surface {
+        Surface::Cone { apex, axis: Vec3::Z, half_angle, ref_dir: Vec3::X }
+    }
+
+    /// Torus with axis +Z through `center`.
+    pub fn torus_z(center: Vec3, major_r: f32, minor_r: f32) -> Surface {
+        Surface::Torus { center, axis: Vec3::Z, major_r, minor_r, ref_dir: Vec3::X }
+    }
+
+    /// Sphere centered at `center`, pole axis +Z.
+    pub fn sphere(center: Vec3, radius: f32) -> Surface {
+        Surface::Sphere { center, axis: Vec3::Z, radius, ref_dir: Vec3::X }
+    }
+
     pub fn point(&self, uv: Uv) -> Vec3 {
         let (u, v) = uv;
         match *self {
@@ -88,28 +127,38 @@ impl Surface {
                 v_dir,
                 ..
             } => origin + u * u_dir + v * v_dir,
-            Surface::Cylinder { base, radius, ref_dir } => {
-                let (d0, d1) = radial_frame(ref_dir);
-                base + radius * (u.cos() * d0 + u.sin() * d1) + v * Vec3::Z
+            Surface::Cylinder { base, axis, radius, ref_dir } => {
+                let (d0, d1) = radial_frame(axis, ref_dir);
+                base + radius * (u.cos() * d0 + u.sin() * d1) + v * axis
             }
             Surface::Cone {
                 apex,
+                axis,
                 half_angle,
                 ref_dir,
             } => {
-                let (d0, d1) = radial_frame(ref_dir);
-                let r = v * half_angle.tan();
-                apex + v * Vec3::Z + r * (u.cos() * d0 + u.sin() * d1)
+                let (d0, d1) = radial_frame(axis, ref_dir);
+                // `v` is a signed distance along the axis; a frustum can lie on
+                // the lower nappe (v < 0). The radial distance is |v|·tan so the
+                // point stays at angle `u` on either nappe.
+                let r = v.abs() * half_angle.tan();
+                apex + v * axis + r * (u.cos() * d0 + u.sin() * d1)
             }
             Surface::Torus {
                 center,
+                axis,
                 major_r,
                 minor_r,
                 ref_dir,
             } => {
-                let (d0, d1) = radial_frame(ref_dir);
+                let (d0, d1) = radial_frame(axis, ref_dir);
                 let radial = u.cos() * d0 + u.sin() * d1;
-                center + (major_r + minor_r * v.cos()) * radial + minor_r * v.sin() * Vec3::Z
+                center + (major_r + minor_r * v.cos()) * radial + minor_r * v.sin() * axis
+            }
+            Surface::Sphere { center, axis, radius, ref_dir } => {
+                let (d0, d1) = radial_frame(axis, ref_dir);
+                let radial = u.cos() * d0 + u.sin() * d1;
+                center + radius * (v.sin() * radial + v.cos() * axis)
             }
         }
     }
@@ -119,21 +168,32 @@ impl Surface {
         let (u, v) = uv;
         match *self {
             Surface::Plane { normal, .. } => normal,
-            Surface::Cylinder { ref_dir, .. } => {
-                let (d0, d1) = radial_frame(ref_dir);
+            Surface::Cylinder { axis, ref_dir, .. } => {
+                let (d0, d1) = radial_frame(axis, ref_dir);
                 (u.cos() * d0 + u.sin() * d1).normalize()
             }
             Surface::Cone {
-                half_angle, ref_dir, ..
+                axis,
+                half_angle,
+                ref_dir,
+                ..
             } => {
-                let (d0, d1) = radial_frame(ref_dir);
+                let (d0, d1) = radial_frame(axis, ref_dir);
                 let radial = u.cos() * d0 + u.sin() * d1;
-                (half_angle.cos() * radial - half_angle.sin() * Vec3::Z).normalize()
+                // Outward normal tilts away from the apex: −axis on the upper
+                // nappe (v > 0), +axis on the lower nappe (v < 0).
+                let sgn = if v >= 0.0 { -1.0 } else { 1.0 };
+                (half_angle.cos() * radial + sgn * half_angle.sin() * axis).normalize()
             }
-            Surface::Torus { ref_dir, .. } => {
-                let (d0, d1) = radial_frame(ref_dir);
+            Surface::Torus { axis, ref_dir, .. } => {
+                let (d0, d1) = radial_frame(axis, ref_dir);
                 let radial = u.cos() * d0 + u.sin() * d1;
-                (v.cos() * radial + v.sin() * Vec3::Z).normalize()
+                (v.cos() * radial + v.sin() * axis).normalize()
+            }
+            Surface::Sphere { axis, ref_dir, .. } => {
+                let (d0, d1) = radial_frame(axis, ref_dir);
+                let radial = u.cos() * d0 + u.sin() * d1;
+                (v.sin() * radial + v.cos() * axis).normalize()
             }
         }
     }
@@ -152,30 +212,38 @@ impl Surface {
                 let d = p - origin;
                 (d.dot(u_dir), d.dot(v_dir))
             }
-            Surface::Cylinder { base, ref_dir, .. } => {
-                let (d0, d1) = radial_frame(ref_dir);
+            Surface::Cylinder { base, axis, ref_dir, .. } => {
+                let (d0, d1) = radial_frame(axis, ref_dir);
                 let rel = p - base;
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
-                (u, rel.z)
+                (u, rel.dot(axis))
             }
-            Surface::Cone { apex, ref_dir, .. } => {
-                let (d0, d1) = radial_frame(ref_dir);
+            Surface::Cone { apex, axis, ref_dir, .. } => {
+                let (d0, d1) = radial_frame(axis, ref_dir);
                 let rel = p - apex;
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
-                (u, rel.z)
+                (u, rel.dot(axis))
             }
             Surface::Torus {
                 center,
+                axis,
                 major_r,
                 ref_dir,
                 ..
             } => {
-                let (d0, d1) = radial_frame(ref_dir);
+                let (d0, d1) = radial_frame(axis, ref_dir);
                 let rel = p - center;
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
                 let radial = u.cos() * d0 + u.sin() * d1;
                 let ring = rel.dot(radial) - major_r;
-                let v = wrap_angle(rel.z.atan2(ring));
+                let v = wrap_angle(rel.dot(axis).atan2(ring));
+                (u, v)
+            }
+            Surface::Sphere { center, axis, radius, ref_dir } => {
+                let (d0, d1) = radial_frame(axis, ref_dir);
+                let rel = (p - center) / radius;
+                let v = rel.dot(axis).clamp(-1.0, 1.0).acos();
+                let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
                 (u, v)
             }
         }
@@ -196,9 +264,11 @@ fn wrap_angle(a: f32) -> f32 {
 pub enum Curve {
     /// Straight line through `p0` with unit direction `dir`.
     Line { p0: Vec3, dir: Vec3 },
-    /// Circle of `radius` centred at `center`, axis +Z, angle from `ref_dir`.
+    /// Circle of `radius` centred at `center`, in the plane normal to `axis`,
+    /// angle measured from `ref_dir` (⊥ axis) toward `axis × ref_dir`.
     Circle {
         center: Vec3,
+        axis: Vec3,
         radius: f32,
         ref_dir: Vec3,
     },
@@ -212,16 +282,22 @@ impl Curve {
         }
     }
 
+    /// Circle in the XY plane (axis +Z), centred at `center`.
+    pub fn circle_z(center: Vec3, radius: f32) -> Curve {
+        Curve::Circle { center, axis: Vec3::Z, radius, ref_dir: Vec3::X }
+    }
+
     /// Point at parameter `t`: distance along a Line, angle (radians) on a Circle.
     pub fn point(&self, t: f32) -> Vec3 {
         match *self {
             Curve::Line { p0, dir } => p0 + t * dir,
             Curve::Circle {
                 center,
+                axis,
                 radius,
                 ref_dir,
             } => {
-                let (d0, d1) = radial_frame(ref_dir);
+                let (d0, d1) = radial_frame(axis, ref_dir);
                 center + radius * (t.cos() * d0 + t.sin() * d1)
             }
         }

@@ -54,7 +54,7 @@ pub fn ring(b: &mut Builder, segs: &[Seg], z: f32) -> RingEdges {
         edges.push(match segs[k] {
             Seg::Line { .. } => b.line(verts[k], verts[k1]),
             Seg::Arc { center, radius, a0, a1, .. } => {
-                b.arc(verts[k], verts[k1], vec3_of(center.x, center.y, z), radius, Vec3::X, a0, a1)
+                b.arc(verts[k], verts[k1], vec3_of(center.x, center.y, z), Vec3::Z, radius, Vec3::X, a0, a1)
             }
         });
     }
@@ -83,12 +83,13 @@ pub fn wall_between(
         let (te, td) = hi.edges[k];
         let surface = match segs_lo[k] {
             Seg::Line { a, b: bb } => {
-                // General (possibly slanted, for a loft) plane through the quad:
-                // lo edge a→b at za and the slant a(za)→a'(zb).
-                let a_hi = segs_hi[k].start();
-                let p0 = vec3_of(a.x, a.y, za);
-                let p1 = vec3_of(bb.x, bb.y, za);
-                let p2 = vec3_of(a_hi.x, a_hi.y, zb);
+                // General (possibly slanted, for a loft or a sloped floor) plane
+                // through the actual 3D quad: the two bottom verts at their real
+                // heights and the slant from bottom[k] → top[k].
+                let p0 = b.point(lo.verts[k]);
+                let p1 = b.point(lo.verts[k1]);
+                let p2 = b.point(hi.verts[k]);
+                let _ = (a, bb, za, zb); // original flat-ring inputs superseded
                 let mut n = (p1 - p0).cross(p2 - p0).normalize_or_zero();
                 // Orient outward: agree with the CCW-outward horizontal (dy,−dx).
                 let dir = bb - a;
@@ -201,17 +202,9 @@ pub fn loft(rings: &[Ring]) -> Solid {
 /// radius is constant, otherwise a cone.
 fn cone_or_cylinder(center: Vec2, r0: f32, z0: f32, r1: f32, z1: f32) -> Surface {
     if (r1 - r0).abs() < 1e-5 {
-        return Surface::Cylinder {
-            base: vec3_of(center.x, center.y, 0.0),
-            radius: r0,
-            ref_dir: Vec3::X,
-        };
+        return Surface::cylinder_z(vec3_of(center.x, center.y, 0.0), r0);
     }
     let k = (r1 - r0) / (z1 - z0);
     let z_apex = z0 - r0 / k;
-    Surface::Cone {
-        apex: vec3_of(center.x, center.y, z_apex),
-        half_angle: k.abs().atan(),
-        ref_dir: Vec3::X,
-    }
+    Surface::cone_z(vec3_of(center.x, center.y, z_apex), k.abs().atan())
 }
