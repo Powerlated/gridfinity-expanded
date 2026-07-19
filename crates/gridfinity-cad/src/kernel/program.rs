@@ -20,7 +20,7 @@ use crate::kernel::build::{loop_of, ring, seg_edge, wall_between};
 use crate::kernel::fillet::blend_edges;
 use crate::kernel::geom::Surface;
 use crate::kernel::math::{Vec3, vec3_of};
-use crate::kernel::sketch::Seg;
+use crate::kernel::sketch::{Seg, Sketch};
 use crate::kernel::slab::{self, Slab, SlabOpts};
 use crate::kernel::topo::{Builder, EdgeId, Solid};
 use std::collections::HashMap;
@@ -62,6 +62,42 @@ impl PlaneRef {
     }
 }
 
+/// Hole-wizard profile: describes a fastener bore as a stack of cylindrical
+/// sections. Each section is a z-prism, so the whole thing stays inside the
+/// slab-expressible subset — no cones, no general CSG.
+///
+/// A `Counterbore` is what Gridfinity's concentric magnet+screw becomes:
+/// `head_r/head_d` is the magnet (wide, shallow), `bore_r/bore_d` is the
+/// screw (narrow, deep). A `Plain` hole is the degenerate single-section case.
+/// `Countersink` would need a cone (not slab-expressible) and is therefore
+/// not yet implemented — the variant is here so the API is complete, with a
+/// clean runtime error rather than a silent approximation.
+#[derive(Clone, Debug)]
+pub enum HoleProfile {
+    /// One cylindrical bore of `radius` from the surface to `depth`.
+    Plain { radius: f32, depth: f32 },
+    /// A wide shallow `head` section (counterbore) over a narrower `bore`.
+    /// Both start at the surface; the head ends at `head_d`, the bore at
+    /// `bore_d` (with `head_d < bore_d` and `head_r > bore_r`).
+    Counterbore { bore_r: f32, bore_d: f32, head_r: f32, head_d: f32 },
+    /// A conical widening at the surface — *not yet implemented* (cones are
+    /// not slab-expressible; would need a loft cut or general boolean).
+    Countersink { bore_r: f32, bore_d: f32, head_r: f32, head_angle_deg: f32 },
+}
+
+impl HoleProfile {
+    /// The mouth radius (the bore at the surface) — what the caller's cap
+    /// must close around. For Counterbore that's `head_r` (the wider section
+    /// is at the surface); for Plain it's just `radius`.
+    pub fn mouth_radius(&self) -> f32 {
+        match *self {
+            HoleProfile::Plain { radius, .. } => radius,
+            HoleProfile::Counterbore { head_r, .. } => head_r,
+            HoleProfile::Countersink { head_r, .. } => head_r,
+        }
+    }
+}
+
 /// One modelling operation.
 pub enum Op {
     // ── Datums (phase 0) ───────────────────────────────────────────────────
@@ -87,6 +123,10 @@ pub enum Op {
     /// changes between profiles, planes for straight runs, cylinders for
     /// constant-radius arcs) — the same machinery as `Op::Wall`.
     Loft { profiles: Vec<(String, f32)>, outward: bool },
+    /// Fastener-hole wizard: emits a stack of cylindrical bores (Plain or
+    /// Counterbore) as a cavity slab stack, open at `from_z` so the caller's
+    /// cap closes the mouth. The mouth radius is `profile.mouth_radius()`.
+    Hole { at: crate::kernel::math::Vec2, from_z: f32, profile: HoleProfile },
 
     // ── Face-level features (phase 1) ─────────────────────────────────────
     /// A planar face on an arbitrary plane. Generalises `Op::Cap` to non-
@@ -128,6 +168,7 @@ impl Op {
             Op::Extrude { .. } => "extrude",
             Op::ExtrudeCut { .. } => "cut",
             Op::Loft { .. } => "loft",
+            Op::Hole { .. } => "hole",
             Op::PlanarFace { .. } => "face",
             Op::WallFaces { .. } => "wall",
             Op::Wall { .. } => "wall",
@@ -269,6 +310,9 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                 let surface = Surface::plane(origin, normal);
                 b.face(surface, true, outer_loop, inner_loops);
             }
+            Op::Hole { at, from_z, profile } => {
+                emit_hole(&mut b, *at, *from_z, profile)?;
+            }
             Op::WallFaces { lower, upper, z0, z1, outward } => {
                 let lo = ring(&mut b, lower, *z0);
                 let hi = ring(&mut b, upper, *z1);
@@ -308,6 +352,48 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
         return Ok(solid);
     }
     blend_edges(&solid, &blends)
+}
+
+/// Emit a fastener hole as a cavity slab stack open at `from_z` — the caller's
+/// cap (typically the underside of a peg) closes the mouth. Each section of
+/// the profile becomes one Union slab; the wider section sits at the surface,
+/// the narrower extends deeper. Circle loops are CCW as `Sketch::circle`
+/// produces; the slab machinery handles winding through its `cavity` flag.
+fn emit_hole(
+    b: &mut Builder,
+    at: crate::kernel::math::Vec2,
+    from_z: f32,
+    profile: &HoleProfile,
+) -> Result<(), String> {
+    let circle = |r: f32| Sketch::circle(at.x, at.y, r).loops.remove(0);
+    let (sections, total_depth): (Vec<(f32, f32)>, f32) = match *profile {
+        HoleProfile::Plain { radius, depth } => (vec![(radius, depth)], depth),
+        HoleProfile::Counterbore { bore_r, bore_d, head_r, head_d } => {
+            // The wider head is at the surface (z = from_z .. from_z + head_d);
+            // the narrower bore extends below it (from_z .. from_z + bore_d).
+            // Both start at from_z so the slabs overlap and the band machinery
+            // resolves the step at head_d automatically.
+            (vec![(head_r, head_d), (bore_r, bore_d)], bore_d.max(head_d))
+        }
+        HoleProfile::Countersink { .. } => {
+            return Err(
+                "Hole: Countersink not yet implemented (cones are not slab-expressible; \
+                 would need a loft cut or general boolean)"
+                    .into(),
+            );
+        }
+    };
+
+    let stack: Vec<(slab::Op, Slab)> = sections
+        .iter()
+        .map(|&(r, d)| {
+            (slab::Op::Union, Slab::new(vec![circle(r)], from_z, from_z + d))
+        })
+        .collect();
+    let opts = SlabOpts { cavity: true, open_at: vec![from_z] };
+    slab::emit_slabs(b, &stack, &opts)?;
+    let _ = total_depth; // documented for future use; the slabs carry the depth
+    Ok(())
 }
 
 #[cfg(test)]
@@ -583,5 +669,126 @@ mod tests {
         );
         let (a, b) = (run_all(&p_old).unwrap(), run_all(&p_new).unwrap());
         assert_eq!(a.faces.len(), b.faces.len(), "WallFaces matches Wall");
+    }
+
+    // ── Phase 1B: hole wizard ─────────────────────────────────────────────
+
+    fn box_with_hole_program(profile: HoleProfile) -> Program {
+        // A 20×20×5 block with a single hole at centre. Built as walls + top
+        // cap + Op::Hole + bottom-cap-with-mouth, because Op::Extrude would
+        // auto-cap the bottom (its slab machinery emits caps at every z), and
+        // that bottom cap would conflict with the cap we close the hole's
+        // mouth with. The hole's mouth is open (cavity mode, open_at = from_z),
+        // and the bottom cap carries the mouth as a hole, welding with the
+        // cavity wall by interning.
+        let outline = rect(0.0, 0.0, 20.0, 20.0);
+        let mouth_r = profile.mouth_radius();
+        let mouth = Sketch::circle(10.0, 10.0, mouth_r).loops.remove(0);
+        let mut p = Program::default();
+        p.push("outline", Op::Sketch { name: "outline".into(), profile: outline.clone() });
+        p.push(
+            "walls",
+            Op::WallFaces {
+                lower: outline.clone(),
+                upper: outline.clone(),
+                z0: 0.0,
+                z1: 5.0,
+                outward: true,
+            },
+        );
+        p.push(
+            "top",
+            Op::Cap { z: 5.0, up: true, outer: (outline.clone(), true), holes: vec![] },
+        );
+        p.push(
+            "hole",
+            Op::Hole {
+                at: crate::kernel::math::Vec2::new(10.0, 10.0),
+                from_z: 0.0,
+                profile,
+            },
+        );
+        p.push(
+            "bottom (with mouth)",
+            Op::Cap {
+                z: 0.0,
+                up: false,
+                outer: (outline, false),
+                holes: vec![(mouth, false)],
+            },
+        );
+        p
+    }
+
+    #[test]
+    fn plain_hole_in_a_block_is_manifold() {
+        let p = box_with_hole_program(HoleProfile::Plain { radius: 2.0, depth: 3.0 });
+        let s = run_all(&p).expect("run");
+        s.validate().expect("block with plain hole is manifold");
+    }
+
+    #[test]
+    fn counterbore_hole_in_a_block_is_manifold() {
+        // Magnet+screw style: wide shallow magnet over narrower deeper screw.
+        let p = box_with_hole_program(HoleProfile::Counterbore {
+            bore_r: 1.5,
+            bore_d: 4.0,
+            head_r: 3.25,
+            head_d: 2.4,
+        });
+        let s = run_all(&p).expect("run");
+        s.validate().expect("block with counterbore is manifold");
+    }
+
+    #[test]
+    fn counterbore_produces_more_faces_than_plain() {
+        // The shoulder where the magnet step meets the screw bore is an extra
+        // annular face, so a counterbore has more faces than a plain bore.
+        let plain = run_all(&box_with_hole_program(HoleProfile::Plain {
+            radius: 1.5,
+            depth: 4.0,
+        }))
+        .unwrap()
+        .faces
+        .len();
+        let cbore = run_all(&box_with_hole_program(HoleProfile::Counterbore {
+            bore_r: 1.5,
+            bore_d: 4.0,
+            head_r: 3.25,
+            head_d: 2.4,
+        }))
+        .unwrap()
+        .faces
+        .len();
+        assert!(cbore > plain, "counterbore ({cbore}) should exceed plain ({plain})");
+    }
+
+    #[test]
+    fn countersink_returns_clean_error() {
+        let mut p = Program::default();
+        p.push("outline", Op::Sketch { name: "outline".into(), profile: rect(0.0, 0.0, 20.0, 20.0) });
+        p.push(
+            "block",
+            Op::Extrude {
+                sketch: "outline".into(),
+                from: PlaneRef::Z { z: 0.0, up: true },
+                to: PlaneRef::Z { z: 5.0, up: true },
+            },
+        );
+        p.push(
+            "cs",
+            Op::Hole {
+                at: crate::kernel::math::Vec2::new(10.0, 10.0),
+                from_z: 0.0,
+                profile: HoleProfile::Countersink {
+                    bore_r: 1.5,
+                    bore_d: 4.0,
+                    head_r: 3.0,
+                    head_angle_deg: 90.0,
+                },
+            },
+        );
+        let err = run_all(&p).unwrap_err();
+        assert!(err.contains("Countersink not yet implemented"), "got: {err}");
     }
 }

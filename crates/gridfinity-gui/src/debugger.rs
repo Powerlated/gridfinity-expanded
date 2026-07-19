@@ -286,6 +286,7 @@ fn kind_color(kind: &str) -> Color32 {
         "extrude" => Color32::from_rgb(0x4e, 0x79, 0xa7),
         "cut" => Color32::from_rgb(0xe1, 0x57, 0x59),
         "loft" => Color32::from_rgb(0x4e, 0x79, 0xa7),
+        "hole" => Color32::from_rgb(0xe1, 0x57, 0x59),
         "face" => Color32::from_rgb(0x76, 0xb7, 0xb2),
         "wall" => Color32::from_rgb(0x4e, 0x79, 0xa7),
         "cap" => Color32::from_rgb(0x76, 0xb7, 0xb2),
