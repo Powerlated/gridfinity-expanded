@@ -370,10 +370,10 @@ pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, Str
     let mut b = Builder::new();
 
     for fi in 0..solid.faces.len() {
-        let outer = rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, solid.outer_edges(fi), &mut b)?;
+        let outer = rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, solid.outer_edges(fi), &edge_faces, &mut b)?;
         let mut inners = Vec::with_capacity(solid.n_inners(fi));
         for lp in solid.inner_loops(fi) {
-            inners.push(rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, lp, &mut b)?);
+            inners.push(rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, lp, &edge_faces, &mut b)?);
         }
         let (surface, sense) = (solid.faces[fi].surface, solid.faces[fi].sense);
         b.face(surface, sense, outer, inners);
@@ -700,10 +700,10 @@ fn rebuild_loop(
     want: &HashMap<EdgeId, f32>,
     fi: usize,
     lp: &[(EdgeId, bool)],
+    ef: &[Vec<usize>],
     b: &mut Builder,
 ) -> Result<Loop, String> {
     let face_surface = solid.faces[fi].surface;
-    let ef = solid.edge_faces();
     // On the runout face the corner vertex splits in two: the edge it shares
     // with face a ends at the extended face-a tangent, the one it shares with
     // face b at the face-b tangent. `move_vertex` cannot choose between them

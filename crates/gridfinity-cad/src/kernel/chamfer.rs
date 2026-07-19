@@ -262,10 +262,10 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
     // rebuild_loop but simpler (no runout splice).
     let mut b = Builder::new();
     for fi in 0..solid.faces.len() {
-        let outer = rebuild_loop(solid, &cm, &vinfo, &want, fi, solid.outer_edges(fi), &mut b)?;
+        let outer = rebuild_loop(solid, &cm, &vinfo, &want, fi, solid.outer_edges(fi), &edge_faces, &mut b)?;
         let mut inners = Vec::with_capacity(solid.n_inners(fi));
         for lp in solid.inner_loops(fi) {
-            inners.push(rebuild_loop(solid, &cm, &vinfo, &want, fi, lp, &mut b)?);
+            inners.push(rebuild_loop(solid, &cm, &vinfo, &want, fi, lp, &edge_faces, &mut b)?);
         }
         let (surface, sense) = (solid.faces[fi].surface, solid.faces[fi].sense);
         b.face(surface, sense, outer, inners);
@@ -372,9 +372,9 @@ fn rebuild_loop(
     want: &HashMap<EdgeId, (f32, f32)>,
     fi: usize,
     lp: &[(EdgeId, bool)],
+    ef: &[Vec<usize>],
     b: &mut Builder,
 ) -> Result<Loop, String> {
-    let ef = solid.edge_faces();
     let mut out: Vec<(EdgeId, bool)> = Vec::with_capacity(lp.len());
     for &(e, fwd) in lp {
         let ed = solid.edges[e];
