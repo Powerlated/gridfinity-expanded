@@ -1031,7 +1031,7 @@ fn split_peg_profile(
 
 /// Magnet/screw pockets for one cell, drilled up from z = 0. Returns pocket rim
 /// rings (holes in the peg's bottom cap).
-fn cell_fasteners(b: &mut Builder, p: &Params, c: GridCell) -> Vec<RingEdges> {
+fn cell_fasteners(b: &mut Builder, p: &Params, c: GridCell) -> Vec<Vec<Seg>> {
     let mut out = Vec::new();
     if !p.magnet_holes && !p.screw_holes {
         return out;
@@ -1062,7 +1062,7 @@ fn cell_fasteners(b: &mut Builder, p: &Params, c: GridCell) -> Vec<RingEdges> {
 /// shoulder where one bore ends and the next continues. The mouth at z = 0 is
 /// declared open because the peg's bottom cap covers it, and the returned ring
 /// is that mouth, for the caller to use as a hole of the cap.
-fn drill(b: &mut Builder, x: f32, y: f32, steps: &[(f32, f32)]) -> RingEdges {
+fn drill(b: &mut Builder, x: f32, y: f32, steps: &[(f32, f32)]) -> Vec<Seg> {
     let profile = |r: f32| ccw_segs(&Sketch::circle(x, y, r));
     let ops: Vec<(Op, Slab)> = steps
         .iter()
@@ -1070,7 +1070,7 @@ fn drill(b: &mut Builder, x: f32, y: f32, steps: &[(f32, f32)]) -> RingEdges {
         .collect();
     emit_slabs(b, &ops, &SlabOpts { cavity: true, open_at: vec![0.0] })
         .expect("fastener pocket slab stack");
-    ring(b, &profile(steps[0].0), 0.0)
+    profile(steps[0].0)
 }
 
 // ── Cavity plan (port of the reference `planCavity`) ─────────────────────────
@@ -1425,7 +1425,7 @@ fn build_piece(
     }
 
     // 3) Pegs per cell + their bottom caps with fastener pockets.
-    let mut peg_tops: Vec<(GridCell, RingEdges, Vec<Seg>)> = Vec::new();
+    let mut peg_tops: Vec<(GridCell, Vec<Seg>)> = Vec::new();
     for &c in cells {
         let s_bot = split_peg_profile(peg_profile(c, PEG_W_BOTTOM, PEG_R_BOTTOM), c, &peg_splits);
         let s_mid = split_peg_profile(peg_profile(c, PEG_W_MID, PEG_R_MID), c, &peg_splits);
@@ -1438,9 +1438,10 @@ fn build_piece(
         wall_between(b, &s_mid, &s_mid, &r1, &r2, PEG_Z1, PEG_Z2, true);
         wall_between(b, &s_mid, &s_top, &r2, &r3, PEG_Z2, PEG_HEIGHT, true);
         let pockets = cell_fasteners(b, p, c);
-        let pocket_loops: Vec<Loop> = pockets.iter().map(|h| loop_of(h, false)).collect();
+        let pocket_loops: Vec<Loop> =
+            pockets.iter().map(|h| loop_of(&ring(b, h, 0.0), false)).collect();
         planar(b, 0.0, false, loop_of(&r0, false), pocket_loops);
-        peg_tops.push((c, r3, s_top));
+        peg_tops.push((c, s_top));
     }
 
     // 4) Outer wall from the composite profile. The bottom ring's shared
@@ -1448,8 +1449,8 @@ fn build_piece(
     //    wall in one span; open/seam pieces build only the floor band here
     //    (PEG_HEIGHT → floor_z) — above the floor the wall exists only over
     //    the sectors left between profile and cavity, built in step 7.
-    let mut bridge_rings: Vec<(RingEdges, Vec<bool>)> = Vec::new();
-    let mut full_hi_rings: Vec<(Vec<Seg>, RingEdges)> = Vec::new();
+    let mut bridge_rings: Vec<(Vec<Seg>, Vec<bool>)> = Vec::new();
+    let mut full_hi_rings: Vec<Vec<Seg>> = Vec::new();
     for pieces in &o.loops {
         let segs: Vec<Seg> = pieces.iter().map(|p| p.seg).collect();
         let shared_flags: Vec<bool> = pieces.iter().map(|p| p.shared).collect();
@@ -1464,16 +1465,17 @@ fn build_piece(
         } else {
             let hi = ring(b, &segs, total_h);
             wall_between(b, &segs, &segs, &lo, &hi, PEG_HEIGHT, total_h, true);
-            full_hi_rings.push((segs, hi));
+            full_hi_rings.push(segs.clone());
         }
-        bridge_rings.push((lo, shared_flags));
+        bridge_rings.push((segs, shared_flags));
     }
 
     // 5) Bridge underside faces at PEG_HEIGHT: stitch the free (non-welded)
     //    peg-top segments (forward) with the free outer-profile pieces
     //    (reversed) into loops.
     let mut free: Vec<DirEdge> = Vec::new();
-    for (c, r3, s_top) in &peg_tops {
+    for (c, s_top) in &peg_tops {
+        let r3 = ring(b, s_top, PEG_HEIGHT);
         for (k, &(e, d)) in r3.edges.iter().enumerate() {
             if peg_seg_free(&s_top[k], *c, &shared) {
                 let k1 = (k + 1) % r3.verts.len();
@@ -1481,7 +1483,8 @@ fn build_piece(
             }
         }
     }
-    for (lo, shared_flags) in &bridge_rings {
+    for (segs, shared_flags) in &bridge_rings {
+        let lo = ring(b, segs, PEG_HEIGHT);
         for (k, &(e, d)) in lo.edges.iter().enumerate() {
             if !shared_flags[k] {
                 let k1 = (k + 1) % lo.verts.len();
@@ -1497,8 +1500,8 @@ fn build_piece(
     //    coincident open/seam runs) build only their floor cap and island
     //    towers here — their wall faces belong to the sector loops of step 7.
     let mut blends: Vec<(EdgeId, f32)> = Vec::new();
-    let mut rim_holes: Vec<(Vec<Seg>, Loop)> = Vec::new();
-    let mut island_tops: Vec<(Vec<Seg>, RingEdges)> = Vec::new();
+    let mut rim_holes: Vec<Vec<Seg>> = Vec::new();
+    let mut island_tops: Vec<Vec<Seg>> = Vec::new();
     let mut touched: Vec<CavityLoop> = Vec::new();
 
     for (cl, island_shapes, loop_fr, banded) in planned {
@@ -1510,10 +1513,7 @@ fn build_piece(
                 blends.extend(bw);
                 // Rim hole from the stack's own top band, so its edges pair
                 // with the wall tops the stack just emitted.
-                for lp in rim {
-                    let top_ring = ring(b, &lp, total_h);
-                    rim_holes.push((lp, loop_of(&top_ring, true)));
-                }
+                rim_holes.extend(rim);
                 continue;
             }
             match slope {
@@ -1532,8 +1532,7 @@ fn build_piece(
                 }
             }
             // Rim hole for this cavity's opening.
-            let top_ring = ring(b, &cl.segs, total_h);
-            rim_holes.push((cl.segs.clone(), loop_of(&top_ring, true)));
+            rim_holes.push(cl.segs.clone());
         } else {
             let r_lo = ring(b, &cl.segs, floor_z);
             let mut floor_holes: Vec<Loop> = Vec::new();
@@ -1541,7 +1540,7 @@ fn build_piece(
                 let i_lo = ring(b, &isl.segs, floor_z);
                 let i_hi = ring(b, &isl.segs, total_h);
                 wall_between(b, &isl.segs, &isl.segs, &i_lo, &i_hi, floor_z, total_h, true);
-                island_tops.push((isl.segs.clone(), i_hi));
+                island_tops.push(isl.segs.clone());
                 // Reversed: the tower wall traverses its bottom ring forward.
                 floor_holes.push(loop_of(&i_lo, false));
             }
@@ -1555,7 +1554,7 @@ fn build_piece(
 
     // 7) Faces at total_h. On open/seam pieces the wall exists only over the
     //    sectors left between outer profile and cavities.
-    let mut top_walls: Vec<(Vec<Seg>, RingEdges)> = full_hi_rings;
+    let mut top_walls: Vec<Vec<Seg>> = full_hi_rings;
     if openish {
         top_walls = build_wall_sectors(b, &o, &touched, floor_z, total_h);
     }
@@ -1566,21 +1565,22 @@ fn build_piece(
     // belongs to the island's cap, not the rim.
     let mut cap_outers: Vec<(f32, Vec<Seg>, Loop, Vec<Loop>)> = Vec::new();
     let mut cap_holes: Vec<(Vec2, Loop)> = Vec::new();
-    for (segs, hi) in top_walls {
+    for segs in top_walls {
         let a = loop_area(&segs);
-        let lp = loop_of(&hi, true);
+        let lp = loop_of(&ring(b, &segs, total_h), true);
         if a > 0.0 {
             cap_outers.push((a, segs, lp, Vec::new()));
         } else {
             cap_holes.push((segs[0].start(), lp));
         }
     }
-    for (segs, hi) in island_tops {
+    for segs in island_tops {
         let a = loop_area(&segs).abs();
-        let lp = loop_of(&hi, true);
+        let lp = loop_of(&ring(b, &segs, total_h), true);
         cap_outers.push((a, segs, lp, Vec::new()));
     }
-    for (segs, lp) in rim_holes {
+    for segs in rim_holes {
+        let lp = loop_of(&ring(b, &segs, total_h), true);
         cap_holes.push((segs[0].start(), lp));
     }
     for (pt, lp) in cap_holes {
@@ -1614,7 +1614,7 @@ fn build_wall_sectors(
     touched: &[CavityLoop],
     floor_z: f32,
     total_h: f32,
-) -> Vec<(Vec<Seg>, RingEdges)> {
+) -> Vec<Vec<Seg>> {
     let mut frags: Vec<Vec<Seg>> = Vec::new();
     for (li, pieces) in o.loops.iter().enumerate() {
         let cons = &o.consumed[li];
@@ -1665,12 +1665,12 @@ fn build_wall_sectors(
     }
 
     let sectors = chain_fragments(frags);
-    let mut sector_rings: Vec<(Vec<Seg>, RingEdges)> = Vec::new();
+    let mut sector_rings: Vec<Vec<Seg>> = Vec::new();
     for sl in &sectors {
         let lo = ring(b, sl, floor_z);
         let hi = ring(b, sl, total_h);
         wall_between(b, sl, sl, &lo, &hi, floor_z, total_h, true);
-        sector_rings.push((sl.clone(), hi));
+        sector_rings.push(sl.clone());
     }
     sector_rings
 }
@@ -1744,7 +1744,7 @@ fn build_cavity_flat(
     islands: &[Island],
     floor_z: f32,
     total_h: f32,
-) -> (Vec<EdgeId>, Vec<(Vec<Seg>, RingEdges)>) {
+) -> (Vec<EdgeId>, Vec<Vec<Seg>>) {
     // The cavity is a void: the compartment profile, minus each island tower
     // over its own height. Partial-height islands need no separate capping
     // code — the band machinery caps them where their slab ends. The rim is
@@ -1762,14 +1762,14 @@ fn build_cavity_flat(
     // Re-derive what callers need. `seg_edge`/`ring` are interned, so these
     // are the very edges the stack just emitted.
     let mut fwe: Vec<EdgeId> = shape.iter().map(|s| seg_edge(b, s, floor_z).0).collect();
-    let mut tops: Vec<(Vec<Seg>, RingEdges)> = Vec::new();
+    let mut tops: Vec<Vec<Seg>> = Vec::new();
     for isl in islands {
         if isl.top.is_none() {
             fwe.extend(isl.segs.iter().map(|s| seg_edge(b, s, floor_z).0));
             // The stack emitted this island as a CW *hole* of the void, so
             // hand step 7 a ring wound that way — `loop_of(.., true)` there
             // must oppose the wall top the stack just built.
-            tops.push((isl.segs.clone(), ring(b, &reverse_loop(&isl.segs), total_h)));
+            tops.push(reverse_loop(&isl.segs));
         }
     }
     (fwe, tops)
@@ -1799,7 +1799,7 @@ fn build_cavity_banded(
     islands: &[Island],
     floor_z: f32,
     total_h: f32,
-) -> (Vec<(EdgeId, f32)>, Vec<(Vec<Seg>, RingEdges)>, Vec<Vec<Seg>>) {
+) -> (Vec<(EdgeId, f32)>, Vec<Vec<Seg>>, Vec<Vec<Seg>>) {
     const TRANSITION_R: f32 = 4.0;
 
     let mut ops = vec![(Op::Union, Slab::new(vec![bd.outline_b.clone()], floor_z, total_h))];
@@ -1815,10 +1815,10 @@ fn build_cavity_banded(
     let bands = emit_slabs(b, &ops, &SlabOpts { cavity: true, open_at: vec![total_h] })
         .expect("banded cavity slab stack");
 
-    let mut tops: Vec<(Vec<Seg>, RingEdges)> = Vec::new();
+    let mut tops: Vec<Vec<Seg>> = Vec::new();
     for isl in islands {
         if isl.top.is_none() {
-            tops.push((isl.segs.clone(), ring(b, &reverse_loop(&isl.segs), total_h)));
+            tops.push(reverse_loop(&isl.segs));
         }
     }
 
@@ -1849,7 +1849,7 @@ fn build_cavity_sloped(
     floor_z: f32,
     total_h: f32,
     slope: BinSlope,
-) -> Vec<(Vec<Seg>, RingEdges)> {
+) -> Vec<Vec<Seg>> {
     let (ux, uy) = uphill_unit(slope.dir);
     let (min_a, span) = slope_span(bin_cells, ux, uy);
     let m = slope.angle_deg.to_radians().tan().clamp(0.0, 3.0);
@@ -1862,7 +1862,7 @@ fn build_cavity_sloped(
     let top = ring(b, shape, total_h);
     wall_between(b, shape, shape, &bottom, &top, floor_z, total_h, false);
 
-    let mut tops: Vec<(Vec<Seg>, RingEdges)> = Vec::new();
+    let mut tops: Vec<Vec<Seg>> = Vec::new();
     let mut floor_holes: Vec<Loop> = Vec::new();
     for isl in islands {
         // A partial top submerged under the tilted floor builds full height.
@@ -1878,7 +1878,7 @@ fn build_cavity_sloped(
         if t < total_h {
             planar(b, t, true, loop_of(&i_hi, true), Vec::new());
         } else {
-            tops.push((isl.segs.clone(), i_hi));
+            tops.push(isl.segs.clone());
         }
         floor_holes.push(loop_of(&i_lo, false));
     }
