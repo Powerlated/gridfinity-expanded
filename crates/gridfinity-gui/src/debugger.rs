@@ -7,9 +7,12 @@
 //! manifold (by design — that's what makes the debugger useful).
 
 use eframe::egui::{self, Color32, RichText, Sense};
-use gridfinity_cad::kernel::program::{Program, run};
+use glam::Vec3;
+use gridfinity_cad::kernel::program::{Op, Program, run};
+use gridfinity_cad::kernel::sketch::Seg;
 use gridfinity_cad::kernel::topo::Solid;
 use gridfinity_cad::{Params, gridfinity};
+use std::collections::HashMap;
 
 /// The live status of the currently-displayed subset.
 enum Status {
@@ -141,6 +144,47 @@ impl Debugger {
                 None
             }
         }
+    }
+
+    /// The enabled `Op::Sketch` profiles, each paired with the plane it is used
+    /// at, for the wireframe overlay.
+    ///
+    /// A sketch carries no plane of its own — it is a bare 2D profile, and only
+    /// the op that *consumes* it says where it lives. So this resolves the plane
+    /// from the consumer, and deliberately does so whether or not that consumer
+    /// is itself enabled: toggling a loft off should not leave its sketches with
+    /// nowhere to draw. A sketch no op references falls back to z=0.
+    pub fn sketch_planes(&self) -> Vec<(&[Seg], (Vec3, Vec3))> {
+        let mut planes: HashMap<&str, (Vec3, Vec3)> = HashMap::new();
+        for step in &self.program.steps {
+            match &step.op {
+                Op::Loft { profiles, .. } => {
+                    for (name, z) in profiles {
+                        planes.entry(name).or_insert((Vec3::new(0.0, 0.0, *z), Vec3::Z));
+                    }
+                }
+                Op::Extrude { sketch, from, .. } | Op::ExtrudeCut { sketch, from, .. } => {
+                    planes.entry(sketch).or_insert(from.resolve(&self.program));
+                }
+                _ => {}
+            }
+        }
+        self.program
+            .steps
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.enabled.get(*i).copied().unwrap_or(true))
+            .filter_map(|(_, step)| match &step.op {
+                Op::Sketch { name, profile } => {
+                    let plane = planes
+                        .get(name.as_str())
+                        .copied()
+                        .unwrap_or((Vec3::ZERO, Vec3::Z));
+                    Some((profile.as_slice(), plane))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Render the right-hand panel. Returns true if anything changed that

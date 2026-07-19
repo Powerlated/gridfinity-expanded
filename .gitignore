@@ -1,2 +1,6 @@
 /target
 /.idea
+
+# Claude Code session transcripts
+session-*.md
+[0-9]*-commit.txt

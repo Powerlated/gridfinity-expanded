@@ -8,6 +8,7 @@
 mod debugger;
 mod editor;
 mod viewport;
+mod wireframe;
 
 use eframe::egui;
 use debugger::Debugger;
@@ -47,6 +48,9 @@ struct App {
     gl: Arc<eframe::glow::Context>,
     renderer: Arc<Mutex<Renderer>>,
     camera: Camera,
+    /// Type tags for the debugger overlay, rebuilt with the geometry and
+    /// projected to screen space each frame.
+    labels: Vec<wireframe::Label>,
     dirty: bool,
     /// Program cache is stale (params changed) — refresh before next regenerate.
     program_dirty: bool,
@@ -66,6 +70,7 @@ impl App {
             gl,
             renderer,
             camera: Camera::default(),
+            labels: Vec::new(),
             dirty: true,
             program_dirty: true,
             tri_count: 0,
@@ -95,7 +100,25 @@ impl App {
             self.camera.frame(min, max);
         }
         self.tri_count = tess.tris.len();
-        self.renderer.lock().unwrap().upload(&self.gl, &tess.render_buffer());
+
+        // Build the debugger's wireframe here, while `solid` is still alive —
+        // it is dropped at the end of this function.
+        let mut wf = wireframe::Wireframe::default();
+        if self.debugger.is_shown() {
+            // Sketches first: labels are thinned in insertion order, and there
+            // are far fewer sketch tags than B-rep ones, so letting the B-rep
+            // edges go first would starve them of screen cells entirely.
+            for (profile, plane) in self.debugger.sketch_planes() {
+                wf.add_sketch(profile, plane, PREVIEW_RES, wireframe::SKETCH_BLACK);
+            }
+            wf.add_brep_edges(&solid, PREVIEW_RES, wireframe::EDGE_ORANGE);
+        }
+        self.labels = wf.labels;
+
+        let mut r = self.renderer.lock().unwrap();
+        r.upload(&self.gl, &tess.render_buffer());
+        r.upload_lines(&self.gl, &wf.lines);
+        drop(r);
         self.dirty = false;
     }
 
@@ -381,5 +404,44 @@ impl App {
         let cam = self.camera;
         let renderer = self.renderer.clone();
         ui.painter().add(viewport::callback(rect, renderer, cam));
+        self.paint_labels(ui, rect);
+    }
+
+    /// Paint the overlay's type tags as 2D text tracking their 3D anchors.
+    ///
+    /// Text goes through egui rather than GL: it rides on top of the paint
+    /// callback, so it needs no font atlas of its own and stays crisp.
+    ///
+    /// A default bin has hundreds of edges, so labels are thinned by claiming a
+    /// coarse screen-space cell per label and dropping any that land in a taken
+    /// cell. Without that the tags overlap into an unreadable smear at anything
+    /// but extreme zoom; with it, density self-adjusts as you zoom in.
+    fn paint_labels(&self, ui: &egui::Ui, rect: egui::Rect) {
+        if self.labels.is_empty() {
+            return;
+        }
+        const CELL: f32 = 34.0;
+        let painter = ui.painter_at(rect);
+        let font = egui::FontId::monospace(9.0);
+        let mut taken: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+        for label in &self.labels {
+            let Some(p) = self.camera.project(label.at, rect) else {
+                continue;
+            };
+            if !rect.contains(p) {
+                continue;
+            }
+            let cell = ((p.x / CELL) as i32, (p.y / CELL) as i32);
+            if !taken.insert(cell) {
+                continue;
+            }
+            let [r, g, b] = label.color;
+            let color = egui::Color32::from_rgb(
+                (r * 255.0) as u8,
+                (g * 255.0) as u8,
+                (b * 255.0) as u8,
+            );
+            painter.text(p, egui::Align2::CENTER_CENTER, label.text, font.clone(), color);
+        }
     }
 }
