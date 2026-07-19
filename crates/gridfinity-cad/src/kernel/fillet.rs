@@ -62,6 +62,156 @@ struct Blend {
     fwd_a: bool,
 }
 
+/// Blend as many of `blends` as this blender can actually close, instead of
+/// refusing the lot.
+///
+/// [`blend_edges`] is all-or-nothing: one corner it cannot resolve loses the
+/// fillet on every edge in the call, and the model layer's only recourse is to
+/// give up on that region entirely. There are real configurations — a divider
+/// crossing a compartment, a runout onto a non-planar face — where that costs a
+/// part its whole floor fillet over a couple of corners. A partial fillet with
+/// some sharp corners left in is worse-looking than a complete one but far
+/// better than none, so this degrades instead of failing.
+///
+/// Two tiers, both driven by *trying* the blender rather than predicting it:
+///
+/// 1. **Per chain.** Edges are grouped into connected chains (a compartment
+///    boundary, an island). Chains are added one at a time and kept only while
+///    the result still blends, so one bad compartment cannot cost the others.
+/// 2. **Within a chain.** A chain that fails whole is bisected, depth-limited,
+///    and each half retried. A partial run simply terminates in runouts, which
+///    the blender already supports, so the salvaged part is ordinary geometry.
+///
+/// Returns the blended solid and the edges it had to leave sharp.
+///
+/// **Errs only when the input is at fault** — a blended edge that is missing or
+/// not shared by exactly two faces means `solid` was already non-manifold,
+/// which no amount of dropping blends can fix. Degrading there would swap a
+/// loud error for a silently unsound part, so that case still propagates
+/// exactly as [`blend_edges`] reports it. Everything the blender merely cannot
+/// *close* degrades instead.
+///
+/// Cost is one `blend_edges` attempt per chain when things go well, and up to
+/// `2^MAX_SPLIT` more per failing chain. Nothing is attempted at all when the
+/// whole set succeeds first time, which is the common path.
+pub fn blend_best_effort(
+    solid: &Solid,
+    blends: &[(EdgeId, f32)],
+) -> Result<(Solid, Vec<EdgeId>), String> {
+    /// Bisection depth. 3 → a chain is probed at worst in eighths; beyond that
+    /// the salvaged runs are too short to be worth the rebuilds.
+    const MAX_SPLIT: u32 = 3;
+
+    if blends.is_empty() {
+        return Ok((solid.clone(), Vec::new()));
+    }
+    // The input-side preconditions, checked up front so an unsound solid is
+    // reported rather than quietly blended around.
+    let edge_faces = solid.edge_faces();
+    for &(e, _) in blends {
+        if e >= solid.edges.len() {
+            return Err(format!("blend: edge {e} out of range"));
+        }
+        if edge_faces[e].len() != 2 {
+            return Err(format!("blend: edge {e} has {} faces (want 2)", edge_faces[e].len()));
+        }
+    }
+    if let Ok(s) = blend_edges(solid, blends) {
+        return Ok((s, Vec::new()));
+    }
+
+    let mut kept: Vec<(EdgeId, f32)> = Vec::new();
+    for chain in chains(solid, blends) {
+        let salvaged = salvage(solid, &kept, &chain, MAX_SPLIT);
+        kept.extend(salvaged);
+    }
+
+    let dropped: Vec<EdgeId> = blends
+        .iter()
+        .map(|&(e, _)| e)
+        .filter(|e| !kept.iter().any(|&(k, _)| k == *e))
+        .collect();
+
+    match blend_edges(solid, &kept) {
+        Ok(s) => Ok((s, dropped)),
+        // Only reachable if a set that blended during probing stops doing so,
+        // which would be a blender inconsistency; fall back to no fillet at all
+        // rather than fail a build over a fillet.
+        Err(_) => Ok((solid.clone(), blends.iter().map(|&(e, _)| e).collect())),
+    }
+}
+
+/// The longest prefix-closed subset of `run` that still blends on top of
+/// `base`, found by bisection. Input order is preserved so a half is a
+/// *contiguous* run of the chain, whose ends become runouts.
+fn salvage(
+    solid: &Solid,
+    base: &[(EdgeId, f32)],
+    run: &[(EdgeId, f32)],
+    depth: u32,
+) -> Vec<(EdgeId, f32)> {
+    if run.is_empty() {
+        return Vec::new();
+    }
+    let mut trial = base.to_vec();
+    trial.extend_from_slice(run);
+    if blend_edges(solid, &trial).is_ok() {
+        return run.to_vec();
+    }
+    if depth == 0 || run.len() < 2 {
+        return Vec::new();
+    }
+    let mid = run.len() / 2;
+    let head = salvage(solid, base, &run[..mid], depth - 1);
+    let mut base2 = base.to_vec();
+    base2.extend_from_slice(&head);
+    let tail = salvage(solid, &base2, &run[mid..], depth - 1);
+    let mut out = head;
+    out.extend(tail);
+    out
+}
+
+/// Group blended edges into connected chains by shared vertices, preserving
+/// input order within each chain (the model emits a loop's edges in traversal
+/// order, and [`salvage`]'s bisection relies on that to cut contiguous runs).
+fn chains(solid: &Solid, blends: &[(EdgeId, f32)]) -> Vec<Vec<(EdgeId, f32)>> {
+    let mut parent: Vec<usize> = (0..blends.len()).collect();
+    fn find(parent: &mut Vec<usize>, i: usize) -> usize {
+        if parent[i] != i {
+            let r = find(parent, parent[i]);
+            parent[i] = r;
+        }
+        parent[i]
+    }
+    let mut by_vertex: HashMap<usize, usize> = HashMap::new();
+    for (i, &(e, _)) in blends.iter().enumerate() {
+        if e >= solid.edges.len() {
+            continue;
+        }
+        let ed = solid.edges[e];
+        for v in [ed.v0, ed.v1] {
+            match by_vertex.get(&v) {
+                Some(&j) => {
+                    let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+                    parent[a] = b;
+                }
+                None => {
+                    by_vertex.insert(v, i);
+                }
+            }
+        }
+    }
+    let mut groups: Vec<(usize, Vec<(EdgeId, f32)>)> = Vec::new();
+    for (i, &b) in blends.iter().enumerate() {
+        let root = find(&mut parent, i);
+        match groups.iter_mut().find(|(r, _)| *r == root) {
+            Some((_, v)) => v.push(b),
+            None => groups.push((root, vec![b])),
+        }
+    }
+    groups.into_iter().map(|(_, v)| v).collect()
+}
+
 /// Blend a set of edges of `solid` by the given radii.
 pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, String> {
     let want: HashMap<EdgeId, f32> = blends.iter().copied().collect();
@@ -675,6 +825,49 @@ mod tests {
 
     fn approx(a: Vec3, b: Vec3) -> bool {
         (a - b).length() < 1e-4
+    }
+
+    /// A box whose top rim blends cleanly. `blend_best_effort` must be
+    /// *transparent* on the happy path: same result as `blend_edges`, nothing
+    /// reported dropped, and no extra probing.
+    #[test]
+    fn best_effort_matches_blend_edges_when_nothing_fails() {
+        use crate::kernel::build::extrude;
+        use crate::kernel::sketch::Sketch;
+
+        let sk = Sketch::rounded_rect(0.0, 0.0, 20.0, 20.0, 4.0);
+        let solid = extrude(&sk, 0.0, 5.0);
+        // Every edge of the top cap's loop.
+        let top: Vec<(EdgeId, f32)> = (0..solid.edges.len())
+            .filter(|&e| {
+                let ed = solid.edges[e];
+                let (a, b) = (solid.vertex(ed.v0), solid.vertex(ed.v1));
+                (a.z - 5.0).abs() < 1e-5 && (b.z - 5.0).abs() < 1e-5
+            })
+            .map(|e| (e, 1.0))
+            .collect();
+        assert!(!top.is_empty(), "expected a top rim to blend");
+
+        let direct = blend_edges(&solid, &top).expect("rim blends");
+        let (best, dropped) = blend_best_effort(&solid, &top).expect("sound input");
+        assert!(dropped.is_empty(), "nothing should be dropped, got {dropped:?}");
+        assert_eq!(best.faces.len(), direct.faces.len());
+        best.validate().expect("best-effort result is manifold");
+    }
+
+    /// Degrading must never hide an unsound *input*. An edge that is not shared
+    /// by exactly two faces means the solid was already non-manifold, and no
+    /// choice of blend subset fixes that — so it still errs rather than
+    /// returning a quietly broken part.
+    #[test]
+    fn best_effort_still_reports_a_non_manifold_input() {
+        use crate::kernel::build::extrude;
+        use crate::kernel::sketch::Sketch;
+
+        let solid = extrude(&Sketch::rectangle(0.0, 0.0, 10.0, 10.0), 0.0, 5.0);
+        let err = blend_best_effort(&solid, &[(solid.edges.len() + 7, 1.0)])
+            .expect_err("out-of-range edge must be reported");
+        assert!(err.contains("out of range"), "unexpected error: {err}");
     }
 
     /// Pure rolling-ball math: a 90° concave corner (floor + wall) must put the

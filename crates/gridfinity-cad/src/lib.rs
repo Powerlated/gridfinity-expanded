@@ -955,7 +955,6 @@ mod tests {
     /// are left sharp deliberately, which reverts them to the old unfilleted
     /// result rather than failing the build.
     #[test]
-    #[ignore = "blend_edges cannot close the corner where a compartment-splitting divider meets the wall"]
     fn freeform_crossing_divider_is_filleted() {
         let p = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {
@@ -964,6 +963,9 @@ mod tests {
             ..gridfinity::Params::default()
         };
         let solid = gridfinity::build(&p);
+        solid.validate().expect("crossing divider topology valid");
+        assert!(crate::audit(&solid).is_ok(), "B-rep must be sound:\n{}", crate::audit(&solid));
+        assert_watertight(&tessellate(&solid, 6).to_mesh());
         let (n, _) = blends_near(&solid, (0.0, 0.0), (83.5, 83.5), 1e4);
         assert!(n > 0, "a crossing divider should still leave the floor filleted");
     }

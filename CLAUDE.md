@@ -48,7 +48,19 @@ cargo test -p gridfinity-cad     # engine unit tests (geometry correctness lives
 cargo test -p gridfinity-cad <name> -- --nocapture   # run one test, e.g. default_bin_is_valid_watertight_and_sized
 cargo run  -p gridfinity-gui     # launch the app (needs a display + OpenGL/glow)
 cargo build --release
+
+# The geometry fuzzer (tests/fuzz.rs): random Params -> try_build -> validate -> audit
+# -> tessellation_leaks, with failures grouped by signature and each shrunk to a
+# paste-ready `Params` literal. Both profiles are #[ignore]d — they are tools, not gates.
+FUZZ_CASES=2000 cargo test -p gridfinity-cad --test fuzz -- --ignored --nocapture
+FUZZ_SEED=7 FUZZ_CASES=500 cargo test -p gridfinity-cad --test fuzz -- --ignored --nocapture
 ```
+
+`fuzz_inner_walls` covers free-form inner walls (the divider/fillet work); `fuzz_params_broad`
+covers shape, height, thicknesses, holes, dividers, slope and mode. Baseline at the default seed
+is **52/150 failing, 6 distinct defects** — drop the `#[ignore]` and make it a gate once that
+reaches zero. A run is deterministic per seed, but adding a generator arm reshuffles the stream,
+so quote the *case literal* in a bug report, never "seed 7 case 412".
 
 The GUI is `windows_subsystem="windows"` in release, so it opens a window and blocks. To smoke-test
 that it starts without panicking (shader compile / GL context / first mesh upload all happen at
@@ -120,6 +132,14 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   solid is rebuilt through a fresh `Builder` and `validate()`d. Gotcha: when re-emitting an arc
   reversed, the angle range must be swapped too — `Builder::arc` trusts that its first vertex sits
   at the first angle.
+  `blend_edges` is all-or-nothing, so `blend_best_effort` wraps it for callers that would rather
+  have an ugly fillet than none: it groups the edges into connected chains, adds them one at a
+  time while the result still blends, and bisects a failing chain (depth 3) to salvage contiguous
+  runs — a dropped run just leaves runouts, which are ordinary geometry. It returns the edges left
+  sharp, and **errs only when the input is at fault** (a blended edge missing or not shared by
+  exactly two faces means the solid was already non-manifold, and degrading there would swap a
+  loud error for a silently broken part). `program::run` applies blends through it, which is what
+  lets a compartment-splitting divider keep the fillet on the corners that *do* close.
 - **`tess.rs`** — analytic faces → triangles. **Watertight by construction:** each edge is sampled
   once (cached by `EdgeId`), so the two faces sharing it emit identical boundary points. Winding is
   decided **once per face** (area-weighted vote against the analytic normal) — never per triangle,

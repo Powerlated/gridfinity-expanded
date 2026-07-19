@@ -1448,19 +1448,15 @@ fn plan_piece(
             // corners it introduced afterwards, so the floor blend has a
             // tangent-continuous loop to run around.
             //
-            // Only when the wall left the compartment in one piece. A wall that
-            // splits it produces two loops whose rounded corners `blend_edges`
-            // cannot close ("loop not closed" out of the rebuild), so those are
-            // left sharp and unfilleted — the same result as before this pass,
-            // rather than a hard build failure. That limitation is in the
-            // blender, not here: the loops themselves are sound, and build
-            // cleanly at `floor_fillet = 0`. It is what
-            // `freeform_crossing_divider_is_filleted` still waits on.
-            let split = region.iter().filter(|lp| loop_area(lp) > 0.0).count() > 1;
+            // This applies to every loop the wall leaves, including the two a
+            // compartment-splitting wall produces. Some of those corners the
+            // blender still cannot close, but that no longer costs the loop its
+            // fillet: `blend_best_effort` drops the offending run and keeps the
+            // rest (`freeform_crossing_divider_is_filleted`).
             let mut outs: Vec<(Vec<Seg>, Vec<Island>)> = Vec::new();
             let mut hole_loops: Vec<Vec<Seg>> = Vec::new();
             for lp in region {
-                let lp = if split { lp } else { round_sharp_corners(&lp, rc, fr) };
+                let lp = round_sharp_corners(&lp, rc, fr);
                 if loop_area(&lp) > 0.0 {
                     outs.push((lp, Vec::new()));
                 } else {

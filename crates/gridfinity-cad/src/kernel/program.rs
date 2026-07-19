@@ -18,7 +18,7 @@
 
 use crate::kernel::build::{loop_of, ring, ring_on_plane, seg_edge, wall_between};
 use crate::kernel::chamfer::chamfer_edges;
-use crate::kernel::fillet::blend_edges;
+use crate::kernel::fillet;
 use crate::kernel::geom::Surface;
 use crate::kernel::math::{Vec3, vec3_of};
 use crate::kernel::sketch::{Seg, Sketch};
@@ -428,7 +428,10 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
 
     let mut solid = b.build();
     if !blends.is_empty() {
-        solid = blend_edges(&solid, &blends)?;
+        // Best-effort: a corner the blender cannot close costs that corner its
+        // fillet, not the whole part its floor fillet. See
+        // [`blend_best_effort`](crate::kernel::fillet::blend_best_effort).
+        solid = fillet::blend_best_effort(&solid, &blends)?.0;
     }
     if !chamfers.is_empty() {
         solid = chamfer_edges(&solid, &chamfers)?;
