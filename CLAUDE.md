@@ -16,7 +16,7 @@ Gridfinity generator + watertight STL) as a small Rust workspace.
 mesh is produced once, at the very end, and never read back.
 
 Prohibited anywhere in the modelling pipeline (`sketch` → `build` → `topo` → `fillet`, plus
-`gridfinity.rs`, `segdiff.rs`, `rectregion.rs`, `region.rs`):
+`gridfinity.rs`, `region2d.rs`, `rectregion.rs`, `region.rs`):
 
 - **Mesh booleans / CSG** of any kind, including pulling in a library for them.
 - **Voxels, SDFs, marching cubes, point sampling,** or any discretised volume representation.
@@ -66,7 +66,7 @@ Inside `gridfinity-cad`, the CAD engine lives in **`src/kernel/`** and the param
 it in `src/`:
 
 - `src/kernel/` — `math`, `geom`, `sketch`, `topo`, `build`, `fillet`, `tess`, `mesh`, plus the 2D
-  region engines `segdiff` and `rectregion`. **Nothing here knows about Gridfinity**, and the
+  region engines `region2d` and `rectregion`. **Nothing here knows about Gridfinity**, and the
   dependency direction is one-way: no kernel module may import from the model layer. Paths are
   `crate::kernel::topo`, `gridfinity_cad::kernel::geom`, etc.
 - `src/` — `gridfinity` (the model), `layout` (grid cells/edges), `region` (polyomino boundary
@@ -126,13 +126,14 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   across boundary samples the neighbouring face emits individually are fanned back through the
   dropped points (only through vertices earcut didn't use — inserting used ones would duplicate
   triangles).
-- **`segdiff.rs`** — exact 2D boolean algebra on seg-loop regions (outers CCW, holes CW):
+- **`region2d.rs`** — exact 2D boolean algebra on seg-loop regions (outers CCW, holes CW):
   `region_union`/`region_difference`/`region_intersection`. All four Line/Arc intersection pairs
   are closed form (line/line by determinant, line/circle by the quadratic, circle/circle by the
   radical line); cut points are computed once and shared verbatim so selected pieces chain exactly.
   `presplit_regions` gives several booleans over the same inputs one common segmentation — required
-  whenever their results must weld to each other. `subtract_convex_quad`/`split_region_by_quad` are
-  the older region-minus-convex-quad special case the inner-wall band path still uses.
+  whenever their results must weld to each other. `split_regions` exposes the classified pieces with
+  caller-supplied provenance tags, which is how the inner-wall planner names contact runs without
+  ever comparing coordinates.
 - **`slab.rs`** — the **restricted boolean**: `build_slabs(&[(Op, Slab)])`, where a `Slab` is a 2D
   region swept over a z-range. z endpoints cut the stack into bands, each band's cross-section is
   the 2D boolean of the slabs covering it, and the solid is assembled band by band — walls per band

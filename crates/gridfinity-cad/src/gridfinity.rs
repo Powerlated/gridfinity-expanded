@@ -34,7 +34,7 @@ use crate::layout::{
 use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
 use crate::kernel::build::seg_edge;
-use crate::kernel::segdiff::{chain_loops, split_region_by_quad, subtract_convex_quad};
+use crate::kernel::region2d::{chain_loops, region_difference, split_regions};
 use crate::kernel::slab::{Op, Slab, SlabOpts, emit_slabs};
 use crate::kernel::sketch::{Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop};
 use crate::kernel::topo::{Builder, EdgeId, Loop, Solid, VertexId};
@@ -908,7 +908,7 @@ struct Banded {
     /// Notched floor outers (CCW), i.e. the original loop minus all wall
     /// quads. Each seg carries its provenance: `Some(k)` = a side of notch k
     /// (spans floor → that notch's top), `None` = original boundary (full
-    /// span). Tags come from `split_region_by_quad`, never float matching.
+    /// span). Tags come from `split_regions`, never float matching.
     outline_a: Vec<Vec<(Seg, Option<usize>)>>,
     /// The original loop re-split at every contact point (rim + upper prism).
     outline_b: Vec<Seg>,
@@ -1042,36 +1042,35 @@ fn cell_fasteners(b: &mut Builder, p: &Params, c: GridCell) -> Vec<RingEdges> {
         let hx = ccx + dx * FASTENER_INSET;
         let hy = ccy + dy * FASTENER_INSET;
         out.push(match (p.magnet_holes, p.screw_holes) {
-            (true, true) => drill_stepped(b, hx, hy, MAGNET_RADIUS, MAGNET_DEPTH, SCREW_RADIUS, SCREW_DEPTH),
-            (true, false) => drill_blind(b, hx, hy, MAGNET_RADIUS, MAGNET_DEPTH),
-            (false, true) => drill_blind(b, hx, hy, SCREW_RADIUS, SCREW_DEPTH),
+            (true, true) => drill(
+                b,
+                hx,
+                hy,
+                &[(MAGNET_RADIUS, MAGNET_DEPTH), (SCREW_RADIUS, SCREW_DEPTH)],
+            ),
+            (true, false) => drill(b, hx, hy, &[(MAGNET_RADIUS, MAGNET_DEPTH)]),
+            (false, true) => drill(b, hx, hy, &[(SCREW_RADIUS, SCREW_DEPTH)]),
             (false, false) => unreachable!(),
         });
     }
     out
 }
 
-fn drill_blind(b: &mut Builder, x: f32, y: f32, radius: f32, depth: f32) -> RingEdges {
-    let profile = ccw_segs(&Sketch::circle(x, y, radius));
-    let bottom = ring(b, &profile, 0.0);
-    let top = ring(b, &profile, depth);
-    wall_between(b, &profile, &profile, &bottom, &top, 0.0, depth, false);
-    planar(b, depth, false, loop_of(&top, true), vec![]);
-    bottom
-}
-
-fn drill_stepped(b: &mut Builder, x: f32, y: f32, r0: f32, d0: f32, r1: f32, d1: f32) -> RingEdges {
-    let outer = ccw_segs(&Sketch::circle(x, y, r0));
-    let inner = ccw_segs(&Sketch::circle(x, y, r1));
-    let o_bot = ring(b, &outer, 0.0);
-    let o_top = ring(b, &outer, d0);
-    let i_top0 = ring(b, &inner, d0);
-    let i_top1 = ring(b, &inner, d1);
-    wall_between(b, &outer, &outer, &o_bot, &o_top, 0.0, d0, false);
-    planar(b, d0, false, loop_of(&o_top, true), vec![loop_of(&i_top0, false)]);
-    wall_between(b, &inner, &inner, &i_top0, &i_top1, d0, d1, false);
-    planar(b, d1, false, loop_of(&i_top1, true), vec![]);
-    o_bot
+/// A pocket drilled up from the peg underside: one concentric bore per step,
+/// each `(radius, depth)`. Every step is a slab, so a plain blind hole and a
+/// magnet/screw counterbore are the same code — the band machinery raises the
+/// shoulder where one bore ends and the next continues. The mouth at z = 0 is
+/// declared open because the peg's bottom cap covers it, and the returned ring
+/// is that mouth, for the caller to use as a hole of the cap.
+fn drill(b: &mut Builder, x: f32, y: f32, steps: &[(f32, f32)]) -> RingEdges {
+    let profile = |r: f32| ccw_segs(&Sketch::circle(x, y, r));
+    let ops: Vec<(Op, Slab)> = steps
+        .iter()
+        .map(|&(r, depth)| (Op::Union, Slab::new(vec![profile(r)], 0.0, depth)))
+        .collect();
+    emit_slabs(b, &ops, &SlabOpts { cavity: true, open_at: vec![0.0] })
+        .expect("fastener pocket slab stack");
+    ring(b, &profile(steps[0].0), 0.0)
 }
 
 // ── Cavity plan (port of the reference `planCavity`) ─────────────────────────
@@ -1284,7 +1283,7 @@ fn build_piece(
             let mut region: Vec<Vec<Seg>> = vec![cl.segs.clone()];
             region.extend(islands.iter().map(|il| reverse_loop(&il.segs)));
             for q in &full_walls {
-                region = subtract_convex_quad(&region, q);
+                region = region_difference(&region, std::slice::from_ref(q));
             }
             let mut outs: Vec<(Vec<Seg>, Vec<Island>)> = Vec::new();
             let mut hole_loops: Vec<Vec<Seg>> = Vec::new();
@@ -1361,19 +1360,22 @@ fn build_piece(
                     notches: Vec::new(),
                 });
                 let ni = bd.notches.len();
-                let sa = split_region_by_quad(&bd.outline_a, q, Some(ni));
-                if sa.quad_inside.is_empty() || sa.inside.is_empty() {
+                let qa: Vec<Vec<(Seg, Option<usize>)>> =
+                    vec![q.iter().map(|&s| (s, Some(ni))).collect()];
+                let sa = split_regions(&bd.outline_a, &qa);
+                if sa.b_inside.is_empty() || sa.a_inside.is_empty() {
                     continue 'walls;
                 }
-                let mut kept = sa.outside.clone();
-                kept.extend(sa.quad_inside.iter().map(|&(s, t)| (s.reversed(), t)));
+                let mut kept = sa.a_outside.clone();
+                kept.extend(sa.b_inside.iter().map(|&(s, t)| (s.reversed(), t)));
                 bd.outline_a = chain_loops(kept);
                 let ob: Vec<Vec<(Seg, ())>> = vec![
                     std::mem::take(&mut bd.outline_b).into_iter().map(|s| (s, ())).collect(),
                 ];
-                let sb = split_region_by_quad(&ob, q, ());
-                let mut b_all = sb.outside;
-                b_all.extend(sb.inside);
+                let qb: Vec<Vec<(Seg, ())>> = vec![q.iter().map(|&s| (s, ())).collect()];
+                let sb = split_regions(&ob, &qb);
+                let mut b_all = sb.a_outside;
+                b_all.extend(sb.a_inside);
                 bd.outline_b = chain_loops(b_all)
                     .pop()
                     .unwrap_or_else(|| ob[0].clone())
@@ -1382,7 +1384,7 @@ fn build_piece(
                     .collect();
                 bd.notches.push(Notch {
                     quad: q.clone(),
-                    contact: sa.inside.into_iter().map(|(s, _)| s).collect(),
+                    contact: sa.a_inside.into_iter().map(|(s, _)| s).collect(),
                     top: *t,
                 });
                 continue 'walls;

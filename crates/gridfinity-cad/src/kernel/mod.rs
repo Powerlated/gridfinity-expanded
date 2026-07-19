@@ -7,7 +7,7 @@
 //! closed-form intersections. Triangles are a terminal output format and are
 //! never read back into modelling (see the hard rule in `CLAUDE.md`).
 //!
-//! [`segdiff`] and [`rectregion`] are the 2D region engines the model layer
+//! [`region2d`] and [`rectregion`] are the 2D region engines the model layer
 //! builds footprints with; they depend only on [`math`] and [`sketch`], so
 //! they live here rather than beside the Gridfinity code.
 
@@ -17,7 +17,7 @@ pub mod geom;
 pub mod math;
 pub mod mesh;
 pub mod rectregion;
-pub mod segdiff;
+pub mod region2d;
 pub mod slab;
 pub mod sketch;
 pub mod tess;

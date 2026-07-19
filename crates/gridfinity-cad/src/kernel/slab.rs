@@ -3,7 +3,7 @@
 //! A [`Slab`] is a 2D region swept over a z-range. A sequence of union /
 //! difference slabs is resolved into one B-rep solid **exactly**: the z-range
 //! endpoints cut the stack into bands, each band's cross-section is the 2D
-//! boolean of the slabs covering it (see [`crate::kernel::segdiff`]), and the
+//! boolean of the slabs covering it (see [`crate::kernel::region2d`]), and the
 //! solid is assembled band by band.
 //!
 //! This is the restricted boolean the kernel offers instead of general CSG.
@@ -19,7 +19,7 @@
 //! (`loop_area > 0`), holes CW.
 
 use crate::kernel::build::{RingEdges, ring, wall_seg};
-use crate::kernel::segdiff::{presplit_regions, region_difference, region_union};
+use crate::kernel::region2d::{presplit_regions, region_difference, region_union};
 use crate::kernel::sketch::{Seg, loop_area, point_in_segs};
 use crate::kernel::geom::Surface;
 use crate::kernel::math::{Vec3, vec3_of};
