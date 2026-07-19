@@ -58,7 +58,7 @@ FUZZ_SEED=7 FUZZ_CASES=500 cargo test -p gridfinity-cad --test fuzz -- --ignored
 
 `fuzz_inner_walls` covers free-form inner walls (the divider/fillet work); `fuzz_params_broad`
 covers shape, height, thicknesses, holes, dividers, slope and mode. Baseline at the default seed
-is **52/150 failing, 6 distinct defects** — drop the `#[ignore]` and make it a gate once that
+is **36/150 failing, 6 distinct defects** — drop the `#[ignore]` and make it a gate once that
 reaches zero. A run is deterministic per seed, but adding a generator arm reshuffles the stream,
 so quote the *case literal* in a bug report, never "seed 7 case 412".
 
