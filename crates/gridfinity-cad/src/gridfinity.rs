@@ -24,7 +24,7 @@
 //!   ([`fillet::blend_edges`](crate::kernel::fillet::blend_edges)) over each cavity
 //!   loop's floor-wall edges.
 
-use crate::kernel::build::{RingEdges, loop_of, ring, wall_between};
+use crate::kernel::build::{loop_of, ring, wall_between};
 use crate::kernel::geom::Surface;
 use crate::layout::{
     EdgeClass, EffectiveWalls, GridCell, GridEdge, Orientation, SplitLine, cell_edges,
@@ -39,7 +39,7 @@ use crate::kernel::program::{
 };
 use crate::kernel::slab::{Op as SlabOp, Slab, SlabOpts, plan_bands};
 use crate::kernel::sketch::{Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop};
-use crate::kernel::topo::{Builder, Loop, Solid, VertexId};
+use crate::kernel::topo::{Builder, Loop, Solid};
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
 
@@ -1462,14 +1462,79 @@ fn plan_piece(
                         island_tops.push(isl.segs.clone());
                     }
                 }
-                let (segs, cells_v) = (cl.segs.clone(), bin_cells.to_vec());
-                let isls = island_shapes.clone();
+                // Tilted-floor cavity. Compute the plane at plan time, then
+                // emit SlopedWall (cavity + per-island walls between the
+                // tilted plane and the flat top) and a PlanarFace for the
+                // tilted floor. Each island with a submerged top gets its
+                // own PlanarFace cap; islands reaching total_h contribute to
+                // the rim via island_tops.
+                //
+                // Plane equation: z = floor_z + eff_m * (ux*x + uy*y - min_a),
+                // i.e. normal (-eff_m*ux, -eff_m*uy, 1) normalised, passing
+                // through any point satisfying the equation.
+                let (ux, uy) = uphill_unit(sl.dir);
+                let (min_a, span) = slope_span(bin_cells, ux, uy);
+                let m = sl.angle_deg.to_radians().tan().clamp(0.0, 3.0);
+                let cavity_depth = total_h - floor_z;
+                let h_max = (m * span).min(cavity_depth - 0.5).max(0.0);
+                let eff_m = if span > 1e-6 { h_max / span } else { 0.0 };
+                let z_of = |pt: Vec2| floor_z + eff_m * (ux * pt.x + uy * pt.y - min_a);
+                let origin = Vec3::new(cl.segs[0].start().x, cl.segs[0].start().y, z_of(cl.segs[0].start()));
+                let normal = Vec3::new(-eff_m * ux, -eff_m * uy, 1.0).normalize();
+                let floor_plane = PPlaneRef::Tilted { origin, normal };
+                let top_plane = PPlaneRef::Z { z: total_h, up: true };
+
+                cav_ops.push((
+                    format!("cavity {ci}: sloped walls"),
+                    POp::SlopedWall {
+                        lower: cl.segs.clone(),
+                        upper: cl.segs.clone(),
+                        lower_plane: floor_plane.clone(),
+                        upper_plane: top_plane.clone(),
+                        outward: false,
+                    },
+                ));
+                let mut floor_holes: Vec<POpDirLoop> = Vec::new();
+                for (ii, isl) in island_shapes.iter().enumerate() {
+                    let slope_max = isl
+                        .segs
+                        .iter()
+                        .map(|s| z_of(s.start()))
+                        .fold(floor_z, f32::max);
+                    let t = isl.top.filter(|&t| t > slope_max + 0.2).unwrap_or(total_h);
+                    let island_top_plane = PPlaneRef::Z { z: t, up: true };
+                    cav_ops.push((
+                        format!("cavity {ci}: sloped island {ii} walls"),
+                        POp::SlopedWall {
+                            lower: isl.segs.clone(),
+                            upper: isl.segs.clone(),
+                            lower_plane: floor_plane.clone(),
+                            upper_plane: island_top_plane.clone(),
+                            outward: true,
+                        },
+                    ));
+                    if t < total_h {
+                        cav_ops.push((
+                            format!("cavity {ci}: sloped island {ii} top"),
+                            POp::PlanarFace {
+                                plane: island_top_plane,
+                                outer: (isl.segs.clone(), true),
+                                holes: vec![],
+                            },
+                        ));
+                    }
+                    floor_holes.push((isl.segs.clone(), false));
+                }
                 cav_ops.push((
                     format!("cavity {ci}: sloped floor"),
-                    POp::Custom(Box::new(move |b| {
-                        build_cavity_sloped(b, &cells_v, &segs, &isls, floor_z, total_h, sl);
-                        Ok(())
-                    })),
+                    POp::PlanarFace {
+                        plane: floor_plane,
+                        // The cavity floor faces up into a void: its outer runs
+                        // reversed (material outside), matching the cavity wall's
+                        // traversal so the shared ring edges pair 1:1.
+                        outer: (cl.segs.clone(), false),
+                        holes: floor_holes,
+                    },
                 ));
             }
             None => {
@@ -1921,56 +1986,6 @@ fn plan_cavity_banded(
     (stack, opts, tops, rim, blends)
 }
 
-/// Sloped cavity: single tilted plane floor over the bin's bounding box, sharp
-/// (line-only) walls rising to the rim.
-fn build_cavity_sloped(
-    b: &mut Builder,
-    bin_cells: &[GridCell],
-    shape: &[Seg],
-    islands: &[Island],
-    floor_z: f32,
-    total_h: f32,
-    slope: BinSlope,
-) -> Vec<Vec<Seg>> {
-    let (ux, uy) = uphill_unit(slope.dir);
-    let (min_a, span) = slope_span(bin_cells, ux, uy);
-    let m = slope.angle_deg.to_radians().tan().clamp(0.0, 3.0);
-    let cavity_depth = total_h - floor_z;
-    let h_max = (m * span).min(cavity_depth - 0.5).max(0.0);
-    let eff_m = if span > 1e-6 { h_max / span } else { 0.0 };
-    let z_of = move |pt: Vec2| floor_z + eff_m * (ux * pt.x + uy * pt.y - min_a);
-
-    let bottom = ring_z(b, shape, &z_of);
-    let top = ring(b, shape, total_h);
-    wall_between(b, shape, shape, &bottom, &top, floor_z, total_h, false);
-
-    let mut tops: Vec<Vec<Seg>> = Vec::new();
-    let mut floor_holes: Vec<Loop> = Vec::new();
-    for isl in islands {
-        // A partial top submerged under the tilted floor builds full height.
-        let slope_max = isl
-            .segs
-            .iter()
-            .map(|s| z_of(s.start()))
-            .fold(floor_z, f32::max);
-        let t = isl.top.filter(|&t| t > slope_max + 0.2).unwrap_or(total_h);
-        let i_lo = ring_z(b, &isl.segs, &z_of);
-        let i_hi = ring(b, &isl.segs, t);
-        wall_between(b, &isl.segs, &isl.segs, &i_lo, &i_hi, floor_z, t, true);
-        if t < total_h {
-            planar(b, t, true, loop_of(&i_hi, true), Vec::new());
-        } else {
-            tops.push(isl.segs.clone());
-        }
-        floor_holes.push(loop_of(&i_lo, false));
-    }
-
-    let origin = b.point(bottom.verts[0]);
-    let normal = Vec3::new(-eff_m * ux, -eff_m * uy, 1.0).normalize();
-    let surface = Surface::plane(origin, normal);
-    b.face(surface, true, loop_of(&bottom, false), floor_holes);
-    tops
-}
 
 fn slope_span(cells: &[GridCell], ux: f32, uy: f32) -> (f32, f32) {
     let mut min_a = f32::INFINITY;
@@ -1997,29 +2012,6 @@ fn uphill_unit(dir: SlopeDir) -> (f32, f32) {
     }
 }
 
-/// A profile ring realised at a per-vertex height (tilted bottoms). Lines only.
-fn ring_z(b: &mut Builder, segs: &[Seg], z_of: &dyn Fn(Vec2) -> f32) -> RingEdges {
-    let n = segs.len();
-    let verts: Vec<VertexId> = segs
-        .iter()
-        .map(|s| {
-            let p = s.start();
-            b.vertex(vec3_of(p.x, p.y, z_of(p)))
-        })
-        .collect();
-    let mut edges = Vec::with_capacity(n);
-    for k in 0..n {
-        let k1 = (k + 1) % n;
-        edges.push(match segs[k] {
-            Seg::Line { .. } => b.line(verts[k], verts[k1]),
-            Seg::Arc { center, radius, a0, a1, .. } => {
-                let cz = z_of(Vec2::new(center.x, center.y));
-                b.arc(verts[k], verts[k1], vec3_of(center.x, center.y, cz), Vec3::Z, radius, Vec3::X, a0, a1)
-            }
-        });
-    }
-    RingEdges { verts, edges }
-}
 
 /// Ray-cast point-in-polygon on a traced rectilinear loop.
 fn point_in_rect_loop(pt: Vec2, lp: &TracedLoop) -> bool {

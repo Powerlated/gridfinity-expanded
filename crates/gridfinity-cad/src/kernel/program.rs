@@ -166,6 +166,19 @@ pub enum Op {
     /// Side faces between a lower and upper profile (a prism or single-band
     /// loft). CAD-idiomatic spelling of `Op::Wall`.
     WallFaces { lower: Vec<Seg>, upper: Vec<Seg>, z0: f32, z1: f32, outward: bool },
+    /// Generalised `WallFaces` where each profile's ring is lifted onto an
+    /// arbitrary plane, not just horizontal `z`. The lower plane can be
+    /// tilted — used for sloped-floor cavities where the lower ring follows
+    /// a tilted datum. The `za`/`zb` params that `wall_between` consumes are
+    /// derived from each plane's origin z (exact for horizontal, approximate
+    /// for tilted arc segments, matching `gridfinity::ring_z`).
+    SlopedWall {
+        lower: Vec<Seg>,
+        upper: Vec<Seg>,
+        lower_plane: PlaneRef,
+        upper_plane: PlaneRef,
+        outward: bool,
+    },
 
     // ── Original op set (will retire in phase 4) ──────────────────────────
     /// Side faces between two profiles at two heights. Equal profiles give a
@@ -208,6 +221,7 @@ impl Op {
             Op::Hole { .. } => "hole",
             Op::PlanarFace { .. } => "face",
             Op::WallFaces { .. } => "wall",
+            Op::SlopedWall { .. } => "wall",
             Op::Wall { .. } => "wall",
             Op::Cap { .. } => "cap",
             Op::Slabs { .. } => "slabs",
@@ -370,6 +384,13 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                 let lo = ring(&mut b, lower, *z0);
                 let hi = ring(&mut b, upper, *z1);
                 wall_between(&mut b, lower, upper, &lo, &hi, *z0, *z1, *outward);
+            }
+            Op::SlopedWall { lower, upper, lower_plane, upper_plane, outward } => {
+                let lo_rt = lower_plane.resolve(prog);
+                let hi_rt = upper_plane.resolve(prog);
+                let lo = ring_on_plane(&mut b, lower, lo_rt);
+                let hi = ring_on_plane(&mut b, upper, hi_rt);
+                wall_between(&mut b, lower, upper, &lo, &hi, lo_rt.0.z, hi_rt.0.z, *outward);
             }
             Op::Wall { lower, upper, z0, z1, outward } => {
                 let lo = ring(&mut b, lower, *z0);

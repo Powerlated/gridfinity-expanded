@@ -74,6 +74,24 @@ mod tests {
         assert_eq!(whole.faces.len(), gridfinity::build(&p).faces.len());
     }
 
+    /// The sloped cavity is emitted as ops (SlopedWall + PlanarFace), not a
+    /// Custom closure, so the debugger can step it like everything else: every
+    /// prefix must run and the whole program must reproduce `build`.
+    #[test]
+    fn sloped_model_is_a_runnable_program() {
+        use crate::kernel::program;
+        let mut p = gridfinity::Params::default();
+        p.bins[0].slope = Some(BinSlope { angle_deg: 15.0, dir: SlopeDir::PlusX });
+        let prog = gridfinity::program(&p);
+        for n in 0..=prog.len() {
+            program::run(&prog, |i| i < n)
+                .unwrap_or_else(|e| panic!("sloped prefix of {n} op(s) failed: {e}"));
+        }
+        let whole = program::run_all(&prog).expect("whole sloped program");
+        whole.validate().expect("whole sloped program is manifold");
+        assert_eq!(whole.faces.len(), gridfinity::build(&p).faces.len());
+    }
+
     #[test]
     fn box_prism_is_valid_and_watertight() {
         let s = Sketch::rectangle(0.0, 0.0, 10.0, 20.0);
