@@ -307,7 +307,7 @@ pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, Str
         let is_circle = matches!(ed.curve, Curve::Circle { .. });
 
         // How face a traverses edge e in its loop (determines blend loop orientation).
-        let fwd_a = loop_edge_dir(&solid.faces[fa], e);
+        let fwd_a = loop_edge_dir(solid, fa, e);
 
         let mut blend = if plane_a.is_some() && plane_b.is_some() {
             build_cyl_blend(ed, cv0, cv1, ma, na0, ta_p0, ta_p1, tb_p0, tb_p1, r, fwd_a)?
@@ -369,13 +369,14 @@ pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, Str
 
     let mut b = Builder::new();
 
-    for (fi, face) in solid.faces.iter().enumerate() {
-        let outer = rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, &face.outer, &mut b)?;
-        let mut inners = Vec::with_capacity(face.inners.len());
-        for lp in &face.inners {
+    for fi in 0..solid.faces.len() {
+        let outer = rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, solid.outer_edges(fi), &mut b)?;
+        let mut inners = Vec::with_capacity(solid.n_inners(fi));
+        for lp in solid.inner_loops(fi) {
             inners.push(rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, lp, &mut b)?);
         }
-        b.face(face.surface, face.sense, outer, inners);
+        let (surface, sense) = (solid.faces[fi].surface, solid.faces[fi].sense);
+        b.face(surface, sense, outer, inners);
     }
 
     let mut blend_keys: Vec<EdgeId> = bm.keys().copied().collect();
@@ -411,9 +412,9 @@ pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, Str
 }
 
 /// How a face traverses `e` in its loops (true = v0→v1).
-fn loop_edge_dir(face: &crate::kernel::topo::Face, e: EdgeId) -> bool {
-    for lp in face.loops() {
-        for &(ee, f) in &lp.edges {
+fn loop_edge_dir(solid: &Solid, fid: usize, e: EdgeId) -> bool {
+    for lp in solid.face_loops(fid) {
+        for &(ee, f) in lp {
             if ee == e {
                 return f;
             }
@@ -424,10 +425,9 @@ fn loop_edge_dir(face: &crate::kernel::topo::Face, e: EdgeId) -> bool {
 
 /// Average position of a face's outer-loop vertices (a robust interior hint).
 fn face_centroid(solid: &Solid, fid: usize) -> Vec3 {
-    let face = &solid.faces[fid];
     let mut sum = Vec3::ZERO;
     let mut n = 0;
-    for &(e, fwd) in &face.outer.edges {
+    for &(e, fwd) in solid.outer_edges(fid) {
         let ed = solid.edges[e];
         let v = if fwd { ed.v0 } else { ed.v1 };
         sum += solid.verts[v].point;
@@ -465,10 +465,10 @@ struct Runout {
 
 fn faces_at_vertex(solid: &Solid, v: usize) -> Vec<usize> {
     let mut out = Vec::new();
-    for (fi, f) in solid.faces.iter().enumerate() {
+    for fi in 0..solid.faces.len() {
         let mut hit = false;
-        for lp in f.loops() {
-            for &(e, _) in &lp.edges {
+        for lp in solid.face_loops(fi) {
+            for &(e, _) in lp {
                 let ed = solid.edges[e];
                 if ed.v0 == v || ed.v1 == v {
                     hit = true;
@@ -699,7 +699,7 @@ fn rebuild_loop(
     runouts: &HashMap<usize, Runout>,
     want: &HashMap<EdgeId, f32>,
     fi: usize,
-    lp: &Loop,
+    lp: &[(EdgeId, bool)],
     b: &mut Builder,
 ) -> Result<Loop, String> {
     let face_surface = solid.faces[fi].surface;
@@ -722,8 +722,8 @@ fn rebuild_loop(
         }
     };
 
-    let mut items: Vec<Emitted> = Vec::with_capacity(lp.edges.len());
-    for &(e, fwd) in &lp.edges {
+    let mut items: Vec<Emitted> = Vec::with_capacity(lp.len());
+    for &(e, fwd) in lp {
         let ed = solid.edges[e];
         let end_v = if fwd { ed.v1 } else { ed.v0 };
         if want.contains_key(&e) {

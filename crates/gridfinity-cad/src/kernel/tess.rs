@@ -85,7 +85,7 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
         // cylinder walls): avoids earcut's collinear-ear slivers on constant-u
         // or constant-v boundary runs. Boundary grid points reuse the cached
         // edge samples, so watertightness with neighbouring faces is preserved.
-        if let Some(grid) = tess_grid_face(face, &edge_pts, sign) {
+        if let Some(grid) = tess_grid_face(solid, fi, &edge_pts, sign) {
             out.face_of_tri.extend(std::iter::repeat(fi).take(grid.len()));
             out.tris.extend(grid);
             continue;
@@ -97,9 +97,9 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
         let mut nrm: Vec<Vec3> = Vec::new();
         let mut loop_spans: Vec<(usize, usize)> = Vec::new(); // [start,end) into pts3
 
-        for lp in face.loops() {
+        for lp in solid.face_loops(fi) {
             let start = pts3.len();
-            for &(e, fwd) in &lp.edges {
+            for &(e, fwd) in lp {
                 let samples = &edge_pts[&e];
                 // Walk the edge in its loop direction, dropping the final point
                 // (shared with the next edge's first).
@@ -290,15 +290,18 @@ fn split_boundary_chords(
 /// blend-patch and cylinder-wall case). Returns `None` if the face doesn't fit
 /// that shape, so the caller can fall back to earcut.
 fn tess_grid_face(
-    face: &crate::kernel::topo::Face,
+    solid: &crate::kernel::topo::Solid,
+    fid: usize,
     edge_pts: &HashMap<EdgeId, Vec<Vec3>>,
     sign: f32,
 ) -> Option<Vec<Tri>> {
     use crate::kernel::geom::Surface;
+    let face = &solid.faces[fid];
     if matches!(face.surface, Surface::Plane { .. }) {
         return None;
     }
-    if !face.inners.is_empty() || face.outer.edges.len() != 4 {
+    let outer = solid.outer_edges(fid);
+    if solid.n_inners(fid) != 0 || outer.len() != 4 {
         return None;
     }
 
@@ -307,10 +310,10 @@ fn tess_grid_face(
         let s = &edge_pts[&e];
         if fwd { s.clone() } else { s.iter().rev().copied().collect() }
     };
-    let p0 = trav(face.outer.edges[0]);
-    let p1 = trav(face.outer.edges[1]);
-    let p2 = trav(face.outer.edges[2]);
-    let p3 = trav(face.outer.edges[3]);
+    let p0 = trav(outer[0]);
+    let p1 = trav(outer[1]);
+    let p2 = trav(outer[2]);
+    let p3 = trav(outer[3]);
     let (m, n) = (p0.len(), p1.len());
     if p2.len() != m || p3.len() != n || m < 2 || n < 2 {
         return None;

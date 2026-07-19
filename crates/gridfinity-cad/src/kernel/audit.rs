@@ -297,9 +297,9 @@ fn audit_manifold(solid: &Solid, defects: &mut Vec<Defect>) {
     let edge_faces = solid.edge_faces();
     let mut fwd = vec![0u32; solid.edges.len()];
     let mut bwd = vec![0u32; solid.edges.len()];
-    for face in &solid.faces {
-        for lp in face.loops() {
-            for &(e, f) in &lp.edges {
+    for fi in 0..solid.faces.len() {
+        for lp in solid.face_loops(fi) {
+            for &(e, f) in lp {
                 if f {
                     fwd[e] += 1;
                 } else {
@@ -324,9 +324,9 @@ fn audit_manifold(solid: &Solid, defects: &mut Vec<Defect>) {
 }
 
 fn audit_loop_closure(solid: &Solid, defects: &mut Vec<Defect>) {
-    for (fi, face) in solid.faces.iter().enumerate() {
-        for (li, lp) in face.loops().enumerate() {
-            let n = lp.edges.len();
+    for fi in 0..solid.faces.len() {
+        for (li, lp) in solid.face_loops(fi).enumerate() {
+            let n = lp.len();
             if n == 0 {
                 defects.push(Defect {
                     severity: Severity::Error,
@@ -337,9 +337,9 @@ fn audit_loop_closure(solid: &Solid, defects: &mut Vec<Defect>) {
                 continue;
             }
             for w in 0..n {
-                let (e, f) = lp.edges[w];
+                let (e, f) = lp[w];
                 let (_, end) = solid.directed(e, f);
-                let (ne, nf) = lp.edges[(w + 1) % n];
+                let (ne, nf) = lp[(w + 1) % n];
                 let (nstart, _) = solid.directed(ne, nf);
                 if end != nstart {
                     defects.push(Defect {
@@ -571,7 +571,7 @@ fn audit_loop_containment(solid: &Solid, defects: &mut Vec<Defect>) {
     }
 
     'faces: for (fi, face) in solid.faces.iter().enumerate() {
-        let loops: Vec<_> = face.loops().collect();
+        let loops: Vec<_> = solid.face_loops(fi).collect();
         if loops.len() < 2 {
             continue;
         }
@@ -579,7 +579,7 @@ fn audit_loop_containment(solid: &Solid, defects: &mut Vec<Defect>) {
         // radial surfaces so a branch cut at `u = 0` can't fake a crossing.
         let to_uv = |p: Vec3| face.surface.project(p);
         let mut outer_uv: Vec<[f32; 2]> = Vec::new();
-        for &(e, fwd) in &loops[0].edges {
+        for &(e, fwd) in loops[0] {
             let s = &edge_pts[&e];
             let chain: Vec<Vec3> = if fwd { s.iter().copied().collect() }
                                   else { s.iter().rev().copied().collect() };
@@ -600,7 +600,7 @@ fn audit_loop_containment(solid: &Solid, defects: &mut Vec<Defect>) {
             let mut worst_uv = [0.0, 0.0];
             let mut worst_p = Vec3::ZERO;
             let mut any_out = false;
-            for &(e, fwd) in &lp.edges {
+            for &(e, fwd) in lp.iter() {
                 let s = &edge_pts[&e];
                 let chain: Vec<Vec3> = if fwd { s.iter().copied().collect() }
                                       else { s.iter().rev().copied().collect() };

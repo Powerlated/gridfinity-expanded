@@ -182,7 +182,7 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
         // at ta_p0 must equal face a's outward normal `na_mid`.
         let sense = surface.normal(surface.project(ta_p0)).dot(na_mid) > 0.0;
 
-        let fwd_a = loop_edge_dir(&solid.faces[fa], e);
+        let fwd_a = loop_edge_dir(solid, fa, e);
 
         let ta = CurvEdge {
             curve: Curve::Line { p0: ta_p0, dir: edge_dir },
@@ -261,13 +261,14 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
     // Rebuild the solid through a fresh builder, mirroring fillet's
     // rebuild_loop but simpler (no runout splice).
     let mut b = Builder::new();
-    for (fi, face) in solid.faces.iter().enumerate() {
-        let outer = rebuild_loop(solid, &cm, &vinfo, &want, fi, &face.outer, &mut b)?;
-        let mut inners = Vec::with_capacity(face.inners.len());
-        for lp in &face.inners {
+    for fi in 0..solid.faces.len() {
+        let outer = rebuild_loop(solid, &cm, &vinfo, &want, fi, solid.outer_edges(fi), &mut b)?;
+        let mut inners = Vec::with_capacity(solid.n_inners(fi));
+        for lp in solid.inner_loops(fi) {
             inners.push(rebuild_loop(solid, &cm, &vinfo, &want, fi, lp, &mut b)?);
         }
-        b.face(face.surface, face.sense, outer, inners);
+        let (surface, sense) = (solid.faces[fi].surface, solid.faces[fi].sense);
+        b.face(surface, sense, outer, inners);
     }
 
     // Emit one chamfer face per chamfered edge.
@@ -305,9 +306,9 @@ fn edge_dir_of(solid: &Solid, e: EdgeId) -> Vec3 {
 }
 
 /// How a face traverses `e` in its loops (true = v0→v1).
-fn loop_edge_dir(face: &crate::kernel::topo::Face, e: EdgeId) -> bool {
-    for lp in face.loops() {
-        for &(ee, f) in &lp.edges {
+fn loop_edge_dir(solid: &Solid, fid: usize, e: EdgeId) -> bool {
+    for lp in solid.face_loops(fid) {
+        for &(ee, f) in lp {
             if ee == e {
                 return f;
             }
@@ -318,10 +319,9 @@ fn loop_edge_dir(face: &crate::kernel::topo::Face, e: EdgeId) -> bool {
 
 /// Average position of a face's outer-loop vertices (a robust interior hint).
 fn face_centroid(solid: &Solid, fid: usize) -> Vec3 {
-    let face = &solid.faces[fid];
     let mut sum = Vec3::ZERO;
     let mut n = 0;
-    for &(e, fwd) in &face.outer.edges {
+    for &(e, fwd) in solid.outer_edges(fid) {
         let ed = solid.edges[e];
         let v = if fwd { ed.v0 } else { ed.v1 };
         sum += solid.verts[v].point;
@@ -371,12 +371,12 @@ fn rebuild_loop(
     vinfo: &HashMap<usize, (Vec3, Vec3)>,
     want: &HashMap<EdgeId, (f32, f32)>,
     fi: usize,
-    lp: &Loop,
+    lp: &[(EdgeId, bool)],
     b: &mut Builder,
 ) -> Result<Loop, String> {
     let ef = solid.edge_faces();
-    let mut out: Vec<(EdgeId, bool)> = Vec::with_capacity(lp.edges.len());
-    for &(e, fwd) in &lp.edges {
+    let mut out: Vec<(EdgeId, bool)> = Vec::with_capacity(lp.len());
+    for &(e, fwd) in lp {
         let ed = solid.edges[e];
         if want.contains_key(&e) {
             let c = &cm[&e];

@@ -63,6 +63,10 @@ impl Edge {
 }
 
 /// An ordered ring of directed edges. `true` = traverse the edge `v0 → v1`.
+///
+/// A **transient** value type used only to hand a loop to [`Builder::face`];
+/// the `Solid` no longer stores `Loop`s — they are flattened into its
+/// `loop_edges`/`loops` CSR arenas, so a built solid holds no per-loop `Vec`.
 #[derive(Clone, Debug, Default)]
 pub struct Loop {
     pub edges: Vec<(EdgeId, bool)>,
@@ -74,29 +78,52 @@ impl Loop {
     }
 }
 
-/// A trimmed face: an analytic `surface`, an outer loop, and zero or more inner
-/// (hole) loops. `sense` = whether the surface's own normal is the outward
+/// A trimmed face: an analytic `surface` plus a contiguous run of loop ids in
+/// the owning `Solid`'s CSR arena — the first is the outer boundary, the rest
+/// are holes. `sense` = whether the surface's own normal is the outward
 /// (solid-exterior) normal; `false` flips it.
+///
+/// The loops live in the `Solid`, not the `Face`: access them via
+/// [`Solid::outer_edges`], [`Solid::face_loops`], [`Solid::inner_loops`].
 #[derive(Clone, Debug)]
 pub struct Face {
     pub surface: Surface,
     pub sense: bool,
-    pub outer: Loop,
-    pub inners: Vec<Loop>,
+    /// First loop id; loops are `[loop0, loop0 + n_loops)`, outer at `loop0`.
+    loop0: u32,
+    /// Number of loops, `>= 1` (outer plus zero or more inners).
+    n_loops: u32,
 }
 
-impl Face {
-    pub fn loops(&self) -> impl Iterator<Item = &Loop> {
-        std::iter::once(&self.outer).chain(self.inners.iter())
-    }
-}
-
-/// A solid: arenas of vertices, edges, and faces. One shell, manifold.
-#[derive(Clone, Debug, Default)]
+/// A solid: flat, `Copy`-element arenas. One shell, manifold.
+///
+/// Two-level CSR for the loops: a face names a contiguous range of loop ids;
+/// each loop id indexes `loops` (offsets into the flat `loop_edges`). Cloning a
+/// `Solid` is therefore five flat `Vec` `memcpy`s with **zero per-loop
+/// allocation** — which is what makes `fillet::blend_edges`' repeated clones
+/// cheap.
+#[derive(Clone, Debug)]
 pub struct Solid {
     pub verts: Vec<Vertex>,
     pub edges: Vec<Edge>,
+    /// Flat directed-edge storage for every loop, concatenated.
+    loop_edges: Vec<(EdgeId, bool)>,
+    /// CSR offsets into `loop_edges`: loop `l` owns `loop_edges[loops[l]..loops[l+1]]`.
+    /// Always non-empty (`[0]` for a solid with no loops).
+    loops: Vec<u32>,
     pub faces: Vec<Face>,
+}
+
+impl Default for Solid {
+    fn default() -> Solid {
+        Solid {
+            verts: Vec::new(),
+            edges: Vec::new(),
+            loop_edges: Vec::new(),
+            loops: vec![0],
+            faces: Vec::new(),
+        }
+    }
 }
 
 impl Solid {
@@ -110,21 +137,50 @@ impl Solid {
         if forward { (e.v0, e.v1) } else { (e.v1, e.v0) }
     }
 
+    /// The directed edges of loop `lid`.
+    fn loop_slice(&self, lid: u32) -> &[(EdgeId, bool)] {
+        let s = self.loops[lid as usize] as usize;
+        let e = self.loops[lid as usize + 1] as usize;
+        &self.loop_edges[s..e]
+    }
+
+    /// The outer boundary of face `fid`.
+    pub fn outer_edges(&self, fid: usize) -> &[(EdgeId, bool)] {
+        self.loop_slice(self.faces[fid].loop0)
+    }
+
+    /// Number of hole loops of face `fid`.
+    pub fn n_inners(&self, fid: usize) -> usize {
+        self.faces[fid].n_loops as usize - 1
+    }
+
+    /// Every loop of face `fid` (outer first, then holes), each as a slice.
+    pub fn face_loops(&self, fid: usize) -> impl Iterator<Item = &[(EdgeId, bool)]> {
+        let f = &self.faces[fid];
+        (f.loop0..f.loop0 + f.n_loops).map(move |lid| self.loop_slice(lid))
+    }
+
+    /// Just the hole loops of face `fid`.
+    pub fn inner_loops(&self, fid: usize) -> impl Iterator<Item = &[(EdgeId, bool)]> {
+        let f = &self.faces[fid];
+        (f.loop0 + 1..f.loop0 + f.n_loops).map(move |lid| self.loop_slice(lid))
+    }
+
     /// Check the manifold invariant: every edge used exactly twice, once each
     /// direction, and each loop forms a closed chain (consecutive edges meet).
     pub fn validate(&self) -> Result<(), String> {
         let mut fwd = vec![0u32; self.edges.len()];
         let mut bwd = vec![0u32; self.edges.len()];
-        for (fi, face) in self.faces.iter().enumerate() {
-            for lp in face.loops() {
-                if lp.edges.is_empty() {
+        for fi in 0..self.faces.len() {
+            for lp in self.face_loops(fi) {
+                if lp.is_empty() {
                     return Err(format!("face {fi} has an empty loop"));
                 }
-                for w in 0..lp.edges.len() {
-                    let (e, f) = lp.edges[w];
+                for w in 0..lp.len() {
+                    let (e, f) = lp[w];
                     if f { fwd[e] += 1 } else { bwd[e] += 1 }
                     let (_, end) = self.directed(e, f);
-                    let (ne, nf) = lp.edges[(w + 1) % lp.edges.len()];
+                    let (ne, nf) = lp[(w + 1) % lp.len()];
                     let (nstart, _) = self.directed(ne, nf);
                     if end != nstart {
                         return Err(format!(
@@ -148,9 +204,9 @@ impl Solid {
     /// Faces on each side of every edge, `[EdgeId] -> up to two FaceIds`.
     pub fn edge_faces(&self) -> Vec<Vec<usize>> {
         let mut map = vec![Vec::new(); self.edges.len()];
-        for (fi, face) in self.faces.iter().enumerate() {
-            for lp in face.loops() {
-                for &(e, _) in &lp.edges {
+        for fi in 0..self.faces.len() {
+            for lp in self.face_loops(fi) {
+                for &(e, _) in lp {
                     if !map[e].contains(&fi) {
                         map[e].push(fi);
                     }
@@ -172,12 +228,22 @@ pub struct Builder {
     // but bulge differently (a circle's two semicircles) stay distinct, while a
     // genuinely shared edge and its reverse still merge.
     edge_index: HashMap<(VertexId, VertexId, (i64, i64, i64)), EdgeId>,
+    loop_edges: Vec<(EdgeId, bool)>,
+    loops: Vec<u32>,
     faces: Vec<Face>,
 }
 
 impl Builder {
     pub fn new() -> Builder {
-        Builder::default()
+        Builder { loops: vec![0], ..Builder::default() }
+    }
+
+    /// Append a loop's directed edges to the flat arena, returning its loop id.
+    fn intern_loop(&mut self, edges: &[(EdgeId, bool)]) -> u32 {
+        let lid = self.loops.len() as u32 - 1;
+        self.loop_edges.extend_from_slice(edges);
+        self.loops.push(self.loop_edges.len() as u32);
+        lid
     }
 
     /// Intern a vertex by welded position.
@@ -277,12 +343,18 @@ impl Builder {
 
     pub fn face(&mut self, surface: Surface, sense: bool, outer: Loop, inners: Vec<Loop>) -> usize {
         crate::kernel::perf::count(crate::kernel::perf::Metric::BuilderFace);
+        // Flatten the transient loops into the arena; they are interned
+        // contiguously (outer first) so the face names a single loop range.
+        let loop0 = self.intern_loop(&outer.edges);
+        for inn in &inners {
+            self.intern_loop(&inn.edges);
+        }
         let id = self.faces.len();
         self.faces.push(Face {
             surface,
             sense,
-            outer,
-            inners,
+            loop0,
+            n_loops: 1 + inners.len() as u32,
         });
         id
     }
@@ -299,6 +371,8 @@ impl Builder {
         Solid {
             verts: self.verts,
             edges: self.edges,
+            loop_edges: self.loop_edges,
+            loops: self.loops,
             faces: self.faces,
         }
     }
