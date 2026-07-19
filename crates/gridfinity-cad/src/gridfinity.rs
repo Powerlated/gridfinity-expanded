@@ -1461,23 +1461,35 @@ fn plan_piece(
             for isl in &island_shapes {
                 island_tops.push(isl.segs.clone());
             }
-            let segs = cl.segs.clone();
-            let isls: Vec<Vec<Seg>> = island_shapes.iter().map(|i| i.segs.clone()).collect();
+            // Open cavity: floor cap (with islands as holes) + one tower-wall
+            // op per island. Used to be a single Custom; nothing about the
+            // emission depended on builder state except `ring`/`wall_between`,
+            // both of which are available as Op::PlanarFace + Op::WallFaces.
+            // Each island tower is now its own toggleable op in the debugger.
+            let floor_holes: Vec<POpDirLoop> = island_shapes
+                .iter()
+                .map(|i| (i.segs.clone(), false))
+                .collect();
             cav_ops.push((
-                format!("cavity {ci} (open): floor + towers"),
-                POp::Custom(Box::new(move |b| {
-                    let r_lo = ring(b, &segs, floor_z);
-                    let mut floor_holes: Vec<Loop> = Vec::new();
-                    for isg in &isls {
-                        let i_lo = ring(b, isg, floor_z);
-                        let i_hi = ring(b, isg, total_h);
-                        wall_between(b, isg, isg, &i_lo, &i_hi, floor_z, total_h, true);
-                        floor_holes.push(loop_of(&i_lo, false));
-                    }
-                    planar(b, floor_z, true, loop_of(&r_lo, true), floor_holes);
-                    Ok(())
-                })),
+                format!("cavity {ci} (open): floor"),
+                POp::PlanarFace {
+                    plane: PPlaneRef::Z { z: floor_z, up: true },
+                    outer: (cl.segs.clone(), true),
+                    holes: floor_holes,
+                },
             ));
+            for (ii, isl) in island_shapes.iter().enumerate() {
+                cav_ops.push((
+                    format!("cavity {ci} (open): tower {ii}"),
+                    POp::WallFaces {
+                        lower: isl.segs.clone(),
+                        upper: isl.segs.clone(),
+                        z0: floor_z,
+                        z1: total_h,
+                        outward: true,
+                    },
+                ));
+            }
             touched.push(cl);
             continue;
         }
