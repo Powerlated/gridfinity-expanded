@@ -61,6 +61,48 @@ pub fn ring(b: &mut Builder, segs: &[Seg], z: f32) -> RingEdges {
     RingEdges { verts, edges }
 }
 
+/// A profile ring realised on an arbitrary plane. Each `(x, y)` endpoint is
+/// lifted along +Z to where it meets the plane; arc centres are lifted the
+/// same way (which preserves the arc as a circle in a horizontal slice — a
+/// close approximation when the plane's slope is modest, and what
+/// `gridfinity::ring_z` always did). Used for tilted-floor caps and walls.
+///
+/// For a horizontal plane at `z`, equivalent to [`ring`] at that `z`.
+pub fn ring_on_plane(b: &mut Builder, segs: &[Seg], plane: (Vec3, Vec3)) -> RingEdges {
+    let (origin, normal) = plane;
+    let normal = normal.normalize_or(Vec3::Z);
+    // If the plane is degenerate wrt Z (purely vertical), we can't lift along
+    // +Z. The horizontal ring at origin.z is a safe fallback; callers using
+    // vertical planes should reach for a different helper.
+    let z_of = |p: crate::kernel::math::Vec2| -> f32 {
+        if normal.z.abs() < 1e-9 {
+            return origin.z;
+        }
+        let p3 = vec3_of(p.x, p.y, 0.0);
+        (origin - p3).dot(normal) / normal.z
+    };
+    let n = segs.len();
+    let verts: Vec<VertexId> = segs
+        .iter()
+        .map(|s| {
+            let p = s.start();
+            b.vertex(vec3_of(p.x, p.y, z_of(p)))
+        })
+        .collect();
+    let mut edges = Vec::with_capacity(n);
+    for k in 0..n {
+        let k1 = (k + 1) % n;
+        edges.push(match segs[k] {
+            Seg::Line { .. } => b.line(verts[k], verts[k1]),
+            Seg::Arc { center, radius, a0, a1, .. } => {
+                let cz = z_of(center);
+                b.arc(verts[k], verts[k1], vec3_of(center.x, center.y, cz), Vec3::Z, radius, Vec3::X, a0, a1)
+            }
+        });
+    }
+    RingEdges { verts, edges }
+}
+
 /// Side faces connecting a lower ring to an upper ring with the same segment
 /// structure. `outward` orients the normals (see module docs). Straight runs →
 /// `Plane`; arcs → `Cylinder` if the radius is constant, else `Cone`.

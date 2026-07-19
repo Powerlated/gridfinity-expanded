@@ -16,7 +16,7 @@
 //! [`Program::sketch`] / [`Program::plane`]. This is the Solidworks/Onshape
 //! "named sketch" idiom: profiles are authored once and referenced many times.
 
-use crate::kernel::build::{loop_of, ring, seg_edge, wall_between};
+use crate::kernel::build::{loop_of, ring, ring_on_plane, seg_edge, wall_between};
 use crate::kernel::chamfer::chamfer_edges;
 use crate::kernel::fillet::blend_edges;
 use crate::kernel::geom::Surface;
@@ -31,35 +31,64 @@ pub type DirLoop = (Vec<Seg>, bool);
 
 /// A reference to a plane, resolved against the Program at run time.
 ///
-/// Phase 1 has only the horizontal case. Phase 2 will add `Named` (lookup a
-/// datum registered by [`Op::Plane`]) and `Tilted` (inline origin + normal),
-/// which is what the sloped-floor extrude cut needs.
-#[derive(Clone, Copy, Debug)]
+/// Three forms:
+/// - `Z { z, up }` — horizontal plane at `z`; the only form the slab engine
+///   can use directly (slabs are z-prisms).
+/// - `Named(name)` — lookup a datum registered by [`Op::Plane`]. Defers the
+///   actual plane choice to the model layer's planning.
+/// - `Tilted { origin, normal }` — inline arbitrary plane. Used by
+///   [`Op::PlanarFace`] for tilted floor caps and by Phase 3's sloped-cavity
+///   migration.
+///
+/// Volume ops (`Extrude`/`ExtrudeCut`/`Loft`) currently require `Z` because
+/// the slab engine handles only z-prisms; `Named`/`Tilted` work for
+/// `PlanarFace`. A future kernel extension could generalise slabs to
+/// plane-prisms.
+#[derive(Clone, Debug)]
 pub enum PlaneRef {
     /// Horizontal plane at `z`. `up = true` → outward normal +Z (a floor or
     /// the top of an extrude); `up = false` → −Z (the underside of a cap).
     Z { z: f32, up: bool },
+    /// A named datum registered by [`Op::Plane`]. The Program's symbol table
+    /// resolves the name to `(origin, normal)` at run time.
+    Named(String),
+    /// An inline arbitrary plane. The caller supplies `origin` and `normal`
+    /// directly; `normal` need not be unit (the resolver normalises).
+    Tilted { origin: Vec3, normal: Vec3 },
 }
 
 impl PlaneRef {
-    /// Resolve to `(origin, normal)`. `prog` is accepted so the Phase 2
-    /// `Named` variant can look up datums without changing the call site.
-    pub fn resolve(&self, _prog: &Program) -> (Vec3, Vec3) {
+    /// Resolve to `(origin, normal)` against a Program (for `Named` lookups).
+    /// `normal` is normalised.
+    pub fn resolve(&self, prog: &Program) -> (Vec3, Vec3) {
         match *self {
             PlaneRef::Z { z, up } => {
                 let normal = if up { Vec3::Z } else { -Vec3::Z };
                 (vec3_of(0.0, 0.0, z), normal)
             }
+            PlaneRef::Named(ref name) => prog
+                .plane(name)
+                .unwrap_or_else(|| panic!("PlaneRef::Named({name:?}) not registered")),
+            PlaneRef::Tilted { origin, normal } => (origin, normal.normalize_or(Vec3::Z)),
         }
     }
 
-    /// The z value (for slab APIs that still take scalar z bounds). Phase 2's
-    /// tilted-plane variant will require the slab API to accept a plane spec
-    /// instead, at which point this goes away.
+    /// The z value, for slab APIs that still take scalar z bounds. Returns
+    /// `None` for non-horizontal planes — callers that need real tilted-plane
+    /// support must use [`PlaneRef::resolve`] and the lower-level primitives.
     pub fn z(&self) -> f32 {
         match *self {
             PlaneRef::Z { z, .. } => z,
+            PlaneRef::Named(_) | PlaneRef::Tilted { .. } => {
+                panic!("PlaneRef::z() called on non-horizontal plane {self:?}; use resolve() instead")
+            }
         }
+    }
+
+    /// True iff this is a horizontal-Z plane (the only form the slab engine
+    /// and other z-prism APIs can consume directly).
+    pub fn is_horizontal(&self) -> bool {
+        matches!(*self, PlaneRef::Z { .. })
     }
 }
 
@@ -265,6 +294,13 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                 // to emit. Kept explicit so the match stays exhaustive.
             }
             Op::Extrude { sketch, from, to } => {
+                if !from.is_horizontal() || !to.is_horizontal() {
+                    return Err(
+                        "Extrude: tilted planes not yet supported (slab engine is z-prism only); \
+                         use WallFaces + PlanarFace directly"
+                            .into(),
+                    );
+                }
                 let profile = prog.sketch(sketch).ok_or_else(|| {
                     format!("Extrude: sketch {sketch:?} not registered")
                 })?;
@@ -275,6 +311,13 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                 slab::emit_slabs(&mut b, &stack, &SlabOpts::default())?;
             }
             Op::ExtrudeCut { sketch, from, to } => {
+                if !from.is_horizontal() || !to.is_horizontal() {
+                    return Err(
+                        "ExtrudeCut: tilted planes not yet supported (slab engine is z-prism only); \
+                         use WallFaces + PlanarFace directly"
+                            .into(),
+                    );
+                }
                 let profile = prog.sketch(sketch).ok_or_else(|| {
                     format!("ExtrudeCut: sketch {sketch:?} not registered")
                 })?;
@@ -308,15 +351,15 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                 }
             }
             Op::PlanarFace { plane, outer, holes } => {
-                let (origin, normal) = plane.resolve(prog);
-                let z = plane.z();
-                let o = ring(&mut b, &outer.0, z);
+                let plane_rt = plane.resolve(prog);
+                let o = ring_on_plane(&mut b, &outer.0, plane_rt);
                 let outer_loop = loop_of(&o, outer.1);
                 let mut inner_loops = Vec::with_capacity(holes.len());
                 for (segs, fwd) in holes {
-                    let r = ring(&mut b, segs, z);
+                    let r = ring_on_plane(&mut b, segs, plane_rt);
                     inner_loops.push(loop_of(&r, *fwd));
                 }
+                let (origin, normal) = plane_rt;
                 let surface = Surface::plane(origin, normal);
                 b.face(surface, true, outer_loop, inner_loops);
             }
@@ -846,5 +889,82 @@ mod tests {
         let s = run_all(&p).expect("chamfer run");
         s.validate().expect("chamfered box is manifold");
         assert!(s.faces.len() > plain, "chamfer added bevel faces");
+    }
+
+    // ── Phase 2: tilted planes ────────────────────────────────────────────
+
+    #[test]
+    fn planarface_on_tilted_plane_lifts_vertices() {
+        // A 10×10 square on a plane tilted 1:1 in X (normal = (-1, 0, 1)/√2),
+        // passing through origin (5, 5, 5). Each (x, y) vertex lifts onto
+        // the plane along +Z; the result is a single non-axis-aligned face.
+        let outline = rect(0.0, 0.0, 10.0, 10.0);
+        let mut p = Program::default();
+        p.push(
+            "tilted floor",
+            Op::PlanarFace {
+                plane: PlaneRef::Tilted {
+                    origin: Vec3::new(5.0, 5.0, 5.0),
+                    normal: Vec3::new(-1.0, 0.0, 1.0),
+                },
+                outer: (outline, true),
+                holes: vec![],
+            },
+        );
+        let s = run_all(&p).expect("run");
+        assert_eq!(s.faces.len(), 1, "tilted PlanarFace emits one face");
+        // The face's surface must be a tilted Plane (not axis-aligned).
+        let f = &s.faces[0];
+        match f.surface {
+            Surface::Plane { normal, .. } => {
+                assert!(normal.x.abs() > 0.1 && normal.z.abs() > 0.1, "tilted normal {normal}");
+            }
+            _ => panic!("expected a Plane surface"),
+        }
+        // All 4 vertices must have non-uniform z (lifted by x position).
+        let zs: Vec<f32> = s.verts.iter().map(|v| v.point.z).collect();
+        assert!(zs.iter().cloned().any(|z| (z - 5.0).abs() > 0.5), "vertices lifted off z=5: {zs:?}");
+    }
+
+    #[test]
+    fn planarface_on_named_datum_works() {
+        // Register a tilted datum via Op::Plane, then reference it by name.
+        let outline = rect(0.0, 0.0, 10.0, 10.0);
+        let mut p = Program::default();
+        p.push(
+            "floor datum",
+            Op::Plane {
+                name: "floor".into(),
+                origin: Vec3::new(0.0, 0.0, 0.0),
+                normal: Vec3::new(0.0, 1.0, 1.0),
+            },
+        );
+        p.push(
+            "tilted face",
+            Op::PlanarFace {
+                plane: PlaneRef::Named("floor".into()),
+                outer: (outline, true),
+                holes: vec![],
+            },
+        );
+        let s = run_all(&p).expect("run");
+        assert_eq!(s.faces.len(), 1, "named-datum PlanarFace emits one face");
+    }
+
+    #[test]
+    fn extrude_with_tilted_plane_errors_cleanly() {
+        // Extrude can't yet take a tilted plane (slab engine is z-prism only).
+        let mut p = Program::default();
+        p.push("outline", Op::Sketch { name: "outline".into(), profile: rect(0.0, 0.0, 10.0, 10.0) });
+        p.push(
+            "bad",
+            Op::Extrude {
+                sketch: "outline".into(),
+                from: PlaneRef::Tilted { origin: Vec3::ZERO, normal: Vec3::new(1.0, 0.0, 1.0) },
+                to: PlaneRef::Z { z: 5.0, up: true },
+            },
+        );
+        let err = run_all(&p).unwrap_err();
+        assert!(err.contains("tilted planes not yet supported"), "got: {err}");
     }
 }
