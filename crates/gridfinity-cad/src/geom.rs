@@ -198,6 +198,21 @@ impl Surface {
         }
     }
 
+    /// Exact sign of `(∂p/∂u × ∂p/∂v) · normal`: whether the `(u, v)`
+    /// parameterization is right-handed about the outward normal. Constant per
+    /// variant, derived in closed form from `point`/`normal`.
+    pub fn uv_orientation(&self) -> f32 {
+        match *self {
+            Surface::Plane { .. }
+            | Surface::Cylinder { .. }
+            | Surface::Torus { .. }
+            // (∂u×∂v)·n = r/cos α > 0 on either nappe.
+            | Surface::Cone { .. } => 1.0,
+            // Colatitude v measured from the +axis pole makes (u, v) left-handed.
+            Surface::Sphere { .. } => -1.0,
+        }
+    }
+
     /// Inverse of `point`: map a 3D point onto `(u, v)`. Angles are returned in
     /// a branch continuous from `ref_dir` (0..2π), so partial surfaces stay
     /// monotone.
@@ -272,6 +287,10 @@ pub enum Curve {
         radius: f32,
         ref_dir: Vec3,
     },
+    /// Ellipse arc `p(t) = center + cos t · a + sin t · b`, with `a`/`b` the
+    /// conjugate semi-axis vectors. Arises where a cylinder is cut by a plane
+    /// oblique to its axis (inner-wall ramp side edges).
+    Ellipse { center: Vec3, a: Vec3, b: Vec3 },
 }
 
 impl Curve {
@@ -300,6 +319,7 @@ impl Curve {
                 let (d0, d1) = radial_frame(axis, ref_dir);
                 center + radius * (t.cos() * d0 + t.sin() * d1)
             }
+            Curve::Ellipse { center, a, b } => center + t.cos() * a + t.sin() * b,
         }
     }
 }

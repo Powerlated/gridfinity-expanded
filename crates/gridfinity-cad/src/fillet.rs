@@ -413,6 +413,10 @@ fn rebuild_loop(
                     let (a0, a1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
                     b.arc(vs, ve, center, axis, radius, ref_dir, a0, a1)
                 }
+                Curve::Ellipse { center, a: ea, b: eb } => {
+                    let (t0, t1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
+                    b.ellipse(vs, ve, center, ea, eb, t0, t1)
+                }
             };
             out.push(eid);
         }
@@ -448,6 +452,7 @@ fn emit_curv(b: &mut Builder, start: Vec3, end: Vec3, ce: CurvEdge) -> (EdgeId, 
     let ve = b.vertex(end);
     match ce.curve {
         Curve::Line { .. } => b.line(vs, ve),
+        Curve::Ellipse { .. } => unreachable!("blend construction emits only lines and circles"),
         Curve::Circle { center, axis, radius, ref_dir } => {
             // Walk the stored t0→t1 if it already maps start→end; else reverse.
             let at_start = ce.curve.point(ce.t0);

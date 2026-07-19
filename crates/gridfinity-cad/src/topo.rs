@@ -52,7 +52,7 @@ impl Edge {
     pub fn seg_count(&self, arc_segs_per_quarter: usize) -> usize {
         match self.curve {
             Curve::Line { .. } => 1,
-            Curve::Circle { .. } => {
+            Curve::Circle { .. } | Curve::Ellipse { .. } => {
                 let sweep = (self.t1 - self.t0).abs();
                 ((sweep / (std::f32::consts::PI / 2.0)) * arc_segs_per_quarter as f32)
                     .ceil()
@@ -225,6 +225,30 @@ impl Builder {
             curve,
             t0: a0,
             t1: a1,
+            v0: a,
+            v1: b,
+        })
+    }
+
+    /// Intern an ellipse-arc edge (`p(t) = center + cos t·ea + sin t·eb`);
+    /// `t0`/`t1` are the raw parameters at `a`/`b`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ellipse(
+        &mut self,
+        a: VertexId,
+        b: VertexId,
+        center: Vec3,
+        ea: Vec3,
+        eb: Vec3,
+        t0: f32,
+        t1: f32,
+    ) -> (EdgeId, bool) {
+        let curve = Curve::Ellipse { center, a: ea, b: eb };
+        let mid = curve.point((t0 + t1) * 0.5);
+        self.edge_between(a, b, mid, || Edge {
+            curve,
+            t0,
+            t1,
             v0: a,
             v1: b,
         })

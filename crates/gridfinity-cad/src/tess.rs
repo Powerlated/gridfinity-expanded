@@ -153,18 +153,17 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
         // chords back through the skipped boundary points so both faces agree.
         let tris = split_boundary_chords(tris, &uv, &loop_spans);
 
-        // Decide winding ONCE per face: the uv→3D orientation is uniform across
-        // a single (developable) face, so an area-weighted vote over all its
-        // triangles gives one flip decision — flipping per-triangle would break
-        // internal shared edges on curved faces where the geometric normal is
-        // numerically noisy.
-        let mut vote = 0.0f32;
+        // Decide winding ONCE per face, analytically: a triangle's 3D facing is
+        // its uv winding times the parameterization's handedness
+        // (`uv_orientation`), and must equal the face's outward side (`sense`).
+        // The summed uv cross products are the triangulation's exact signed uv
+        // area, so the whole face gets one sign — no sampled 3D geometry.
+        let mut uv_area = 0.0f32;
         for &[a, b, c] in &tris {
-            let geo = (pts3[b] - pts3[a]).cross(pts3[c] - pts3[a]);
-            let avg = nrm[a] + nrm[b] + nrm[c];
-            vote += geo.dot(avg);
+            uv_area += (uv[b].x - uv[a].x) * (uv[c].y - uv[a].y)
+                - (uv[b].y - uv[a].y) * (uv[c].x - uv[a].x);
         }
-        let flip = vote < 0.0;
+        let flip = uv_area * face.surface.uv_orientation() * sign < 0.0;
 
         for [a, b, c] in tris {
             let (p, nm) = if flip {
@@ -321,9 +320,28 @@ fn tess_grid_face(
         return None;
     }
 
-    // u_i from the bottom iso-v edge; v_j from the right iso-u edge.
-    let u_i: Vec<f32> = (0..m).map(|i| s.project(p0[i]).0).collect();
-    let v_j: Vec<f32> = (0..n).map(|j| s.project(p1[j]).1).collect();
+    // u_i from the bottom iso-v edge; v_j from the right iso-u edge. `project`
+    // wraps angles to [0, 2π); unwrap the angular sequences (u always; v only
+    // where it is an angle) so a sample sitting exactly on the branch cut
+    // (atan2 noise at u = 0) can't jump by 2π. Distance-valued v must NOT be
+    // unwrapped — a straight edge longer than π mm is not a branch jump.
+    let unwrap = |vals: &mut [f32]| {
+        for k in 1..vals.len() {
+            while vals[k] - vals[k - 1] > std::f32::consts::PI {
+                vals[k] -= 2.0 * std::f32::consts::PI;
+            }
+            while vals[k] - vals[k - 1] < -std::f32::consts::PI {
+                vals[k] += 2.0 * std::f32::consts::PI;
+            }
+        }
+    };
+    let mut u_i: Vec<f32> = (0..m).map(|i| s.project(p0[i]).0).collect();
+    let mut v_j: Vec<f32> = (0..n).map(|j| s.project(p1[j]).1).collect();
+    unwrap(&mut u_i);
+    if matches!(s, Surface::Torus { .. } | Surface::Sphere { .. }) {
+        unwrap(&mut v_j);
+    }
+    let (u_i, v_j) = (u_i, v_j);
 
     // Grid points g[i][j]; boundary reused from the edge samples so neighbouring
     // faces weld exactly, interior filled from the analytic surface.
@@ -347,8 +365,9 @@ fn tess_grid_face(
 
     // Two triangles per cell, wound CCW in (i,j); alternate the diagonal by
     // (i+j) parity so a shared interior edge between two cells is traversed once
-    // each way (otherwise the mesh would be non-manifold). A single
-    // area-weighted vote picks the outward facing (same convention as earcut).
+    // each way (otherwise the mesh would be non-manifold). Facing is decided
+    // analytically: CCW-in-(i,j) has uv winding sign(du·dv), which times the
+    // parameterization's handedness must equal the face's outward side.
     let mut cells: Vec<[(usize, usize); 3]> = Vec::with_capacity((m - 1) * (n - 1) * 2);
     for i in 0..m - 1 {
         for j in 0..n - 1 {
@@ -365,13 +384,9 @@ fn tess_grid_face(
             }
         }
     }
-    let mut vote = 0.0f32;
-    for [a, b, c] in &cells {
-        let geo = (g[b.0][b.1] - g[a.0][a.1]).cross(g[c.0][c.1] - g[a.0][a.1]);
-        let avg = nrm_at(a.0, a.1) + nrm_at(b.0, b.1) + nrm_at(c.0, c.1);
-        vote += geo.dot(avg);
-    }
-    let flip = vote < 0.0;
+    let du = u_i[m - 1] - u_i[0];
+    let dv = v_j[n - 1] - v_j[0];
+    let flip = du * dv * face.surface.uv_orientation() * sign < 0.0;
 
     let mut tris = Vec::with_capacity(cells.len());
     for [a, b, c] in cells {

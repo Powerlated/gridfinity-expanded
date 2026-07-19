@@ -119,6 +119,71 @@ pub fn wall_between(
     }
 }
 
+/// The profile edge of one segment realised at height `z`.
+pub fn seg_edge(b: &mut Builder, seg: &Seg, z: f32) -> (EdgeId, bool) {
+    let v0 = b.vertex(vec3_of(seg.start().x, seg.start().y, z));
+    let v1 = b.vertex(vec3_of(seg.end().x, seg.end().y, z));
+    match *seg {
+        Seg::Line { .. } => b.line(v0, v1),
+        Seg::Arc { center, radius, a0, a1, .. } => {
+            b.arc(v0, v1, vec3_of(center.x, center.y, z), Vec3::Z, radius, Vec3::X, a0, a1)
+        }
+    }
+}
+
+/// One side face over a single segment between heights `za → zb`, with the
+/// vertical boundary edges split at the given corner breakpoints (heights
+/// strictly inside `(za, zb)` where a neighbouring face starts or stops, so
+/// shared vertical edges pair 1:1 across differing spans). Loop order and
+/// surface/sense conventions match `wall_between`.
+pub fn wall_seg(
+    b: &mut Builder,
+    seg: &Seg,
+    za: f32,
+    zb: f32,
+    breaks_l: &[f32],
+    breaks_r: &[f32],
+    outward: bool,
+) {
+    let (p0, p1) = (seg.start(), seg.end());
+    let bottom = seg_edge(b, seg, za);
+    let top = seg_edge(b, seg, zb);
+    let chain = |b: &mut Builder, p: Vec2, breaks: &[f32]| -> Vec<(EdgeId, bool)> {
+        let mut hs: Vec<f32> = vec![za];
+        hs.extend(breaks.iter().copied().filter(|&h| h > za + 1e-4 && h < zb - 1e-4));
+        hs.sort_by(f32::total_cmp);
+        hs.push(zb);
+        hs.dedup_by(|x, y| (*x - *y).abs() < 1e-4);
+        let mut out = Vec::new();
+        for w in hs.windows(2) {
+            let v0 = b.vertex(vec3_of(p.x, p.y, w[0]));
+            let v1 = b.vertex(vec3_of(p.x, p.y, w[1]));
+            out.push(b.line(v0, v1));
+        }
+        out
+    };
+    let left = chain(b, p0, breaks_l);
+    let right = chain(b, p1, breaks_r);
+    let surface = match *seg {
+        Seg::Line { a, b: bb } => {
+            let dir = bb - a;
+            Surface::plane(vec3_of(a.x, a.y, za), Vec3::new(dir.y, -dir.x, 0.0))
+        }
+        Seg::Arc { center, radius, .. } => {
+            Surface::cylinder_z(vec3_of(center.x, center.y, 0.0), radius)
+        }
+    };
+    let sense = match *seg {
+        Seg::Arc { a0, a1, .. } => outward == (a1 > a0),
+        _ => outward,
+    };
+    let mut lp: Vec<(EdgeId, bool)> = vec![bottom];
+    lp.extend(right.iter().copied());
+    lp.push((top.0, !top.1));
+    lp.extend(left.iter().rev().map(|&(e, d)| (e, !d)));
+    b.face(surface, sense, Loop::new(lp), vec![]);
+}
+
 /// A ring realised as a directed loop, forward (`verts[k]→verts[k+1]`) or
 /// reversed. Callers pick the direction so each shared edge is used once in
 /// each direction (the manifold invariant); the analytic surface normal — not

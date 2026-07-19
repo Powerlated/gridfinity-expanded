@@ -1,8 +1,8 @@
-//! `gridfinity-cad`: a minimalistic analytic-surface B-rep CAD kernel and a
+﻿//! `gridfinity-cad`: a minimalistic analytic-surface B-rep CAD kernel and a
 //! parametric Gridfinity model built on it.
 //!
-//! Pipeline: [`sketch`] → [`build`] features → [`topo`] B-rep solid →
-//! `boolean`/`fillet` → [`tess`] → [`mesh`] → STL.
+//! Pipeline: [`sketch`] â†’ [`build`] features â†’ [`topo`] B-rep solid â†’
+//! `boolean`/`fillet` â†’ [`tess`] â†’ [`mesh`] â†’ STL.
 
 pub mod build;
 pub mod fillet;
@@ -14,6 +14,7 @@ pub mod mesh;
 pub mod printers;
 pub mod rectregion;
 pub mod region;
+pub mod segdiff;
 pub mod sketch;
 pub mod tess;
 pub mod topo;
@@ -28,11 +29,11 @@ mod tests {
     use super::*;
     use crate::build::{Ring, extrude, loft};
     use crate::gridfinity::{BinSlope, LogicalBin, Mode, SlopeDir};
-    use crate::layout::{GridCell, GridEdge, Orientation};
+    use crate::layout::{Axis, GridCell, GridEdge, Orientation, SplitLine};
     use crate::sketch::Sketch;
     use std::collections::HashMap;
 
-    /// Every directed edge of the indexed mesh must be matched by its reverse —
+    /// Every directed edge of the indexed mesh must be matched by its reverse â€”
     /// the watertight / 2-manifold invariant.
     fn assert_watertight(mesh: &Mesh) {
         let mut dir: HashMap<(u32, u32), i32> = HashMap::new();
@@ -127,7 +128,7 @@ mod tests {
         assert_watertight(&mesh);
         let (min, max) = mesh.bounds();
         let size = max - min;
-        // 2×2 grid → 2·42 − 0.5 = 83.5 mm (0.25 clearance/side); 7 + 3·7 = 28 tall.
+        // 2Ã—2 grid â†’ 2Â·42 âˆ’ 0.5 = 83.5 mm (0.25 clearance/side); 7 + 3Â·7 = 28 tall.
         assert!((size.x - 83.5).abs() < 1e-2, "x {}", size.x);
         assert!((size.y - 83.5).abs() < 1e-2, "y {}", size.y);
         assert!((size.z - 28.0).abs() < 1e-2, "z {}", size.z);
@@ -135,8 +136,8 @@ mod tests {
 
     #[test]
     fn single_cell_bin_is_watertight() {
-        // 1×1: the peg top coincides with the outer wall everywhere (no bridge
-        // faces at all) — the tightest shell case.
+        // 1Ã—1: the peg top coincides with the outer wall everywhere (no bridge
+        // faces at all) â€” the tightest shell case.
         let p = gridfinity::Params::rect(1, 1);
         let solid = gridfinity::build(&p);
         solid.validate().expect("1x1 topology valid");
@@ -174,7 +175,7 @@ mod tests {
         let mesh = tessellate(&solid, 6).to_mesh();
         assert_watertight(&mesh);
         let (min, max) = mesh.bounds();
-        // Layout spans 3 cells: last bin ends at 3·42 − 0.25.
+        // Layout spans 3 cells: last bin ends at 3Â·42 âˆ’ 0.25.
         assert!((max.x - 125.75).abs() < 1e-2, "max.x {}", max.x);
         assert!(min.x < 0.5, "min.x {}", min.x);
     }
@@ -253,8 +254,8 @@ mod tests {
 
     #[test]
     fn meshes_have_outward_consistent_winding() {
-        // Positive signed volume ⇒ every facet wound outward (CCW seen from
-        // outside) ⇒ the STL normals are outward and the GL preview back-face
+        // Positive signed volume â‡’ every facet wound outward (CCW seen from
+        // outside) â‡’ the STL normals are outward and the GL preview back-face
         // cull shows the outside, not an inside-out shell.
         for p in [
             gridfinity::Params::default(),
@@ -291,7 +292,7 @@ mod tests {
 
     #[test]
     fn divider_edges_split_bin_is_watertight() {
-        // 3×1 bin with a full divider after column 1 (one V edge at x=1).
+        // 3Ã—1 bin with a full divider after column 1 (one V edge at x=1).
         let divider = vec![GridEdge { x: 1, y: 0, orientation: Orientation::V }];
         let p = gridfinity::Params {
             divider_edges: divider,
@@ -301,8 +302,8 @@ mod tests {
         solid.validate().expect("divider bin topology valid");
         let mesh = tessellate(&solid, 6).to_mesh();
         assert_watertight(&mesh);
-        // Two compartments → the rim top face has two holes, so the triangle
-        // count is clearly higher than a single-compartment 3×1 bin.
+        // Two compartments â†’ the rim top face has two holes, so the triangle
+        // count is clearly higher than a single-compartment 3Ã—1 bin.
         let single = tessellate(&gridfinity::build(&gridfinity::Params::rect(3, 1)), 6).to_mesh();
         assert!(
             mesh.tri_count() > single.tri_count(),
@@ -312,7 +313,7 @@ mod tests {
 
     #[test]
     fn uneven_dividers_stay_watertight() {
-        // 4×3 grid split at non-midpoint lines on both axes.
+        // 4Ã—3 grid split at non-midpoint lines on both axes.
         let mut dividers = Vec::new();
         for y in 0..3 {
             dividers.push(GridEdge { x: 1, y, orientation: Orientation::V });
@@ -325,6 +326,333 @@ mod tests {
         let solid = gridfinity::build(&p);
         solid.validate().expect("uneven divider topology valid");
         assert_watertight(&tessellate(&solid, 6).to_mesh());
+    }
+
+    #[test]
+    fn divider_ring_island_is_watertight() {
+        // Dividers enclosing the centre cell of a 3Ã—3 â†’ the cavity trace has a
+        // hole loop: an island tower with its own inner compartment.
+        let dividers = vec![
+            GridEdge { x: 1, y: 1, orientation: Orientation::V },
+            GridEdge { x: 2, y: 1, orientation: Orientation::V },
+            GridEdge { x: 1, y: 1, orientation: Orientation::H },
+            GridEdge { x: 1, y: 2, orientation: Orientation::H },
+        ];
+        let p = gridfinity::Params { divider_edges: dividers, ..gridfinity::Params::rect(3, 3) };
+        let solid = gridfinity::build(&p);
+        solid.validate().expect("island topology valid");
+        assert_watertight(&tessellate(&solid, 6).to_mesh());
+    }
+
+    #[test]
+    fn free_standing_inner_wall_is_watertight_and_adds_volume() {
+        // A diagonal full-height inner wall floating inside the cavity of a
+        // 2×2 bin: island tower welded into floor and rim assembly.
+        let base = gridfinity::Params::default();
+        let base_mesh = tessellate(&gridfinity::build(&base), 6).to_mesh();
+        let p = gridfinity::Params {
+            inner_walls: vec![gridfinity::InnerWall {
+                x1: 20.0,
+                y1: 20.0,
+                x2: 60.0,
+                y2: 55.0,
+                width: 2.0,
+                height: None,
+            }],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&p);
+        solid.validate().expect("inner-wall topology valid");
+        let mesh = tessellate(&solid, 6).to_mesh();
+        assert_watertight(&mesh);
+        let dv = signed_volume(&mesh) - signed_volume(&base_mesh);
+        assert!(dv > 50.0, "wall must add material, got dv={dv}");
+    }
+
+    #[test]
+    fn partial_height_inner_wall_is_capped_below_rim() {
+        // A low free-standing barrier: tower capped at floor + 8 mm, well
+        // below the rim; the mesh must stay watertight and the cap must not
+        // reach total height.
+        let p = gridfinity::Params {
+            inner_walls: vec![gridfinity::InnerWall {
+                x1: 15.0,
+                y1: 42.0,
+                x2: 65.0,
+                y2: 42.0,
+                width: 2.0,
+                height: Some(8.0),
+            }],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&p);
+        solid.validate().expect("partial inner-wall topology valid");
+        let mesh = tessellate(&solid, 6).to_mesh();
+        assert_watertight(&mesh);
+        let base = tessellate(&gridfinity::build(&gridfinity::Params::default()), 6).to_mesh();
+        let dv = signed_volume(&mesh) - signed_volume(&base);
+        // The wall adds ~800 mm³ but its sharp corners drop the floor fillet
+        // (which itself adds ~600 mm³ to the base bin), so the net is small —
+        // what matters is that it is positive and clearly below full height.
+        let full = gridfinity::Params {
+            inner_walls: vec![gridfinity::InnerWall {
+                x1: 15.0,
+                y1: 42.0,
+                x2: 65.0,
+                y2: 42.0,
+                width: 2.0,
+                height: None,
+            }],
+            ..gridfinity::Params::default()
+        };
+        let full_mesh = tessellate(&gridfinity::build(&full), 6).to_mesh();
+        let dv_full = signed_volume(&full_mesh) - signed_volume(&base);
+        assert!(dv > 100.0, "partial wall adds material, dv={dv}");
+        assert!(dv_full > dv + 100.0, "full wall adds more, {dv_full} vs {dv}");
+    }
+
+    #[test]
+    fn partial_wall_crossing_cavity_is_banded_watertight() {
+        // A low wall spanning wall band to wall band: below its top the
+        // cavity is two pockets, above it one — the z-banded prism.
+        let p = gridfinity::Params {
+            inner_walls: vec![gridfinity::InnerWall {
+                x1: -5.0,
+                y1: 40.0,
+                x2: 90.0,
+                y2: 44.0,
+                width: 2.4,
+                height: Some(9.0),
+            }],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&p);
+        solid.validate().expect("banded crossing wall topology valid");
+        assert_watertight(&tessellate(&solid, 6).to_mesh());
+    }
+
+    #[test]
+    fn partial_wall_one_end_on_boundary_is_watertight() {
+        // One end embedded, the other free in the cavity, partial height.
+        let p = gridfinity::Params {
+            inner_walls: vec![gridfinity::InnerWall {
+                x1: 90.0,
+                y1: 28.0,
+                x2: 45.0,
+                y2: 50.0,
+                width: 3.0,
+                height: Some(12.0),
+            }],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&p);
+        {
+            let e = &solid.edges[261];
+            eprintln!(
+                "edge 261: v0={:?} v1={:?}",
+                solid.verts[e.v0].point, solid.verts[e.v1].point
+            );
+            for (fi, f) in solid.faces.iter().enumerate() {
+                for lp in f.loops() {
+                    for &(eid, fwd) in &lp.edges {
+                        if eid == 261 {
+                            eprintln!("  face {fi} surf={:?} fwd={fwd}", f.surface);
+                            for &(e2, d2) in &lp.edges {
+                                let ee = &solid.edges[e2];
+                                eprintln!(
+                                    "    e{e2} d={d2} {:?} -> {:?}",
+                                    solid.verts[ee.v0].point, solid.verts[ee.v1].point
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        solid.validate().expect("banded notch wall topology valid");
+        assert_watertight(&tessellate(&solid, 6).to_mesh());
+    }
+
+    #[test]
+    fn crossing_inner_wall_splits_compartment_watertight() {
+        // A slightly skewed wall spanning the whole 2×2 cavity: both ends
+        // overlap the wall band, so the compartment splits into two loops
+        // with sharp notch corners (floor fillet drops to zero there).
+        let p = gridfinity::Params {
+            inner_walls: vec![gridfinity::InnerWall {
+                x1: -5.0,
+                y1: 40.0,
+                x2: 90.0,
+                y2: 45.0,
+                width: 2.4,
+                height: None,
+            }],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&p);
+        solid.validate().expect("crossing inner-wall topology valid");
+        let mesh = tessellate(&solid, 6).to_mesh();
+        assert_watertight(&mesh);
+        let base = tessellate(&gridfinity::build(&gridfinity::Params::default()), 6).to_mesh();
+        assert!(signed_volume(&mesh) > signed_volume(&base) + 50.0);
+    }
+
+    #[test]
+    fn notching_inner_wall_is_watertight() {
+        // One end embedded in the wall band, the other free inside the
+        // cavity: the loop keeps one boundary with a peninsula notch.
+        let p = gridfinity::Params {
+            inner_walls: vec![gridfinity::InnerWall {
+                x1: 90.0,
+                y1: 30.0,
+                x2: 40.0,
+                y2: 50.0,
+                width: 3.0,
+                height: None,
+            }],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&p);
+        solid.validate().expect("notching inner-wall topology valid");
+        assert_watertight(&tessellate(&solid, 6).to_mesh());
+    }
+
+    #[test]
+    fn open_edge_bin_is_watertight_and_loses_volume() {
+        // 2Ã—2 bin with the whole north face open (both H edges at y=2).
+        let closed = gridfinity::Params::default();
+        let closed_mesh = tessellate(&gridfinity::build(&closed), 6).to_mesh();
+        let open = gridfinity::Params {
+            open_edges: vec![
+                GridEdge { x: 0, y: 2, orientation: Orientation::H },
+                GridEdge { x: 1, y: 2, orientation: Orientation::H },
+            ],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&open);
+        solid.validate().expect("open-edge bin topology valid");
+        let mesh = tessellate(&solid, 6).to_mesh();
+        assert_watertight(&mesh);
+        assert!(
+            signed_volume(&mesh) < signed_volume(&closed_mesh) - 100.0,
+            "removing a wall must remove material"
+        );
+        // The footprint must not change: the open face still sits at the spec
+        // inset, not the pitch line.
+        let (min, max) = mesh.bounds();
+        assert!((max.y - min.y - 83.5).abs() < 1e-2, "depth {}", max.y - min.y);
+    }
+
+    #[test]
+    fn single_open_edge_and_corner_pinch_watertight() {
+        // One open edge out of two on a face â†’ a mixed walled/open corner and a
+        // mid-face wall end (pinch against the neighbouring walled strip).
+        let p = gridfinity::Params {
+            open_edges: vec![GridEdge { x: 0, y: 2, orientation: Orientation::H }],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&p);
+        solid.validate().expect("half-open face topology valid");
+        assert_watertight(&tessellate(&solid, 6).to_mesh());
+    }
+
+    #[test]
+    fn fully_open_1x1_bin_is_watertight() {
+        // Every perimeter edge open: no wall above the floor at all.
+        let mut open_edges = Vec::new();
+        for e in crate::layout::perimeter_edges(&cells(&[(0, 0)])) {
+            open_edges.push(e);
+        }
+        let p = gridfinity::Params { open_edges, ..gridfinity::Params::rect(1, 1) };
+        let solid = gridfinity::build(&p);
+        solid.validate().expect("fully-open bin topology valid");
+        let mesh = tessellate(&solid, 6).to_mesh();
+        assert_watertight(&mesh);
+        // Only base + floor remain: the mesh must top out at the floor.
+        let (_, max) = mesh.bounds();
+        assert!((max.z - 8.2).abs() < 1e-2, "top {}", max.z);
+    }
+
+    #[test]
+    fn open_edge_with_divider_finger_watertight() {
+        // A divider wall running INTO an open face: its end lands on the outer
+        // profile, splitting the peg-welded body piece (peg profiles must
+        // split identically to stay welded).
+        let p = gridfinity::Params {
+            open_edges: vec![
+                GridEdge { x: 0, y: 1, orientation: Orientation::H },
+                GridEdge { x: 1, y: 1, orientation: Orientation::H },
+            ],
+            divider_edges: vec![GridEdge { x: 1, y: 0, orientation: Orientation::V }],
+            ..gridfinity::Params::rect(2, 1)
+        };
+        let solid = gridfinity::build(&p);
+        solid.validate().expect("divider-to-open-face topology valid");
+        assert_watertight(&tessellate(&solid, 6).to_mesh());
+    }
+
+    #[test]
+    fn split_bin_pieces_are_watertight() {
+        // 3Ã—1 bin split after column 0 â†’ two pieces with square open seams.
+        let mut p = gridfinity::Params::rect(3, 1);
+        p.bins[0].split_lines = vec![SplitLine { axis: Axis::X, index: 1 }];
+        let pieces = gridfinity::build_pieces(&p);
+        assert_eq!(pieces.len(), 2);
+        for pc in &pieces {
+            pc.solid.validate().unwrap_or_else(|e| panic!("{}: {e}", pc.name));
+            let mesh = tessellate(&pc.solid, 6).to_mesh();
+            assert_watertight(&mesh);
+        }
+        // The seam face sits ON the pitch plane (x = 42), not inset.
+        let (_, max0) = tessellate(&pieces[0].solid, 6).to_mesh().bounds();
+        assert!((max0.x - 42.0).abs() < 1e-3, "seam at {}", max0.x);
+        // Piece names follow the reference convention.
+        assert_eq!(pieces[0].name, "gridfinity-bin-piece-1-of-2.stl");
+    }
+
+    #[test]
+    fn split_seam_divider_walls_both_pieces() {
+        // A divider on the split line becomes a full wall on both pieces, so
+        // each piece is a complete closed bin (no open seam).
+        let mut p = gridfinity::Params::rect(2, 1);
+        p.bins[0].split_lines = vec![SplitLine { axis: Axis::X, index: 1 }];
+        p.divider_edges = vec![GridEdge { x: 1, y: 0, orientation: Orientation::V }];
+        let pieces = gridfinity::build_pieces(&p);
+        assert_eq!(pieces.len(), 2);
+        let mut volumes = Vec::new();
+        for pc in &pieces {
+            pc.solid.validate().unwrap_or_else(|e| panic!("{}: {e}", pc.name));
+            let mesh = tessellate(&pc.solid, 6).to_mesh();
+            assert_watertight(&mesh);
+            volumes.push(signed_volume(&mesh));
+        }
+        // Compare against the open-seam variant: walled seams add material.
+        let mut p_open = gridfinity::Params::rect(2, 1);
+        p_open.bins[0].split_lines = vec![SplitLine { axis: Axis::X, index: 1 }];
+        let open_pieces = gridfinity::build_pieces(&p_open);
+        let open_vol: f64 = open_pieces
+            .iter()
+            .map(|pc| signed_volume(&tessellate(&pc.solid, 6).to_mesh()))
+            .sum();
+        assert!(volumes.iter().sum::<f64>() > open_vol + 100.0);
+    }
+
+    #[test]
+    fn split_l_shaped_bin_pieces_watertight() {
+        let mut p = gridfinity::Params {
+            bins: vec![LogicalBin {
+                cells: cells(&[(0, 0), (1, 0), (0, 1)]),
+                ..Default::default()
+            }],
+            ..gridfinity::Params::default()
+        };
+        p.bins[0].split_lines = vec![SplitLine { axis: Axis::Y, index: 1 }];
+        let pieces = gridfinity::build_pieces(&p);
+        assert_eq!(pieces.len(), 2);
+        for pc in &pieces {
+            pc.solid.validate().unwrap_or_else(|e| panic!("{}: {e}", pc.name));
+            assert_watertight(&tessellate(&pc.solid, 6).to_mesh());
+        }
     }
 
     #[test]
@@ -388,8 +716,8 @@ mod tests {
         let mut p = gridfinity::Params::default();
         p.bins[0].slope = Some(BinSlope { angle_deg: 20.0, dir: SlopeDir::MinusX });
         let mesh = tessellate(&gridfinity::build(&p), 10).to_mesh();
-        // MinusX ⇒ low side at x=0. Some cavity-floor vertex at x≈ wall inset
-        // should sit at ~floor_z; the high side (x≈fw) strictly above. Restrict
+        // MinusX â‡’ low side at x=0. Some cavity-floor vertex at xâ‰ˆ wall inset
+        // should sit at ~floor_z; the high side (xâ‰ˆfw) strictly above. Restrict
         // to z above the base so outer-shell vertices don't win the fold.
         let low = mesh
             .positions
@@ -405,7 +733,7 @@ mod tests {
             .filter(|v| v.x > 80.0)
             .map(|v| v.z)
             .fold(f32::NEG_INFINITY, f32::max);
-        assert!((low - floor_z).abs() < 0.6, "low-side floor z {low} ≈ floor_z {floor_z}");
+        assert!((low - floor_z).abs() < 0.6, "low-side floor z {low} â‰ˆ floor_z {floor_z}");
         assert!(high > floor_z + 3.0, "high-side floor z {high} should rise above floor_z");
     }
 }

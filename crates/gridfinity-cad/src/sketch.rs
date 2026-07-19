@@ -155,16 +155,74 @@ impl Sketch {
     }
 }
 
-/// Signed area of a loop (arcs approximated by their chords — sufficient for
-/// orientation tests).
+/// Signed area of a loop, exact for arcs: the chord shoelace plus each arc's
+/// circular-segment area r²(Δ − sin Δ)/2, where Δ = a1 − a0 is the signed
+/// sweep (a CCW arc bulges left of its chord and adds positive area).
 pub fn loop_area(segs: &[Seg]) -> f32 {
     let mut s = 0.0;
     for seg in segs {
         let a = seg.start();
         let b = seg.end();
         s += a.x * b.y - b.x * a.y;
+        if let Seg::Arc { radius, a0, a1, .. } = *seg {
+            let d = a1 - a0;
+            s += radius * radius * (d - d.sin());
+        }
     }
     s / 2.0
+}
+
+/// Exact point-in-loop test (even–odd cast toward +x). Lines use the standard
+/// half-open crossing rule; each arc is split at its y-extreme angles
+/// (cos θ = 0) into y-monotone pieces so the same rule applies, with the
+/// crossing x solved on the circle itself — a y-monotone piece lies entirely
+/// on one side of its centre, so the ± of `c.x ± √(r² − dy²)` is the sign of
+/// cos θ anywhere on the piece.
+pub fn point_in_segs(pt: Vec2, segs: &[Seg]) -> bool {
+    let mut inside = false;
+    let mut cross = |y0: f32, y1: f32, x: f32| {
+        if (y0 > pt.y) != (y1 > pt.y) && x > pt.x {
+            inside = !inside;
+        }
+    };
+    for seg in segs {
+        match *seg {
+            Seg::Line { a, b } => {
+                if (a.y > pt.y) != (b.y > pt.y) {
+                    cross(a.y, b.y, a.x + (pt.y - a.y) / (b.y - a.y) * (b.x - a.x));
+                }
+            }
+            Seg::Arc { a, b, center, radius, a0, a1 } => {
+                // y-extreme angles π/2 + kπ strictly inside the sweep, in
+                // traversal order.
+                let (lo, hi) = (a0.min(a1), a0.max(a1));
+                let k0 = ((lo - PI / 2.0) / PI).floor() as i32 + 1;
+                let k1 = ((hi - PI / 2.0) / PI).ceil() as i32 - 1;
+                let mut stops: Vec<f32> = (k0..=k1).map(|k| PI / 2.0 + k as f32 * PI).collect();
+                if a1 < a0 {
+                    stops.reverse();
+                }
+                let mut t_prev = a0;
+                let mut p_prev = a;
+                for t in stops.into_iter().chain(std::iter::once(a1)) {
+                    let p = if t == a1 {
+                        b // exact endpoint, shared with the next seg
+                    } else {
+                        center + Vec2::new(t.cos(), t.sin()) * radius
+                    };
+                    if (p_prev.y > pt.y) != (p.y > pt.y) {
+                        let dy = pt.y - center.y;
+                        let dx = (radius * radius - dy * dy).max(0.0).sqrt();
+                        let side = ((t_prev + t) / 2.0).cos();
+                        cross(p_prev.y, p.y, center.x + dx.copysign(side));
+                    }
+                    t_prev = t;
+                    p_prev = p;
+                }
+            }
+        }
+    }
+    inside
 }
 
 /// Reverse a loop (order + each segment).

@@ -1,18 +1,24 @@
-//! egui front-end for the analytic B-rep Gridfinity engine: a parameter panel,
-//! a live glow-rendered 3D preview, and binary-STL export.
+//! egui front-end for the analytic B-rep Gridfinity engine: a 2D layout
+//! editor (polyomino bins, open/divider edges, split lines, inner walls), a
+//! live glow-rendered 3D preview, and binary-STL export (assembled or split
+//! pieces).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod editor;
 mod viewport;
 
 use eframe::egui;
-use gridfinity_cad::gridfinity::{self, BinSlope, Mode, Params, SlopeDir};
+use editor::{BIN_COLORS, Editor, Tool};
+use gridfinity_cad::gridfinity::{self, BinSlope, LogicalBin, Mode, Params, SlopeDir};
+use gridfinity_cad::layout::GridFootprint;
+use gridfinity_cad::printers::{DEFAULT_PRINTER, PRINTER_PROFILES, PrinterProfile, check_bed_fit, compute_auto_split_lines};
 use gridfinity_cad::tessellate;
 use std::sync::{Arc, Mutex};
 use viewport::{Camera, Renderer};
 
 /// Curve resolution (segments per 90° arc) for the live preview vs. export.
-const PREVIEW_RES: usize = 20;
+const PREVIEW_RES: usize = 5;
 const EXPORT_RES: usize = 48;
 
 fn main() -> eframe::Result<()> {
@@ -20,7 +26,7 @@ fn main() -> eframe::Result<()> {
         depth_buffer: 24,
         renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 720.0])
+            .with_inner_size([1200.0, 760.0])
             .with_title("Gridfinity Parametric — analytic B-rep CAD"),
         ..Default::default()
     };
@@ -33,17 +39,8 @@ fn main() -> eframe::Result<()> {
 
 struct App {
     params: Params,
-    // Single rectangular logical bin (params.bins[0]); the engine supports
-    // arbitrary polyominoes, the GUI exposes the rectangular case.
-    grid_x: u32,
-    grid_y: u32,
-    // Even-division counts (compartments per axis); expanded to divider edges.
-    comp_x: u32,
-    comp_y: u32,
-    // Slope widget state (params.slope is Some only while enabled).
-    slope_on: bool,
-    slope_angle: f32,
-    slope_dir: SlopeDir,
+    editor: Editor,
+    printer: PrinterProfile,
     gl: Arc<eframe::glow::Context>,
     renderer: Arc<Mutex<Renderer>>,
     camera: Camera,
@@ -58,13 +55,8 @@ impl App {
         let renderer = Arc::new(Mutex::new(Renderer::new(&gl)));
         let mut app = App {
             params: Params::default(),
-            grid_x: 2,
-            grid_y: 2,
-            comp_x: 1,
-            comp_y: 1,
-            slope_on: false,
-            slope_angle: 20.0,
-            slope_dir: SlopeDir::MinusX,
+            editor: Editor::default(),
+            printer: DEFAULT_PRINTER,
             gl,
             renderer,
             camera: Camera::default(),
@@ -91,12 +83,8 @@ impl App {
     }
 
     fn export_stl(&mut self) {
-        let default_name = format!(
-            "gridfinity-{}x{}x{}u.stl",
-            self.grid_x, self.grid_y, self.params.height_units
-        );
         if let Some(path) = rfd::FileDialog::new()
-            .set_file_name(default_name)
+            .set_file_name("gridfinity-bin.stl")
             .add_filter("STL", &["stl"])
             .save_file()
         {
@@ -108,14 +96,35 @@ impl App {
             }
         }
     }
+
+    /// Split-aware export: one STL per printable piece, into a folder.
+    fn export_pieces(&mut self) {
+        let Some(dir) = rfd::FileDialog::new().pick_folder() else { return };
+        let pieces = gridfinity::build_pieces(&self.params);
+        let mut n = 0usize;
+        for piece in &pieces {
+            let mesh = tessellate(&piece.solid, EXPORT_RES).to_mesh();
+            let path = dir.join(&piece.name);
+            match std::fs::write(&path, mesh.to_stl_binary()) {
+                Ok(()) => n += 1,
+                Err(e) => {
+                    self.status = format!("Export failed at {}: {e}", piece.name);
+                    return;
+                }
+            }
+        }
+        self.status = format!("Exported {n} piece(s) to {}", dir.display());
+    }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::left("params")
             .resizable(true)
-            .default_size(280.0)
-            .show(ui, |ui| self.params_panel(ui));
+            .default_size(340.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| self.params_panel(ui));
+            });
 
         egui::CentralPanel::default().show(ui, |ui| self.viewport(ui));
 
@@ -139,70 +148,106 @@ impl App {
         ui.heading("Gridfinity");
         ui.add_space(4.0);
 
-        egui::Grid::new("dims").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-            ui.label("Grid X");
-            let gx = ui.add(egui::DragValue::new(&mut self.grid_x).range(1..=12)).changed();
-            ui.end_row();
-            ui.label("Grid Y");
-            let gy = ui.add(egui::DragValue::new(&mut self.grid_y).range(1..=12)).changed();
-            ui.end_row();
-            if gx || gy {
-                p.bins[0].cells = gridfinity::rect_cells(self.grid_x, self.grid_y);
+        // ── Layout editor ────────────────────────────────────────────────
+        ui.horizontal(|ui| {
+            for (tool, label) in [
+                (Tool::Cells, "Cells"),
+                (Tool::Edges, "Edges"),
+                (Tool::Split, "Split"),
+                (Tool::Walls, "Walls"),
+            ] {
+                ui.selectable_value(&mut self.editor.tool, tool, label);
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            for bi in 0..p.bins.len() {
+                let col = BIN_COLORS[bi % BIN_COLORS.len()];
+                let label = egui::RichText::new(format!("Bin {}", bi + 1)).color(col);
+                ui.selectable_value(&mut self.editor.active_bin, bi, label);
+            }
+            if ui.button("＋ bin").clicked() {
+                p.bins.push(LogicalBin::default());
+                self.editor.active_bin = p.bins.len() - 1;
+            }
+            if p.bins.len() > 1 && ui.button("− bin").clicked() {
+                p.bins.remove(self.editor.active_bin);
+                self.editor.active_bin = 0;
                 changed = true;
             }
+        });
+        match self.editor.tool {
+            Tool::Cells => ui.label("Click cells to paint the active bin."),
+            Tool::Edges => ui.label("Click a perimeter edge → open; internal edge → divider."),
+            Tool::Split => ui.label("Click a grid line inside the active bin to split it."),
+            Tool::Walls => ui.label("Drag to draw a free-form inner wall."),
+        };
+        changed |= self.editor.canvas(ui, p);
+
+        if self.editor.tool == Tool::Walls {
+            ui.horizontal(|ui| {
+                ui.label("width");
+                ui.add(egui::DragValue::new(&mut self.editor.wall_width).range(0.4..=8.0).speed(0.1));
+                ui.checkbox(&mut self.editor.wall_full, "full height");
+                if !self.editor.wall_full {
+                    ui.add(egui::DragValue::new(&mut self.editor.wall_height).range(0.5..=60.0).speed(0.5));
+                }
+            });
+            let mut remove: Option<usize> = None;
+            for (i, w) in p.inner_walls.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let h = w.height.map_or("full".into(), |h| format!("{h:.1} mm"));
+                    ui.label(format!(
+                        "#{}: ({:.0},{:.0})→({:.0},{:.0}) w{:.1} {h}",
+                        i + 1, w.x1, w.y1, w.x2, w.y2, w.width
+                    ));
+                    if ui.small_button("✕").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                p.inner_walls.remove(i);
+                changed = true;
+            }
+        }
+
+        ui.separator();
+        egui::Grid::new("dims").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
             ui.label("Height (7 mm units)");
             changed |= ui.add(egui::DragValue::new(&mut p.height_units).range(1..=30)).changed();
             ui.end_row();
         });
 
-        ui.separator();
         ui.label("Walls & floor");
         changed |= ui.add(egui::Slider::new(&mut p.wall_thickness, 0.8..=4.0).text("wall")).changed();
         changed |= ui.add(egui::Slider::new(&mut p.cavity_corner_radius, 0.0..=8.0).text("corner r")).changed();
         changed |= ui.add(egui::Slider::new(&mut p.floor_fillet, 0.0..=6.0).text("floor fillet")).changed();
 
+        // ── Per-bin sloped floor ─────────────────────────────────────────
         ui.separator();
-        ui.label("Compartments");
-        let mut divs_changed = false;
-        egui::Grid::new("divs").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-            ui.label("Across X");
-            divs_changed |= ui.add(egui::DragValue::new(&mut self.comp_x).range(1..=10)).changed();
-            ui.end_row();
-            ui.label("Across Y");
-            divs_changed |= ui.add(egui::DragValue::new(&mut self.comp_y).range(1..=10)).changed();
-            ui.end_row();
-        });
-        if divs_changed || changed {
-            // Grid size affects the expansion too, so refresh on any dims change.
-            p.divider_edges = gridfinity::divisions_to_edges(
-                self.grid_x,
-                self.grid_y,
-                self.comp_x.saturating_sub(1),
-                self.comp_y.saturating_sub(1),
-            );
-            changed = true;
+        ui.label(format!("Sloped floor (bin {})", self.editor.active_bin + 1));
+        if let Some(bin) = p.bins.get_mut(self.editor.active_bin) {
+            let mut on = bin.slope.is_some();
+            changed |= ui.checkbox(&mut on, "Enable (disables floor fillet)").changed();
+            if on {
+                let slope = bin.slope.get_or_insert(BinSlope { angle_deg: 20.0, dir: SlopeDir::MinusX });
+                changed |= ui
+                    .add(egui::Slider::new(&mut slope.angle_deg, 5.0..=45.0).text("angle °"))
+                    .changed();
+                ui.horizontal(|ui| {
+                    for (dir, label) in [
+                        (SlopeDir::MinusX, "−X"),
+                        (SlopeDir::PlusX, "+X"),
+                        (SlopeDir::MinusY, "−Y"),
+                        (SlopeDir::PlusY, "+Y"),
+                    ] {
+                        changed |= ui.selectable_value(&mut slope.dir, dir, label).changed();
+                    }
+                });
+            } else if bin.slope.take().is_some() {
+                changed = true;
+            }
         }
-
-        ui.separator();
-        ui.label("Sloped floor");
-        changed |= ui.checkbox(&mut self.slope_on, "Enable (disables floor fillet)").changed();
-        if self.slope_on {
-            changed |= ui
-                .add(egui::Slider::new(&mut self.slope_angle, 5.0..=45.0).text("angle °"))
-                .changed();
-            ui.horizontal(|ui| {
-                for (dir, label) in [
-                    (SlopeDir::MinusX, "−X"),
-                    (SlopeDir::PlusX, "+X"),
-                    (SlopeDir::MinusY, "−Y"),
-                    (SlopeDir::PlusY, "+Y"),
-                ] {
-                    changed |= ui.selectable_value(&mut self.slope_dir, dir, label).changed();
-                }
-            });
-        }
-        p.bins[0].slope =
-            self.slope_on.then_some(BinSlope { angle_deg: self.slope_angle, dir: self.slope_dir });
 
         ui.separator();
         ui.label("Fasteners");
@@ -215,10 +260,51 @@ impl App {
             changed |= ui.selectable_value(&mut p.mode, Mode::Baseplate, "Baseplate").changed();
         });
 
+        // ── Printer / bed fit ────────────────────────────────────────────
+        ui.separator();
+        ui.label("Printer");
+        egui::ComboBox::from_id_salt("printer")
+            .selected_text(self.printer.name)
+            .show_ui(ui, |ui| {
+                for prof in PRINTER_PROFILES {
+                    ui.selectable_value(&mut self.printer, *prof, prof.name);
+                }
+            });
+        if let Some(bin) = p.bins.get_mut(self.editor.active_bin) {
+            if !bin.cells.is_empty() {
+                let fit = check_bed_fit(&bin.cells, self.printer);
+                let (w, d) = GridFootprint::from_cells(&bin.cells)
+                    .map(|f| f.mm())
+                    .unwrap_or((0.0, 0.0));
+                if fit.fits {
+                    ui.label(format!("Bin {} fits: {w:.0} × {d:.0} mm{}",
+                        self.editor.active_bin + 1,
+                        if fit.rotated { " (rotated)" } else { "" }));
+                } else {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0xd6, 0x63, 0x33),
+                        format!("Bin {} exceeds bed ({w:.0} × {d:.0} mm)", self.editor.active_bin + 1),
+                    );
+                    if ui.button("Auto-split to fit").clicked() {
+                        bin.split_lines = compute_auto_split_lines(&bin.cells, self.printer);
+                        changed = true;
+                    }
+                }
+                if !bin.split_lines.is_empty() && ui.button("Clear splits").clicked() {
+                    bin.split_lines.clear();
+                    changed = true;
+                }
+            }
+        }
+
+        // ── Export ───────────────────────────────────────────────────────
         ui.separator();
         ui.horizontal(|ui| {
             if ui.button("Export STL…").clicked() {
                 self.export_stl();
+            }
+            if ui.button("Export pieces…").clicked() {
+                self.export_pieces();
             }
             if ui.button("Fit view").clicked() {
                 self.regenerate(true);

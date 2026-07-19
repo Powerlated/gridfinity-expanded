@@ -216,9 +216,12 @@ pub fn effective_walls(
     for e in perimeter_edges(piece_cells) {
         match classify_edge(whole_bin_cells, e) {
             EdgeClass::Internal => {
-                // Seam between two pieces of the same bin.
+                // Seam between two pieces of the same bin. A divider placed on
+                // a split line becomes a full wall on both adjacent pieces (it
+                // is a piece-PERIMETER edge, so it gets a wall strip inset from
+                // the seam plane, not a centred divider strip).
                 if divider_set.contains(&e) {
-                    out.dividers.insert(e);
+                    out.walled.insert(e);
                 } else {
                     out.open.insert(e);
                 }
@@ -331,8 +334,9 @@ mod tests {
         let piece = cells(&[(0, 0)]);
         let seam = GridEdge { x: 1, y: 0, orientation: Orientation::V };
         let w = effective_walls(&piece, &whole, &[], &[seam]);
-        assert!(w.dividers.contains(&seam));
+        assert!(w.walled.contains(&seam), "seam divider becomes a full wall");
         assert!(!w.open.contains(&seam));
+        assert!(!w.dividers.contains(&seam));
     }
 
     #[test]
