@@ -272,8 +272,21 @@ vertex carries a `bad` flag as a 7th float (`MESH_STRIDE`; the kernel's `render_
 rim-lit glow, and `paint_error_banner` names the bin and prints why. Export refuses while any bin is
 failing rather than panicking on the way out.
 
+**`kernel/perf.rs`** is the instrumentation. A fixed `Metric` set (region booleans, the seg/seg
+solve, builder interning, blending, tessellation, slabs) backed by global relaxed atomics, plus a
+`CountingAlloc<A>` the *binary* installs as `#[global_allocator]` (a library must not choose the
+allocator for its dependents). **Off by default** — every entry point starts with one relaxed load,
+so an uninstrumented build pays a predictable branch and nothing else. `count()` for leaves too hot
+to time (`point_in_segs` runs millions of times; two `Instant::now()` calls would cost more than the
+function), `scope()` for everything else. **Timings nest** — `split_regions` includes the
+`seg_seg_points` beneath it — so the column does not sum to the wall time. `cargo test -p
+gridfinity-cad perf_report -- --ignored --nocapture` prints the same table from the terminal.
+
 `debugger.rs` is the construction debugger (right panel, toggled from the params panel). It calls
 `gridfinity::program(&p)` to get the model's op list, caches per-prefix face counts for display,
 and rebuilds the solid via `program::run(&prog, |i| enabled[i])` whenever the user steps or
 toggles. The App's `regenerate` switches between `gridfinity::build(&p)` (debug off) and the
 debugger's subset build (debug on) — both feed the same `tessellate` → VBO upload path.
+Its **Profile rebuilds** checkbox enables `perf` around one `build_solid` and shows wall time, the
+per-metric table (heaviest first, bar scaled to the heaviest row since the timings nest) and
+allocation count / churn / peak.

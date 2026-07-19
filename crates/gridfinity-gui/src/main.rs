@@ -11,6 +11,14 @@ mod viewport;
 mod wireframe;
 
 use eframe::egui;
+
+/// Counts allocations for the debugger's Profile panel. A library must not pick
+/// the allocator for its dependents, so the wrapper lives in the kernel and the
+/// binary installs it. It only counts while `perf` is enabled, which the
+/// debugger switches on around a single rebuild.
+#[global_allocator]
+static ALLOC: gridfinity_cad::kernel::perf::CountingAlloc<std::alloc::System> =
+    gridfinity_cad::kernel::perf::CountingAlloc::new(std::alloc::System);
 use debugger::Debugger;
 use editor::{BIN_COLORS, Editor, Tool};
 use gridfinity_cad::gridfinity::{self, BinSlope, LogicalBin, Mode, Params, SlopeDir};

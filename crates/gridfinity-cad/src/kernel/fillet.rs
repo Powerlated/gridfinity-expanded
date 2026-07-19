@@ -214,6 +214,7 @@ fn chains(solid: &Solid, blends: &[(EdgeId, f32)]) -> Vec<Vec<(EdgeId, f32)>> {
 
 /// Blend a set of edges of `solid` by the given radii.
 pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, String> {
+    let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::BlendEdges);
     let want: HashMap<EdgeId, f32> = blends.iter().copied().collect();
     let edge_faces = solid.edge_faces();
 

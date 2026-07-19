@@ -64,6 +64,7 @@ impl Intersection {
 /// Order does not matter: the pair is normalised internally so `(a, b)` and
 /// `(b, a)` give the same answer.
 pub fn intersect_surfaces(a: &Surface, b: &Surface) -> Intersection {
+    let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::IntersectSurfaces);
     use Surface::*;
     match (a, b) {
         (Plane { .. }, Plane { .. }) => plane_plane(a, b),

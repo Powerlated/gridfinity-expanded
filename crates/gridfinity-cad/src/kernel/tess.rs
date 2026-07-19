@@ -69,6 +69,7 @@ impl Tessellation {
 
 /// Tessellate a solid. `arc_segs_per_quarter` sets curve resolution.
 pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
+    let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::Tessellate);
     // Sample every edge once, forward, so both incident faces agree.
     let mut edge_pts: HashMap<EdgeId, Vec<Vec3>> = HashMap::new();
     for (id, e) in solid.edges.iter().enumerate() {

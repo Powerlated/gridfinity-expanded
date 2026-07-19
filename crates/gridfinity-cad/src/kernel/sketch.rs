@@ -189,6 +189,7 @@ pub fn loop_area(segs: &[Seg]) -> f32 {
 /// on one side of its centre, so the ± of `c.x ± √(r² − dy²)` is the sign of
 /// cos θ anywhere on the piece.
 pub fn point_in_segs(pt: Vec2, segs: &[Seg]) -> bool {
+    crate::kernel::perf::count(crate::kernel::perf::Metric::PointInSegs);
     let mut inside = false;
     let mut cross = |y0: f32, y1: f32, x: f32| {
         if (y0 > pt.y) != (y1 > pt.y) && x > pt.x {

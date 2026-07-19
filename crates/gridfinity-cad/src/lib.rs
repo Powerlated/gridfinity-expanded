@@ -900,6 +900,81 @@ mod tests {
     /// Rounding has to happen after the cut, not before: rounding the wall
     /// first moves the intersection points off where the cavity's own split
     /// routines put them, and the notch mouth stops welding.
+    /// The instrumentation must actually observe a real build: a default bin
+    /// exercises the region booleans, the builder and the tessellator, so every
+    /// one of those metrics has to come back non-zero. A silently-dead counter
+    /// would make the debugger's Performance panel quietly lie.
+    #[test]
+    fn perf_counters_see_a_real_build() {
+        use crate::kernel::perf::{self, Metric};
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // An inner wall, so the region booleans have crossings to solve — a
+        // plain bin never calls `seg_seg_points` at all.
+        let p = gridfinity::Params {
+            inner_walls: vec![gridfinity::InnerWall {
+                x1: 22.0, y1: 30.0, x2: 62.0, y2: 55.0, width: 2.4, height: None,
+            }],
+            ..gridfinity::Params::default()
+        };
+        perf::reset();
+        perf::set_enabled(true);
+        let solid = gridfinity::build(&p);
+        let _ = tessellate(&solid, 6);
+        perf::set_enabled(false);
+        let rows = perf::snapshot();
+
+        for want in [
+            Metric::SplitRegions,
+            Metric::SegSegPoints,
+            Metric::PointInSegs,
+            Metric::BuilderVertex,
+            Metric::BuilderArc,
+            Metric::BuilderFace,
+            Metric::Tessellate,
+            Metric::EmitSlabs,
+        ] {
+            let row = rows.iter().find(|r| r.name == want.name());
+            assert!(row.is_some_and(|r| r.calls > 0), "{} never fired", want.name());
+        }
+    }
+
+    /// Prints the profile of a representative rebuild. Not an assertion — a
+    /// way to get the same table the debugger shows, from the terminal.
+    #[test]
+    #[ignore = "reporting: cargo test -p gridfinity-cad perf_report -- --ignored --nocapture"]
+    fn perf_report() {
+        use crate::kernel::perf;
+        let p = gridfinity::Params {
+            inner_walls: vec![
+                gridfinity::InnerWall { x1: 22.0, y1: 30.0, x2: 62.0, y2: 55.0, width: 2.4, height: None },
+                gridfinity::InnerWall { x1: 80.5, y1: 26.0, x2: 3.0, y2: 95.0, width: 5.6, height: Some(6.5) },
+            ],
+            ..gridfinity::Params::default()
+        };
+        perf::reset();
+        perf::set_enabled(true);
+        let t = std::time::Instant::now();
+        let solid = gridfinity::build(&p);
+        let tess = tessellate(&solid, 6);
+        let wall = t.elapsed();
+        perf::set_enabled(false);
+
+        println!("
+rebuild {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().indices.len() / 3);
+        println!("{:<34} {:>10} {:>12}", "metric", "time", "calls");
+        for r in perf::snapshot() {
+            println!("{:<34} {:>10} {:>12}", r.name, format!("{:?}", std::time::Duration::from_nanos(r.nanos)), r.calls);
+        }
+        let a = perf::allocs();
+        if a.count == 0 {
+            println!("(allocations unmeasured: `CountingAlloc` is installed by the GUI binary, not the test harness)");
+        } else {
+            println!("allocs {} · churn {} kB · peak {} kB", a.count, a.bytes / 1000, a.peak_live_bytes / 1000);
+        }
+    }
+
     /// A partial-height wall must get a **top face**.
     ///
     /// The banded slab stack caps a band interface from the difference of the

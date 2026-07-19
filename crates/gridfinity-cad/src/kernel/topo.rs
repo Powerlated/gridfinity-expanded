@@ -182,6 +182,7 @@ impl Builder {
 
     /// Intern a vertex by welded position.
     pub fn vertex(&mut self, p: Vec3) -> VertexId {
+        crate::kernel::perf::count(crate::kernel::perf::Metric::BuilderVertex);
         *self.vert_index.entry(weld_key(p)).or_insert_with(|| {
             let id = self.verts.len();
             self.verts.push(Vertex { point: p });
@@ -219,6 +220,7 @@ impl Builder {
         a0: f32,
         a1: f32,
     ) -> (EdgeId, bool) {
+        crate::kernel::perf::count(crate::kernel::perf::Metric::BuilderArc);
         let curve = Curve::Circle { center, axis, radius, ref_dir };
         let mid = curve.point((a0 + a1) * 0.5);
         self.edge_between(a, b, mid, || Edge {
@@ -274,6 +276,7 @@ impl Builder {
     }
 
     pub fn face(&mut self, surface: Surface, sense: bool, outer: Loop, inners: Vec<Loop>) -> usize {
+        crate::kernel::perf::count(crate::kernel::perf::Metric::BuilderFace);
         let id = self.faces.len();
         self.faces.push(Face {
             surface,

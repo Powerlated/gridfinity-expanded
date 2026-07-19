@@ -8,6 +8,7 @@
 
 use eframe::egui::{self, Color32, RichText, Sense};
 use glam::Vec3;
+use gridfinity_cad::kernel::perf;
 use gridfinity_cad::kernel::program::{Op, Program, run};
 use gridfinity_cad::kernel::sketch::Seg;
 use gridfinity_cad::kernel::topo::Solid;
@@ -44,6 +45,12 @@ pub struct Debugger {
     rows_key: RowsKey,
     last_status: Status,
     last_faces: usize,
+    /// Measure the next rebuild. Off by default: instrumenting costs a little
+    /// on hot paths, and the numbers are only wanted when someone is looking.
+    profile: bool,
+    perf_rows: Vec<perf::Row>,
+    perf_allocs: perf::Allocs,
+    perf_wall_nanos: u64,
 }
 
 #[derive(Default)]
@@ -63,6 +70,10 @@ impl Default for Debugger {
             rows_key: RowsKey::default(),
             last_status: Status::Valid,
             last_faces: 0,
+            profile: false,
+            perf_rows: Vec::new(),
+            perf_allocs: perf::Allocs { count: 0, bytes: 0, peak_live_bytes: 0 },
+            perf_wall_nanos: 0,
         }
     }
 }
@@ -125,11 +136,27 @@ impl Debugger {
         if !self.show {
             return None;
         }
+        // Measure this rebuild if the user asked for it. Instrumentation is
+        // enabled only for the duration, so the numbers describe one build and
+        // idle frames pay nothing.
+        let measure = self.profile;
+        if measure {
+            perf::reset();
+            perf::set_enabled(true);
+        }
+        let wall = std::time::Instant::now();
         // Borrow the program immutably while running; the mask is read by
         // closure over `self.enabled`.
         let enabled = self.enabled.clone();
         let prog = &self.program;
-        match run(prog, |i| enabled.get(i).copied().unwrap_or(true)) {
+        let outcome = run(prog, |i| enabled.get(i).copied().unwrap_or(true));
+        if measure {
+            perf::set_enabled(false);
+            self.perf_rows = perf::snapshot();
+            self.perf_allocs = perf::allocs();
+            self.perf_wall_nanos = wall.elapsed().as_nanos() as u64;
+        }
+        match outcome {
             Ok(solid) => {
                 self.last_faces = solid.faces.len();
                 self.last_status = match solid.validate() {
@@ -258,6 +285,76 @@ impl Debugger {
             }
         }
 
+        // ── Performance ───────────────────────────────────────────────────
+        ui.add_space(4.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut self.profile, "Profile rebuilds").changed() {
+                // Rebuild now so the numbers appear immediately rather than on
+                // whatever the user happens to touch next.
+                changed = true;
+            }
+            if self.profile && self.perf_wall_nanos > 0 {
+                ui.label(
+                    RichText::new(format!("{}", Ms(self.perf_wall_nanos)))
+                        .color(Color32::from_rgb(0x8c, 0xb4, 0xd8)),
+                );
+            }
+        });
+
+        if self.profile {
+            let a = &self.perf_allocs;
+            ui.label(
+                RichText::new(format!(
+                    "{} allocs · {} churn · {} peak",
+                    a.count,
+                    Bytes(a.bytes),
+                    Bytes(a.peak_live_bytes)
+                ))
+                .small()
+                .color(Color32::from_gray(0xaa)),
+            );
+            if self.perf_rows.is_empty() {
+                ui.label(RichText::new("no samples yet").small().italics());
+            }
+            // Timings nest (a region boolean contains its seg/seg solves), so
+            // these do not sum to the wall time and the bar is scaled to the
+            // heaviest row rather than to the total.
+            let max = self.perf_rows.first().map(|r| r.nanos).unwrap_or(0).max(1);
+            for r in &self.perf_rows {
+                let frac = r.nanos as f32 / max as f32;
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [150.0, 14.0],
+                        egui::Label::new(RichText::new(short_metric(r.name)).small()).truncate(),
+                    );
+                    ui.add_sized(
+                        [52.0, 14.0],
+                        egui::Label::new(
+                            RichText::new(if r.nanos > 0 {
+                                format!("{}", Ms(r.nanos))
+                            } else {
+                                "—".into()
+                            })
+                            .small()
+                            .monospace(),
+                        ),
+                    );
+                    ui.add_sized(
+                        [58.0, 14.0],
+                        egui::Label::new(
+                            RichText::new(format!("{}", Count(r.calls))).small().monospace(),
+                        ),
+                    );
+                    let (rect, _) = ui.allocate_exact_size([40.0, 6.0].into(), Sense::hover());
+                    ui.painter().rect_filled(rect, 1.0, Color32::from_gray(0x33));
+                    let mut fill = rect;
+                    fill.set_width(rect.width() * frac);
+                    ui.painter().rect_filled(fill, 1.0, Color32::from_rgb(0x5b, 0x8f, 0xb9));
+                });
+            }
+        }
+
         ui.add_space(4.0);
         ui.separator();
 
@@ -340,5 +437,63 @@ fn kind_color(kind: &str) -> Color32 {
         "chamfer" => Color32::from_rgb(0xf2, 0x8e, 0x2b),
         "custom" => Color32::from_rgb(0xed, 0xc9, 0x48),
         _ => Color32::from_gray(0xb0),
+    }
+}
+
+/// `region2d::split_regions` → `split_regions`. The module prefix is useful in
+/// the source and just eats column width in a 150 px label.
+fn short_metric(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name)
+}
+
+/// Nanoseconds, at a fixed three significant figures so the column stays
+/// readable as values range over six orders of magnitude.
+struct Ms(u64);
+
+impl std::fmt::Display for Ms {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ns = self.0 as f64;
+        if ns >= 1.0e9 {
+            write!(f, "{:.2}s", ns / 1.0e9)
+        } else if ns >= 1.0e6 {
+            write!(f, "{:.1}ms", ns / 1.0e6)
+        } else if ns >= 1.0e3 {
+            write!(f, "{:.0}µs", ns / 1.0e3)
+        } else {
+            write!(f, "{ns:.0}ns")
+        }
+    }
+}
+
+struct Bytes(u64);
+
+impl std::fmt::Display for Bytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let b = self.0 as f64;
+        if b >= 1.0e9 {
+            write!(f, "{:.2} GB", b / 1.0e9)
+        } else if b >= 1.0e6 {
+            write!(f, "{:.1} MB", b / 1.0e6)
+        } else if b >= 1.0e3 {
+            write!(f, "{:.0} kB", b / 1.0e3)
+        } else {
+            write!(f, "{b:.0} B")
+        }
+    }
+}
+
+/// Call counts reach the millions; `1.2M` reads better than `1234567`.
+struct Count(u64);
+
+impl std::fmt::Display for Count {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let n = self.0 as f64;
+        if n >= 1.0e6 {
+            write!(f, "{:.1}M", n / 1.0e6)
+        } else if n >= 1.0e3 {
+            write!(f, "{:.1}k", n / 1.0e3)
+        } else {
+            write!(f, "{}", self.0)
+        }
     }
 }

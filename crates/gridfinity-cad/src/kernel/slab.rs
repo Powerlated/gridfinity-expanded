@@ -65,6 +65,7 @@ pub struct SlabOpts {
 /// Resolve a slab stack into one standalone solid. The result is validated
 /// before it is returned.
 pub fn build_slabs(ops: &[(Op, Slab)]) -> Result<Solid, String> {
+    let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::BuildSlabs);
     let mut b = Builder::new();
     emit_slabs(&mut b, ops, &SlabOpts::default())?;
     let solid = b.build();
@@ -127,6 +128,7 @@ pub fn emit_slabs(
     ops: &[(Op, Slab)],
     opts: &SlabOpts,
 ) -> Result<Vec<Vec<Vec<Seg>>>, String> {
+    let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::EmitSlabs);
     let (zs, bands) = plan_bands(ops)?;
 
     // Side walls, one span per band. Bands are delimited by *all* z

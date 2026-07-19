@@ -21,6 +21,7 @@
 
 use crate::kernel::math::Vec2;
 use crate::kernel::sketch::{Seg, loop_area, point_in_segs};
+use crate::kernel::perf;
 
 const EPS: f32 = 1e-4;
 
@@ -75,6 +76,7 @@ fn coincident_with<'a>(loops: &'a [Vec<Seg>], piece: &Seg) -> Option<&'a Seg> {
 /// general form of [`split_region_by_quad`]: either operand may have any
 /// number of loops made of lines and arcs.
 pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> RegionSplit<T> {
+    let _perf = perf::scope(perf::Metric::SplitRegions);
     let mut a_cuts: Vec<Vec<Vec<(f32, Vec2)>>> =
         a.iter().map(|l| vec![Vec::new(); l.len()]).collect();
     let mut b_cuts: Vec<Vec<Vec<(f32, Vec2)>>> =
@@ -330,6 +332,7 @@ fn circle_circle_pts(c0: Vec2, r0: f32, c1: Vec2, r1: f32) -> Vec<Vec2> {
 /// Every point where two segs cross, closed form in all four combinations and
 /// filtered to both spans.
 fn seg_seg_points(p: &Seg, q: &Seg) -> Vec<Vec2> {
+    perf::count(perf::Metric::SegSegPoints);
     let raw = match (*p, *q) {
         (Seg::Line { a, b }, Seg::Line { a: c, b: d }) => {
             let (e, f) = (b - a, d - c);
@@ -659,6 +662,7 @@ pub fn seg_seg_distance(p: &Seg, q: &Seg) -> f32 {
 /// *boundaries* — a loop entirely inside another still reports the gap to it,
 /// not zero.
 pub fn min_loop_distance(a: &[Seg], b: &[Seg]) -> f32 {
+    let _perf = perf::scope(perf::Metric::MinLoopDistance);
     let mut best = f32::INFINITY;
     for p in a {
         for q in b {
