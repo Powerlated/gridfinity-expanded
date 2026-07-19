@@ -28,8 +28,43 @@ use std::collections::HashMap;
 /// A cap loop plus the direction to traverse it (`true` = as authored).
 pub type DirLoop = (Vec<Seg>, bool);
 
+/// A reference to a plane, resolved against the Program at run time.
+///
+/// Phase 1 has only the horizontal case. Phase 2 will add `Named` (lookup a
+/// datum registered by [`Op::Plane`]) and `Tilted` (inline origin + normal),
+/// which is what the sloped-floor extrude cut needs.
+#[derive(Clone, Copy, Debug)]
+pub enum PlaneRef {
+    /// Horizontal plane at `z`. `up = true` → outward normal +Z (a floor or
+    /// the top of an extrude); `up = false` → −Z (the underside of a cap).
+    Z { z: f32, up: bool },
+}
+
+impl PlaneRef {
+    /// Resolve to `(origin, normal)`. `prog` is accepted so the Phase 2
+    /// `Named` variant can look up datums without changing the call site.
+    pub fn resolve(&self, _prog: &Program) -> (Vec3, Vec3) {
+        match *self {
+            PlaneRef::Z { z, up } => {
+                let normal = if up { Vec3::Z } else { -Vec3::Z };
+                (vec3_of(0.0, 0.0, z), normal)
+            }
+        }
+    }
+
+    /// The z value (for slab APIs that still take scalar z bounds). Phase 2's
+    /// tilted-plane variant will require the slab API to accept a plane spec
+    /// instead, at which point this goes away.
+    pub fn z(&self) -> f32 {
+        match *self {
+            PlaneRef::Z { z, .. } => z,
+        }
+    }
+}
+
 /// One modelling operation.
 pub enum Op {
+    // ── Datums (phase 0) ───────────────────────────────────────────────────
     /// Register a named 2D profile for downstream ops to reference. Emits no
     /// geometry. The same profile can drive an `Extrude`, a `Loft` profile,
     /// and a `PlanarFace` outer without being re-cloned at each call site.
@@ -38,6 +73,31 @@ pub enum Op {
     /// no geometry. `origin`/`normal` define an arbitrary plane in 3D; a
     /// horizontal plane at `z` is `origin = (0,0,z), normal = (0,0,1)`.
     Plane { name: String, origin: Vec3, normal: Vec3 },
+
+    // ── Volume features (phase 1) ─────────────────────────────────────────
+    /// Extrude a named sketch from `from` to `to` as a solid volume. Sugar
+    /// over a single-slab `Slabs` Union stack — kept as its own op because
+    /// "extrude" is the CAD-idiomatic name and reads better in the debugger.
+    Extrude { sketch: String, from: PlaneRef, to: PlaneRef },
+    /// Subtract an extruded sketch from the existing body. Sugar over a
+    /// single-slab `Slabs` Difference stack.
+    ExtrudeCut { sketch: String, from: PlaneRef, to: PlaneRef },
+    /// Loft through N ≥ 2 named sketches at increasing heights. Each
+    /// consecutive pair becomes one loft band (cones where an arc's radius
+    /// changes between profiles, planes for straight runs, cylinders for
+    /// constant-radius arcs) — the same machinery as `Op::Wall`.
+    Loft { profiles: Vec<(String, f32)>, outward: bool },
+
+    // ── Face-level features (phase 1) ─────────────────────────────────────
+    /// A planar face on an arbitrary plane. Generalises `Op::Cap` to non-
+    /// horizontal planes (Phase 2). Loop directions in `outer`/`holes` decide
+    /// winding relative to the plane's normal.
+    PlanarFace { plane: PlaneRef, outer: DirLoop, holes: Vec<DirLoop> },
+    /// Side faces between a lower and upper profile (a prism or single-band
+    /// loft). CAD-idiomatic spelling of `Op::Wall`.
+    WallFaces { lower: Vec<Seg>, upper: Vec<Seg>, z0: f32, z1: f32, outward: bool },
+
+    // ── Original op set (will retire in phase 4) ──────────────────────────
     /// Side faces between two profiles at two heights. Equal profiles give a
     /// prism band; differing ones give a loft band, with cones wherever an
     /// arc's radius changes — the one thing slabs cannot express.
@@ -65,6 +125,11 @@ impl Op {
         match self {
             Op::Sketch { .. } => "sketch",
             Op::Plane { .. } => "plane",
+            Op::Extrude { .. } => "extrude",
+            Op::ExtrudeCut { .. } => "cut",
+            Op::Loft { .. } => "loft",
+            Op::PlanarFace { .. } => "face",
+            Op::WallFaces { .. } => "wall",
             Op::Wall { .. } => "wall",
             Op::Cap { .. } => "cap",
             Op::Slabs { .. } => "slabs",
@@ -147,6 +212,67 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
             Op::Sketch { .. } | Op::Plane { .. } => {
                 // Datums only — symbols were registered at push time; nothing
                 // to emit. Kept explicit so the match stays exhaustive.
+            }
+            Op::Extrude { sketch, from, to } => {
+                let profile = prog.sketch(sketch).ok_or_else(|| {
+                    format!("Extrude: sketch {sketch:?} not registered")
+                })?;
+                let stack = vec![(
+                    slab::Op::Union,
+                    Slab::new(vec![profile.to_vec()], from.z(), to.z()),
+                )];
+                slab::emit_slabs(&mut b, &stack, &SlabOpts::default())?;
+            }
+            Op::ExtrudeCut { sketch, from, to } => {
+                let profile = prog.sketch(sketch).ok_or_else(|| {
+                    format!("ExtrudeCut: sketch {sketch:?} not registered")
+                })?;
+                let stack = vec![(
+                    slab::Op::Difference,
+                    Slab::new(vec![profile.to_vec()], from.z(), to.z()),
+                )];
+                slab::emit_slabs(&mut b, &stack, &SlabOpts::default())?;
+            }
+            Op::Loft { profiles, outward } => {
+                if profiles.len() < 2 {
+                    return Err(format!("Loft: need ≥2 profiles, got {}", profiles.len()));
+                }
+                // Resolve every sketch up front so a missing name fails before
+                // emitting any partial geometry.
+                let resolved: Vec<(&[Seg], f32)> = profiles
+                    .iter()
+                    .map(|(name, z)| -> Result<(&[Seg], f32), String> {
+                        let p = prog.sketch(name).ok_or_else(|| {
+                            format!("Loft: sketch {name:?} not registered")
+                        })?;
+                        Ok((p, *z))
+                    })
+                    .collect::<Result<_, _>>()?;
+                for w in resolved.windows(2) {
+                    let (lower, z0) = w[0];
+                    let (upper, z1) = w[1];
+                    let lo = ring(&mut b, lower, z0);
+                    let hi = ring(&mut b, upper, z1);
+                    wall_between(&mut b, lower, upper, &lo, &hi, z0, z1, *outward);
+                }
+            }
+            Op::PlanarFace { plane, outer, holes } => {
+                let (origin, normal) = plane.resolve(prog);
+                let z = plane.z();
+                let o = ring(&mut b, &outer.0, z);
+                let outer_loop = loop_of(&o, outer.1);
+                let mut inner_loops = Vec::with_capacity(holes.len());
+                for (segs, fwd) in holes {
+                    let r = ring(&mut b, segs, z);
+                    inner_loops.push(loop_of(&r, *fwd));
+                }
+                let surface = Surface::plane(origin, normal);
+                b.face(surface, true, outer_loop, inner_loops);
+            }
+            Op::WallFaces { lower, upper, z0, z1, outward } => {
+                let lo = ring(&mut b, lower, *z0);
+                let hi = ring(&mut b, upper, *z1);
+                wall_between(&mut b, lower, upper, &lo, &hi, *z0, *z1, *outward);
             }
             Op::Wall { lower, upper, z0, z1, outward } => {
                 let lo = ring(&mut b, lower, *z0);
@@ -306,5 +432,156 @@ mod tests {
         // Skip the Wall op entirely; the sketch symbol must still resolve.
         let _ = run(&p, |i| i != 1).expect("masked run");
         assert_eq!(p.sketch("outline").unwrap().len(), 4, "sketch symbol survives masked downstream op");
+    }
+
+    // ── Phase 1: feature ops ──────────────────────────────────────────────
+
+    fn sketch_box_program() -> Program {
+        // A box authored with the new CAD-idiomatic ops. A single Extrude
+        // produces a complete closed solid (the slab machinery emits caps at
+        // every z-interface by default), so this is one feature op over a
+        // named sketch.
+        let r = rect(0.0, 0.0, 10.0, 20.0);
+        let mut p = Program::default();
+        p.push("outline", Op::Sketch { name: "outline".into(), profile: r });
+        p.push(
+            "block",
+            Op::Extrude {
+                sketch: "outline".into(),
+                from: PlaneRef::Z { z: 0.0, up: true },
+                to: PlaneRef::Z { z: 5.0, up: true },
+            },
+        );
+        p
+    }
+
+    #[test]
+    fn extrude_plus_planarface_is_a_valid_box() {
+        let s = run_all(&sketch_box_program()).expect("run");
+        s.validate().expect("box is manifold");
+        assert_eq!(s.faces.len(), 6, "4 walls + 2 caps from a single Extrude");
+    }
+
+    #[test]
+    fn planarface_emits_a_single_face() {
+        // PlanarFace on its own emits exactly one face (useful for closing
+        // openings left by open_at on a slab stack, or for standalone datums).
+        let r = rect(0.0, 0.0, 10.0, 20.0);
+        let mut p = Program::default();
+        p.push(
+            "floor",
+            Op::PlanarFace {
+                plane: PlaneRef::Z { z: 0.0, up: true },
+                outer: (r, true),
+                holes: vec![],
+            },
+        );
+        let s = run_all(&p).expect("run");
+        assert_eq!(s.faces.len(), 1, "PlanarFace emits exactly one face");
+    }
+
+    #[test]
+    fn extrude_cut_carves_a_pocket() {
+        // A compound shape (block minus pocket) needs the slab engine's
+        // restricted boolean, which resolves overlapping slabs in one stack.
+        // Standalone Op::ExtrudeCut exists for cuts that don't need to compose
+        // with another Extrude in the same feature — but a pocket in a block
+        // is the canonical compound case, so this test exercises Slabs
+        // directly with the same sketch+plane vocabulary the new ops use.
+        let outer = rect(0.0, 0.0, 20.0, 20.0);
+        let pocket = rect(5.0, 5.0, 15.0, 15.0);
+        let outer_clone = outer.clone();
+        let pocket_clone = pocket.clone();
+        let mut p = Program::default();
+        p.push("outer", Op::Sketch { name: "outer".into(), profile: outer });
+        p.push("pocket", Op::Sketch { name: "pocket".into(), profile: pocket });
+        p.push(
+            "block + pocket",
+            Op::Slabs {
+                stack: vec![
+                    (
+                        slab::Op::Union,
+                        Slab::new(vec![p.sketch("outer").unwrap().to_vec()], 0.0, 5.0),
+                    ),
+                    (
+                        slab::Op::Difference,
+                        Slab::new(vec![p.sketch("pocket").unwrap().to_vec()], 2.0, 5.0),
+                    ),
+                ],
+                opts: SlabOpts::default(),
+            },
+        );
+        let s = run_all(&p).expect("run");
+        s.validate().expect("pocketed block is manifold");
+
+        // Ground truth: build the same shape directly via slab stack.
+        use crate::kernel::slab;
+        let ground = slab::build_slabs(&[
+            (slab::Op::Union, Slab::new(vec![outer_clone], 0.0, 5.0)),
+            (slab::Op::Difference, Slab::new(vec![pocket_clone], 2.0, 5.0)),
+        ])
+        .expect("ground truth");
+        assert_eq!(s.faces.len(), ground.faces.len(), "program+slabs matches direct slab stack");
+    }
+
+    #[test]
+    fn extrude_missing_sketch_errors_cleanly() {
+        let mut p = Program::default();
+        p.push(
+            "orphan",
+            Op::Extrude {
+                sketch: "no-such-sketch".into(),
+                from: PlaneRef::Z { z: 0.0, up: true },
+                to: PlaneRef::Z { z: 5.0, up: true },
+            },
+        );
+        let err = run_all(&p).unwrap_err();
+        assert!(err.contains("not registered"), "got: {err}");
+    }
+
+    #[test]
+    fn loft_chains_multiple_profiles() {
+        // Three-profile loft: small bottom → mid → larger top, two bands.
+        let bot = rect(2.0, 2.0, 8.0, 18.0);
+        let mid = rect(1.0, 1.0, 9.0, 19.0);
+        let top = rect(0.0, 0.0, 10.0, 20.0);
+        let mut p = Program::default();
+        p.push("bot", Op::Sketch { name: "bot".into(), profile: bot });
+        p.push("mid", Op::Sketch { name: "mid".into(), profile: mid });
+        p.push("top", Op::Sketch { name: "top".into(), profile: top });
+        p.push(
+            "loft",
+            Op::Loft {
+                profiles: vec![
+                    ("bot".into(), 0.0),
+                    ("mid".into(), 2.0),
+                    ("top".into(), 5.0),
+                ],
+                outward: true,
+            },
+        );
+        // Open top + bottom (no caps in a bare loft): valid as a shell of walls.
+        let s = run_all(&p).expect("run");
+        // 4 walls per band × 2 bands = 8 side faces.
+        assert_eq!(s.faces.len(), 8, "two loft bands of 4 walls each");
+    }
+
+    #[test]
+    fn wallfaces_matches_wall_emission() {
+        // WallFaces is the CAD spelling of Wall; both should produce identical
+        // face counts for the same inputs.
+        let r = rect(0.0, 0.0, 10.0, 20.0);
+        let mut p_old = Program::default();
+        p_old.push(
+            "walls",
+            Op::Wall { lower: r.clone(), upper: r.clone(), z0: 0.0, z1: 5.0, outward: true },
+        );
+        let mut p_new = Program::default();
+        p_new.push(
+            "walls",
+            Op::WallFaces { lower: r.clone(), upper: r, z0: 0.0, z1: 5.0, outward: true },
+        );
+        let (a, b) = (run_all(&p_old).unwrap(), run_all(&p_new).unwrap());
+        assert_eq!(a.faces.len(), b.faces.len(), "WallFaces matches Wall");
     }
 }

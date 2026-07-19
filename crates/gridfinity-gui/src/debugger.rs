@@ -283,6 +283,10 @@ fn kind_color(kind: &str) -> Color32 {
     match kind {
         "sketch" => Color32::from_rgb(0xed, 0xc9, 0x48),
         "plane" => Color32::from_rgb(0xb0, 0x7a, 0xa1),
+        "extrude" => Color32::from_rgb(0x4e, 0x79, 0xa7),
+        "cut" => Color32::from_rgb(0xe1, 0x57, 0x59),
+        "loft" => Color32::from_rgb(0x4e, 0x79, 0xa7),
+        "face" => Color32::from_rgb(0x76, 0xb7, 0xb2),
         "wall" => Color32::from_rgb(0x4e, 0x79, 0xa7),
         "cap" => Color32::from_rgb(0x76, 0xb7, 0xb2),
         "slabs" => Color32::from_rgb(0xf2, 0x8e, 0x2b),
