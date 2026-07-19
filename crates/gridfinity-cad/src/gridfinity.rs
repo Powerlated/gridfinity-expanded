@@ -73,31 +73,48 @@ const PEG_R_MID: f32 = 1.6;
 /// Distance from a pitch corner to a peg-top arc tangent point along the side.
 const PEG_TANGENT: f32 = HALF_TOL + OUTER_R; // = 4.0
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub enum Mode {
+    #[default]
     Bin,
     Baseplate,
 }
 
 /// Side of the bin whose floor is lowest (floor rises away from this side).
+/// Serialises as the reference's `'+x' | '-x' | '+y' | '-y'`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SlopeDir {
+    #[cfg_attr(feature = "serde", serde(rename = "+x"))]
     PlusX,
+    #[cfg_attr(feature = "serde", serde(rename = "-x"))]
     MinusX,
+    #[cfg_attr(feature = "serde", serde(rename = "+y"))]
     PlusY,
+    #[cfg_attr(feature = "serde", serde(rename = "-y"))]
     MinusY,
 }
 
 /// A sloped compartment floor: `angle_deg` from horizontal, lowest at `dir`.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BinSlope {
+    /// The reference calls this `angle`.
+    #[cfg_attr(feature = "serde", serde(rename = "angle"))]
     pub angle_deg: f32,
     pub dir: SlopeDir,
 }
 
 /// A complete logical bin: its polyomino cell set, the split lines that cut it
 /// into printable pieces, and an optional floor slope.
+///
+/// The reference's `LogicalBin` also carries `id` and `isManual`; both are
+/// UI-owned and never reach geometry, so they are ignored on the way in.
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase", default))]
 pub struct LogicalBin {
     pub cells: Vec<GridCell>,
     pub split_lines: Vec<SplitLine>,
@@ -126,6 +143,7 @@ pub fn rect_cells(gx: u32, gy: u32) -> Vec<GridCell> {
 /// the rim, a concave quarter-cylinder ramp blends its top into any taller
 /// structure it touches (mirrors the reference `InnerWall`).
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InnerWall {
     pub x1: f32,
     pub y1: f32,
@@ -138,12 +156,20 @@ pub struct InnerWall {
 }
 
 /// Everything the UI can tune — mirrors the reference `BinConfig`.
+///
+/// Deserialises directly from the reference's `BinConfig` JSON: fields are
+/// camelCase, and any the reference omits (notably `mode`, which has no TS
+/// counterpart) fall back to [`Params::default`].
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase", default))]
 pub struct Params {
     pub bins: Vec<LogicalBin>,
     pub height_units: u32,
     pub wall_thickness: f32,
     pub cavity_corner_radius: f32,
+    /// The reference calls this `innerFilletRadius`.
+    #[cfg_attr(feature = "serde", serde(rename = "innerFilletRadius"))]
     pub floor_fillet: f32,
     pub magnet_holes: bool,
     pub screw_holes: bool,
@@ -251,9 +277,14 @@ fn planar(b: &mut Builder, z: f32, up: bool, outer: Loop, inners: Vec<Loop>) {
 /// Build the whole layout (every logical bin, splits ignored, open edges
 /// applied) as one solid — the assembled preview.
 pub fn build(p: &Params) -> Solid {
+    try_build(p).expect("gridfinity program")
+}
+
+/// Fallible [`build`], for callers that cannot afford a panic.
+pub fn try_build(p: &Params) -> Result<Solid, String> {
     match p.mode {
-        Mode::Baseplate => build_baseplate(p),
-        Mode::Bin => run_all(&program(p)).expect("gridfinity program"),
+        Mode::Baseplate => Ok(build_baseplate(p)),
+        Mode::Bin => run_all(&program(p)),
     }
 }
 
@@ -279,6 +310,14 @@ pub fn program(p: &Params) -> Program {
 /// One printable piece of the split-aware build.
 pub struct BinPiece {
     pub name: String,
+    /// Index into `Params::bins` of the logical bin this piece came from —
+    /// the *original* index, so callers can map it back to their own bin
+    /// identity even when empty bins were skipped.
+    pub bin: usize,
+    /// Zero-based index of this piece within its bin, and how many the bin
+    /// was split into.
+    pub piece: usize,
+    pub piece_count: usize,
     pub col: i32,
     pub row: i32,
     pub solid: Solid,
@@ -290,38 +329,59 @@ pub struct BinPiece {
 /// only where a divider sits on the split line — so glued pieces form one
 /// continuous bin. Every piece keeps its own base pegs.
 pub fn build_pieces(p: &Params) -> Vec<BinPiece> {
+    try_build_pieces(p).expect("gridfinity piece program")
+}
+
+/// Fallible [`build_pieces`], for callers that cannot afford a panic — notably
+/// the wasm boundary, where an unwind aborts the whole module instance.
+pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
     if p.mode == Mode::Baseplate {
-        return vec![BinPiece {
+        return Ok(vec![BinPiece {
             name: "gridfinity-baseplate.stl".into(),
+            bin: 0,
+            piece: 0,
+            piece_count: 1,
             col: 0,
             row: 0,
             solid: build_baseplate(p),
-        }];
+        }]);
     }
-    let bins: Vec<&LogicalBin> = p.bins.iter().filter(|b| !b.cells.is_empty()).collect();
+    // Keep each bin's original index so callers can map a piece back to their
+    // own bin identity, while empty bins still contribute no pieces and no
+    // filename ordinal.
+    let bins: Vec<(usize, &LogicalBin)> =
+        p.bins.iter().enumerate().filter(|(_, b)| !b.cells.is_empty()).collect();
     let mut out = Vec::new();
-    for (bi, bin) in bins.iter().enumerate() {
+    for (ord, (bi, bin)) in bins.iter().enumerate() {
         let parts = partition_cells(&bin.cells, &bin.split_lines);
         let stem = if bins.len() == 1 {
             "gridfinity-bin".to_string()
         } else {
-            format!("gridfinity-bin-{}", bi + 1)
+            format!("gridfinity-bin-{}", ord + 1)
         };
         for (i, part) in parts.iter().enumerate() {
             let walls =
                 effective_walls(&part.cells, &bin.cells, &p.open_edges, &p.divider_edges);
             let mut prog = Program::default();
             plan_piece(p, &part.cells, &bin.cells, walls, bin.slope, "piece", &mut prog);
-            let solid = run_all(&prog).expect("gridfinity piece program");
+            let solid = run_all(&prog)?;
             let name = if parts.len() == 1 {
                 format!("{stem}.stl")
             } else {
                 format!("{stem}-piece-{}-of-{}.stl", i + 1, parts.len())
             };
-            out.push(BinPiece { name, col: part.col, row: part.row, solid });
+            out.push(BinPiece {
+                name,
+                bin: *bi,
+                piece: i,
+                piece_count: parts.len(),
+                col: part.col,
+                row: part.row,
+                solid,
+            });
         }
     }
-    out
+    Ok(out)
 }
 
 // ── Boundary walk ────────────────────────────────────────────────────────────

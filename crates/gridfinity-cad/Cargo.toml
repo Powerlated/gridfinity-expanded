@@ -5,8 +5,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Derives Serialize/Deserialize on the model-layer parameter types, shaped to
+# match the TypeScript reference's `BinConfig` JSON. Off by default so the
+# native GUI build stays lean; the wasm crate turns it on.
+serde = ["dep:serde"]
+
 [dependencies]
 glam = "0.29"
 # Robust, pure-Rust ear-cutting for the final planar-face-with-holes
 # triangulation only. The analytic B-rep kernel itself is hand-rolled.
 earcutr = "0.4"
+serde = { version = "1", features = ["derive"], optional = true }

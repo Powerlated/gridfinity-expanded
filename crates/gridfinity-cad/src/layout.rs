@@ -17,33 +17,44 @@ use std::collections::HashSet;
 pub const PITCH: i32 = 42;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GridCell {
     pub x: i32,
     pub y: i32,
 }
 
+/// Serialises as the reference's `'h' | 'v'`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Orientation {
+    #[cfg_attr(feature = "serde", serde(rename = "h"))]
     H,
+    #[cfg_attr(feature = "serde", serde(rename = "v"))]
     V,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GridEdge {
     pub x: i32,
     pub y: i32,
     pub orientation: Orientation,
 }
 
+/// Serialises as the reference's `'x' | 'y'`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Axis {
+    #[cfg_attr(feature = "serde", serde(rename = "x"))]
     X,
+    #[cfg_attr(feature = "serde", serde(rename = "y"))]
     Y,
 }
 
 /// A split at a grid line. `Axis::X` → vertical line between columns `index-1`
 /// and `index`; `Axis::Y` → horizontal line between rows `index-1` and `index`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SplitLine {
     pub axis: Axis,
     pub index: i32,
