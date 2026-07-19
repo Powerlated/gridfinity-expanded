@@ -332,6 +332,26 @@ pub fn build_pieces(p: &Params) -> Vec<BinPiece> {
     try_build_pieces(p).expect("gridfinity piece program")
 }
 
+/// Builds a single piece from an *explicit* cell footprint, rather than one
+/// derived from `split_lines`.
+///
+/// `bin_cells` is the whole logical bin (it decides which edges are true
+/// perimeter and which are seams); `piece_cells` is the footprint to build.
+/// Pass the same slice for both to get the uncut bin. This is the entry point
+/// for callers that plan their own piece groups — the web app derives them from
+/// user-drawn cuts, so there is no split line to hand over.
+pub fn build_piece(
+    p: &Params,
+    bin_cells: &[GridCell],
+    piece_cells: &[GridCell],
+    slope: Option<BinSlope>,
+) -> Result<Solid, String> {
+    let walls = effective_walls(piece_cells, bin_cells, &p.open_edges, &p.divider_edges);
+    let mut prog = Program::default();
+    plan_piece(p, piece_cells, bin_cells, walls, slope, "piece", &mut prog);
+    run_all(&prog)
+}
+
 /// Fallible [`build_pieces`], for callers that cannot afford a panic — notably
 /// the wasm boundary, where an unwind aborts the whole module instance.
 pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
