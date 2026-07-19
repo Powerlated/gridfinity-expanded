@@ -5,10 +5,12 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod debugger;
 mod editor;
 mod viewport;
 
 use eframe::egui;
+use debugger::Debugger;
 use editor::{BIN_COLORS, Editor, Tool};
 use gridfinity_cad::gridfinity::{self, BinSlope, LogicalBin, Mode, Params, SlopeDir};
 use gridfinity_cad::layout::GridFootprint;
@@ -40,11 +42,14 @@ fn main() -> eframe::Result<()> {
 struct App {
     params: Params,
     editor: Editor,
+    debugger: Debugger,
     printer: PrinterProfile,
     gl: Arc<eframe::glow::Context>,
     renderer: Arc<Mutex<Renderer>>,
     camera: Camera,
     dirty: bool,
+    /// Program cache is stale (params changed) — refresh before next regenerate.
+    program_dirty: bool,
     tri_count: usize,
     status: String,
 }
@@ -56,11 +61,13 @@ impl App {
         let mut app = App {
             params: Params::default(),
             editor: Editor::default(),
+            debugger: Debugger::default(),
             printer: DEFAULT_PRINTER,
             gl,
             renderer,
             camera: Camera::default(),
             dirty: true,
+            program_dirty: true,
             tri_count: 0,
             status: String::new(),
         };
@@ -69,8 +76,18 @@ impl App {
     }
 
     /// Rebuild the solid, tessellate, and upload; optionally reframe the camera.
+    /// When the debugger is active, the solid is built from its enabled subset
+    /// of the model's program; otherwise the full `gridfinity::build` is used.
     fn regenerate(&mut self, reframe: bool) {
-        let solid = gridfinity::build(&self.params);
+        if self.program_dirty {
+            self.debugger.refresh(&self.params);
+            self.program_dirty = false;
+        }
+        let solid_opt = self.debugger.build_solid();
+        let solid = match solid_opt {
+            Some(s) => s,
+            None => gridfinity::build(&self.params),
+        };
         let tess = tessellate(&solid, PREVIEW_RES);
         let (min, max) = tess.bounds();
         self.camera.target = (min + max) * 0.5;
@@ -126,9 +143,27 @@ impl eframe::App for App {
                 egui::ScrollArea::vertical().show(ui, |ui| self.params_panel(ui));
             });
 
+        let dbg_changed = if self.debugger.is_shown() {
+            let mut out = false;
+            egui::Panel::right("debug")
+                .resizable(true)
+                .default_size(320.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::neither().show(ui, |ui| {
+                        if self.debugger.panel(ui) {
+                            out = true;
+                        }
+                    });
+                });
+            out
+        } else {
+            false
+        };
+
         egui::CentralPanel::default().show(ui, |ui| self.viewport(ui));
 
-        if self.dirty {
+        if self.dirty || dbg_changed {
+            self.dirty = true;
             self.regenerate(false);
         }
     }
@@ -147,6 +182,15 @@ impl App {
 
         ui.heading("Gridfinity");
         ui.add_space(4.0);
+
+        // ── Debugger toggle ───────────────────────────────────────────────
+        ui.horizontal(|ui| {
+            let mut shown = self.debugger.is_shown();
+            if ui.checkbox(&mut shown, "Construction debugger").changed() {
+                self.debugger.set_shown(shown);
+                changed = true;
+            }
+        });
 
         // ── Layout editor ────────────────────────────────────────────────
         ui.horizontal(|ui| {
@@ -318,6 +362,7 @@ impl App {
 
         if changed {
             self.dirty = true;
+            self.program_dirty = true;
         }
     }
 

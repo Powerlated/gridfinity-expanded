@@ -126,6 +126,14 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   across boundary samples the neighbouring face emits individually are fanned back through the
   dropped points (only through vertices earcut didn't use — inserting used ones would duplicate
   triangles).
+- **`program.rs`** — a model expressed as a **flat labelled list of ops** the kernel executes. A
+  `Program` carries geometry (profiles, heights, `(seg, z)` blend selections) — never builder
+  handles — so `run(prog, |i| bool)` can execute *any subset*: prefixes step through the
+  construction, arbitrary masks toggle individual ops off. Blends collect during the run and apply
+  once at the end (`blend_edges` consumes and rebuilds the whole solid). A partial subset is
+  generally not manifold, by design — that's what makes the debugger useful. `Op::Custom` is the
+  escape hatch for geometry with no kernel primitive (Gridfinity's bridge-underside stitching): it
+  must re-derive every handle when it runs, which is cheap because `ring`/`seg_edge` intern.
 - **`region2d.rs`** — exact 2D boolean algebra on seg-loop regions (outers CCW, holes CW):
   `region_union`/`region_difference`/`region_intersection`. All four Line/Arc intersection pairs
   are closed form (line/line by determinant, line/circle by the quadratic, circle/circle by the
@@ -185,6 +193,11 @@ The compartment cavities are built **sharp**; the concave floor fillet is applie
 true `blend_edges` rolling-ball blend over each compartment's floor-wall edge loop (skipped when
 the clamped radius is 0 or the floor is sloped).
 
+The model is exposed both imperatively (`build(&p)`) and as a kernel **`Program`**
+(`program(&p)`): the same construction sequence, but inspectable and subset-runnable. The GUI's
+construction debugger (right panel) drives that — every prefix runs, and any op can be toggled
+off in isolation.
+
 When adding geometry, keep the manifold invariant: any edge a new face introduces must be paired by
 exactly one other face traversing it the opposite way. `Params` currently drives grid size, height,
 wall/corner/fillet, magnet/screw holes, compartments/divider edges, floor slope, and Bin/Baseplate
@@ -206,3 +219,9 @@ via `egui::PaintCallback` + `egui_glow::CallbackFn`, inside a scissored depth-cl
 culled draw that restores GL state. Back-face culling relies on the engine's outward winding (see
 the `meshes_have_outward_consistent_winding` test). `main.rs` binds `Params` to widgets, regenerates
 (build → tessellate → upload VBO) on change, and exports STL via `rfd` + `Mesh::to_stl_binary`.
+
+`debugger.rs` is the construction debugger (right panel, toggled from the params panel). It calls
+`gridfinity::program(&p)` to get the model's op list, caches per-prefix face counts for display,
+and rebuilds the solid via `program::run(&prog, |i| enabled[i])` whenever the user steps or
+toggles. The App's `regenerate` switches between `gridfinity::build(&p)` (debug off) and the
+debugger's subset build (debug on) — both feed the same `tessellate` → VBO upload path.
