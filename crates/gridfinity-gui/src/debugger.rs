@@ -293,6 +293,7 @@ fn kind_color(kind: &str) -> Color32 {
         "slabs" => Color32::from_rgb(0xf2, 0x8e, 0x2b),
         "blend" => Color32::from_rgb(0xb0, 0x7a, 0xa1),
         "fillet" => Color32::from_rgb(0xb0, 0x7a, 0xa1),
+        "chamfer" => Color32::from_rgb(0xf2, 0x8e, 0x2b),
         "custom" => Color32::from_rgb(0xed, 0xc9, 0x48),
         _ => Color32::from_gray(0xb0),
     }

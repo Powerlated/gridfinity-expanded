@@ -17,6 +17,7 @@
 //! "named sketch" idiom: profiles are authored once and referenced many times.
 
 use crate::kernel::build::{loop_of, ring, seg_edge, wall_between};
+use crate::kernel::chamfer::chamfer_edges;
 use crate::kernel::fillet::blend_edges;
 use crate::kernel::geom::Surface;
 use crate::kernel::math::{Vec3, vec3_of};
@@ -149,6 +150,13 @@ pub enum Op {
     /// Rolling-ball blends (fillets), each edge named by `(seg, z, radius)`
     /// and resolved against the builder when the op runs.
     Fillet { edges: Vec<(Seg, f32, f32)> },
+    /// Edge chamfers (bevels), each edge named by `(seg, z, d_a, d_b)` and
+    /// resolved against the builder when the op runs. `d_a`/`d_b` are the
+    /// offset distances on the edge's two faces; equal values give a
+    /// symmetric 45° bevel on a 90° edge, unequal values tilt the chamfer
+    /// plane. Closed smooth chains only (every blended vertex shared by
+    /// exactly two blended edges) — runout is not yet supported.
+    Chamfer { edges: Vec<(Seg, f32, f32, f32)> },
     /// An operation the model supplies itself, for geometry with no kernel
     /// primitive (Gridfinity's bridge-underside stitching, say).
     ///
@@ -175,6 +183,7 @@ impl Op {
             Op::Cap { .. } => "cap",
             Op::Slabs { .. } => "slabs",
             Op::Fillet { .. } => "fillet",
+            Op::Chamfer { .. } => "chamfer",
             Op::Custom(_) => "custom",
         }
     }
@@ -244,6 +253,7 @@ pub fn run_all(prog: &Program) -> Result<Solid, String> {
 pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, String> {
     let mut b = Builder::new();
     let mut blends: Vec<(EdgeId, f32)> = Vec::new();
+    let mut chamfers: Vec<(EdgeId, f32, f32)> = Vec::new();
 
     for (i, st) in prog.steps.iter().enumerate() {
         if !enabled(i) {
@@ -344,14 +354,22 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                     blends.push((seg_edge(&mut b, s, z).0, r));
                 }
             }
+            Op::Chamfer { edges } => {
+                for &(ref s, z, da, db) in edges {
+                    chamfers.push((seg_edge(&mut b, s, z).0, da, db));
+                }
+            }
         }
     }
 
-    let solid = b.build();
-    if blends.is_empty() {
-        return Ok(solid);
+    let mut solid = b.build();
+    if !blends.is_empty() {
+        solid = blend_edges(&solid, &blends)?;
     }
-    blend_edges(&solid, &blends)
+    if !chamfers.is_empty() {
+        solid = chamfer_edges(&solid, &chamfers)?;
+    }
+    Ok(solid)
 }
 
 /// Emit a fastener hole as a cavity slab stack open at `from_z` — the caller's
@@ -790,5 +808,43 @@ mod tests {
         );
         let err = run_all(&p).unwrap_err();
         assert!(err.contains("Countersink not yet implemented"), "got: {err}");
+    }
+
+    // ── Phase 1D: chamfer ─────────────────────────────────────────────────
+
+    #[test]
+    fn chamfer_top_rim_of_box_via_op() {
+        // Sharp-rect box (4 planar walls, 4 planar top edges). At each top
+        // corner vertex two rim edges meet — the multi-face chain case.
+        // For a symmetric chamfer the two face-b corners coincide (geometric
+        // identity: both adjacent sides share the same vertical edge below
+        // the original vertex, so the offset point at depth d_b is the same
+        // 3D point from either side). The two bevels' connect lines therefore
+        // weld by interning.
+        let r = Sketch::rectangle(10.0, 10.0, 20.0, 20.0).loops.remove(0);
+        let mut p = Program::default();
+        p.push("outline", Op::Sketch { name: "outline".into(), profile: r.clone() });
+        p.push(
+            "walls",
+            Op::WallFaces {
+                lower: r.clone(),
+                upper: r.clone(),
+                z0: 0.0,
+                z1: 5.0,
+                outward: true,
+            },
+        );
+        p.push("top", Op::Cap { z: 5.0, up: true, outer: (r.clone(), true), holes: vec![] });
+        p.push("bottom", Op::Cap { z: 0.0, up: false, outer: (r.clone(), false), holes: vec![] });
+        let plain = run_all(&p).expect("unblended").faces.len();
+
+        // Symmetric chamfer on all 4 top-rim edges.
+        p.push(
+            "rim chamfer",
+            Op::Chamfer { edges: r.iter().map(|&s| (s, 5.0, 1.0, 1.0)).collect() },
+        );
+        let s = run_all(&p).expect("chamfer run");
+        s.validate().expect("chamfered box is manifold");
+        assert!(s.faces.len() > plain, "chamfer added bevel faces");
     }
 }

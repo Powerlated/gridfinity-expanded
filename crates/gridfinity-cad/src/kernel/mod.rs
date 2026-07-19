@@ -1,7 +1,7 @@
 //! The analytic-surface B-rep CAD kernel — no Gridfinity in here.
 //!
 //! Pipeline: [`sketch`] → [`build`] features → [`topo`] B-rep solid →
-//! [`fillet`] → [`tess`] → [`mesh`] → STL.
+//! [`fillet`] / [`chamfer`] → [`tess`] → [`mesh`] → STL.
 //!
 //! Everything upstream of [`tess`] is exact: analytic surfaces and curves,
 //! closed-form intersections. Triangles are a terminal output format and are
@@ -12,6 +12,7 @@
 //! they live here rather than beside the Gridfinity code.
 
 pub mod build;
+pub mod chamfer;
 pub mod fillet;
 pub mod geom;
 pub mod math;
