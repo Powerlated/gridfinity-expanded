@@ -91,6 +91,14 @@ impl Sketch {
     /// Rounded rectangle centred at `(cx, cy)`. Falls back to a plain rectangle
     /// for `r <= 0`. CCW: bottom → BR arc → right → TR arc → top → TL arc →
     /// left → BL arc.
+    ///
+    /// At `r == w/2` (or `h/2`) the two corner arcs on that side meet and the
+    /// shape becomes a stadium, leaving the straight run between them
+    /// zero-length. Those degenerate segments are dropped: they chain correctly
+    /// (`a == b`) but extruding one produces two coincident vertical edges,
+    /// which `Builder` interns to a single edge used twice in the *same*
+    /// direction — `validate()` then fails with `used fwd=2 bwd=2`. Dropping
+    /// them is safe precisely because `a == b` means the loop stays closed.
     pub fn rounded_rect(cx: f32, cy: f32, w: f32, h: f32, r: f32) -> Sketch {
         let r = r.min(w / 2.0).min(h / 2.0);
         if r <= 1e-4 {
@@ -116,7 +124,7 @@ impl Sketch {
             a0,
             a1,
         };
-        Sketch::single(vec![
+        let mut segs = vec![
             Seg::Line { a: b_l, b: b_r },
             arc(b_r, r_b, cx + ix, cy - iy, -PI / 2.0, 0.0),
             Seg::Line { a: r_b, b: r_t },
@@ -125,7 +133,9 @@ impl Sketch {
             arc(t_l, l_t, cx - ix, cy + iy, PI / 2.0, PI),
             Seg::Line { a: l_t, b: l_b },
             arc(l_b, b_l, cx - ix, cy - iy, PI, 1.5 * PI),
-        ])
+        ];
+        segs.retain(|s| !matches!(*s, Seg::Line { a, b } if (b - a).length() < 1e-6));
+        Sketch::single(segs)
     }
 
     /// Circle centred at `(cx, cy)`, built from two semicircular arcs so each
@@ -237,5 +247,48 @@ pub fn ccw_segs(s: &Sketch) -> Vec<Seg> {
         reverse_loop(&segs)
     } else {
         segs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::build::extrude;
+
+    /// A stadium — `r` clamped to half the short side — leaves no straight run
+    /// on that side. The degenerate segments must not survive into the loop, or
+    /// the extruded solid is non-manifold. `inner_wall_quad` clamps to exactly
+    /// this radius, so it is reachable from the model, not a synthetic case.
+    #[test]
+    fn stadium_rounded_rect_extrudes_to_a_valid_solid() {
+        let sk = Sketch::rounded_rect(20.0, 20.0, 40.0, 2.4, 1.2);
+        assert_eq!(sk.loops[0].len(), 6, "two straight runs + four arcs");
+        assert!(sk.loops[0].iter().all(|s| (s.end() - s.start()).length() > 1e-6));
+        let solid = extrude(&sk, 0.0, 15.0);
+        solid.validate().expect("stadium prism must be manifold");
+    }
+
+    /// Over-clamping must not silently distort the shape: the loop still closes
+    /// and still encloses the stadium's area.
+    #[test]
+    fn stadium_loop_closes_and_keeps_its_area() {
+        let (w, h) = (40.0f32, 2.4f32);
+        let sk = Sketch::rounded_rect(0.0, 0.0, w, h, 5.0);
+        let segs = &sk.loops[0];
+        for i in 0..segs.len() {
+            let gap = segs[(i + 1) % segs.len()].start() - segs[i].end();
+            assert!(gap.length() < 1e-6, "loop breaks between seg {i} and the next");
+        }
+        // Stadium: a (w - h) x h rectangle plus a circle of radius h/2.
+        let r = h / 2.0;
+        let want = (w - h) * h + std::f32::consts::PI * r * r;
+        assert!((loop_area(segs) - want).abs() < 1e-3, "area {}", loop_area(segs));
+    }
+
+    /// The ordinary case must be untouched by the degenerate filter.
+    #[test]
+    fn ordinary_rounded_rect_keeps_all_eight_segments() {
+        let sk = Sketch::rounded_rect(0.0, 0.0, 40.0, 30.0, 5.0);
+        assert_eq!(sk.loops[0].len(), 8);
     }
 }
