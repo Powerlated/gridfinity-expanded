@@ -72,15 +72,13 @@ pub fn build_slabs(ops: &[(Op, Slab)]) -> Result<Solid, String> {
     Ok(solid)
 }
 
-/// Emit a slab stack into an existing builder, so it can share edges with
-/// geometry the caller builds around it. Returns the per-band cross-sections
-/// (bottom band first) — callers need them to weld their own faces onto an
-/// `open_at` interface.
-pub fn emit_slabs(
-    b: &mut Builder,
-    ops: &[(Op, Slab)],
-    opts: &SlabOpts,
-) -> Result<Vec<Vec<Vec<Seg>>>, String> {
+/// The z breakpoints and per-band cross-sections of a stack, computed without
+/// emitting anything.
+///
+/// [`emit_slabs`] is this plus assembly. Callers that need to know a stack's
+/// shape *before* building it — to weld their own faces onto an `open_at`
+/// interface, say — use this directly.
+pub fn plan_bands(ops: &[(Op, Slab)]) -> Result<(Vec<f32>, Vec<Vec<Vec<Seg>>>), String> {
     if ops.is_empty() {
         return Err("slab: empty stack".into());
     }
@@ -116,6 +114,20 @@ pub fn emit_slabs(
             acc
         })
         .collect();
+
+    Ok((zs, bands))
+}
+
+/// Emit a slab stack into an existing builder, so it can share edges with
+/// geometry the caller builds around it. Returns the per-band cross-sections
+/// (bottom band first) — callers need them to weld their own faces onto an
+/// `open_at` interface.
+pub fn emit_slabs(
+    b: &mut Builder,
+    ops: &[(Op, Slab)],
+    opts: &SlabOpts,
+) -> Result<Vec<Vec<Vec<Seg>>>, String> {
+    let (zs, bands) = plan_bands(ops)?;
 
     // Side walls, one span per band. Bands are delimited by *all* z
     // breakpoints, so nothing changes strictly inside a band and the vertical

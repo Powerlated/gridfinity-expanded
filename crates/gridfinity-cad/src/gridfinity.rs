@@ -25,7 +25,6 @@
 //!   loop's floor-wall edges.
 
 use crate::kernel::build::{RingEdges, loop_of, ring, wall_between};
-use crate::kernel::fillet::blend_edges;
 use crate::kernel::geom::Surface;
 use crate::layout::{
     EdgeClass, EffectiveWalls, GridCell, GridEdge, Orientation, SplitLine, cell_edges,
@@ -33,9 +32,9 @@ use crate::layout::{
 };
 use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
-use crate::kernel::build::seg_edge;
 use crate::kernel::region2d::{chain_loops, region_difference, split_regions};
-use crate::kernel::slab::{Op, Slab, SlabOpts, emit_slabs};
+use crate::kernel::program::{Op as POp, Program, run_all};
+use crate::kernel::slab::{Op as SlabOp, Slab, SlabOpts, emit_slabs, plan_bands};
 use crate::kernel::sketch::{Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop};
 use crate::kernel::topo::{Builder, EdgeId, Loop, Solid, VertexId};
 use std::collections::{HashMap, HashSet};
@@ -250,26 +249,28 @@ fn planar(b: &mut Builder, z: f32, up: bool, outer: Loop, inners: Vec<Loop>) {
 /// applied) as one solid — the assembled preview.
 pub fn build(p: &Params) -> Solid {
     match p.mode {
-        Mode::Bin => {
-            let mut b = Builder::new();
-            let mut blends: Vec<(EdgeId, f32)> = Vec::new();
-            for bin in &p.bins {
-                if bin.cells.is_empty() {
-                    continue;
-                }
-                let walls =
-                    effective_walls(&bin.cells, &bin.cells, &p.open_edges, &p.divider_edges);
-                blends.extend(build_piece(&mut b, p, &bin.cells, &bin.cells, walls, bin.slope));
-            }
-            let solid = b.build();
-            if blends.is_empty() {
-                solid
-            } else {
-                blend_edges(&solid, &blends).expect("floor fillet blend")
-            }
-        }
         Mode::Baseplate => build_baseplate(p),
+        Mode::Bin => run_all(&program(p)).expect("gridfinity program"),
     }
+}
+
+/// The whole layout as a kernel [`Program`] — the same operations `build`
+/// runs, but inspectable: any subset can be executed, so a prefix steps
+/// through the construction and a mask switches individual operations off.
+pub fn program(p: &Params) -> Program {
+    let mut prog = Program::default();
+    if p.mode != Mode::Bin {
+        return prog;
+    }
+    for (bi, bin) in p.bins.iter().enumerate() {
+        if bin.cells.is_empty() {
+            continue;
+        }
+        let walls = effective_walls(&bin.cells, &bin.cells, &p.open_edges, &p.divider_edges);
+        let tag = if p.bins.len() == 1 { "bin".to_string() } else { format!("bin {}", bi + 1) };
+        plan_piece(p, &bin.cells, &bin.cells, walls, bin.slope, &tag, &mut prog);
+    }
+    prog
 }
 
 /// One printable piece of the split-aware build.
@@ -304,16 +305,11 @@ pub fn build_pieces(p: &Params) -> Vec<BinPiece> {
             format!("gridfinity-bin-{}", bi + 1)
         };
         for (i, part) in parts.iter().enumerate() {
-            let mut b = Builder::new();
             let walls =
                 effective_walls(&part.cells, &bin.cells, &p.open_edges, &p.divider_edges);
-            let blends = build_piece(&mut b, p, &part.cells, &bin.cells, walls, bin.slope);
-            let solid = b.build();
-            let solid = if blends.is_empty() {
-                solid
-            } else {
-                blend_edges(&solid, &blends).expect("floor fillet blend")
-            };
+            let mut prog = Program::default();
+            plan_piece(p, &part.cells, &bin.cells, walls, bin.slope, "piece", &mut prog);
+            let solid = run_all(&prog).expect("gridfinity piece program");
             let name = if parts.len() == 1 {
                 format!("{stem}.stl")
             } else {
@@ -435,7 +431,7 @@ struct OuterPiece {
 
 /// Peg-top segments a cell shares with the outer profile: sides (by GridEdge)
 /// and corner arcs (by lattice corner).
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct SharedWithPegs {
     sides: HashSet<GridEdge>,
     corners: HashSet<(i32, i32)>,
@@ -1064,9 +1060,9 @@ fn cell_fasteners(b: &mut Builder, p: &Params, c: GridCell) -> Vec<Vec<Seg>> {
 /// is that mouth, for the caller to use as a hole of the cap.
 fn drill(b: &mut Builder, x: f32, y: f32, steps: &[(f32, f32)]) -> Vec<Seg> {
     let profile = |r: f32| ccw_segs(&Sketch::circle(x, y, r));
-    let ops: Vec<(Op, Slab)> = steps
+    let ops: Vec<(SlabOp, Slab)> = steps
         .iter()
-        .map(|&(r, depth)| (Op::Union, Slab::new(vec![profile(r)], 0.0, depth)))
+        .map(|&(r, depth)| (SlabOp::Union, Slab::new(vec![profile(r)], 0.0, depth)))
         .collect();
     emit_slabs(b, &ops, &SlabOpts { cavity: true, open_at: vec![0.0] })
         .expect("fastener pocket slab stack");
@@ -1181,14 +1177,15 @@ struct DirEdge {
 /// Build one bin/piece into `b`; returns the floor-wall edges to blend.
 /// `cells` is the piece's cell set; `bin_cells` the whole logical bin's (for
 /// seam classification and the shared sloped-floor plane).
-fn build_piece(
-    b: &mut Builder,
+fn plan_piece(
     p: &Params,
     cells: &[GridCell],
     bin_cells: &[GridCell],
     walls: EffectiveWalls,
     slope: Option<BinSlope>,
-) -> Vec<(EdgeId, f32)> {
+    tag: &str,
+    prog: &mut Program,
+) {
     let total_h = p.total_height();
     let floor_z = BASE_TOTAL_HEIGHT + FLOOR_THICKNESS;
     let openish = !walls.open.is_empty();
@@ -1424,182 +1421,256 @@ fn build_piece(
         }
     }
 
-    // 3) Pegs per cell + their bottom caps with fastener pockets.
-    let mut peg_tops: Vec<(GridCell, Vec<Seg>)> = Vec::new();
-    for &c in cells {
-        let s_bot = split_peg_profile(peg_profile(c, PEG_W_BOTTOM, PEG_R_BOTTOM), c, &peg_splits);
-        let s_mid = split_peg_profile(peg_profile(c, PEG_W_MID, PEG_R_MID), c, &peg_splits);
-        let s_top = split_peg_profile(peg_profile(c, PEG_W_TOP, OUTER_R), c, &peg_splits);
-        let r0 = ring(b, &s_bot, 0.0);
-        let r1 = ring(b, &s_mid, PEG_Z1);
-        let r2 = ring(b, &s_mid, PEG_Z2);
-        let r3 = ring(b, &s_top, PEG_HEIGHT);
-        wall_between(b, &s_bot, &s_mid, &r0, &r1, 0.0, PEG_Z1, true);
-        wall_between(b, &s_mid, &s_mid, &r1, &r2, PEG_Z1, PEG_Z2, true);
-        wall_between(b, &s_mid, &s_top, &r2, &r3, PEG_Z2, PEG_HEIGHT, true);
-        let pockets = cell_fasteners(b, p, c);
-        let pocket_loops: Vec<Loop> =
-            pockets.iter().map(|h| loop_of(&ring(b, h, 0.0), false)).collect();
-        planar(b, 0.0, false, loop_of(&r0, false), pocket_loops);
-        peg_tops.push((c, s_top));
-    }
+    // -- Derived geometry -------------------------------------------------
+    // Everything the emission stages consume, computed up front and purely,
+    // so no stage depends on handles an earlier stage created and any of them
+    // can be switched off on its own.
+    let peg_profiles: Vec<(GridCell, Vec<Seg>, Vec<Seg>, Vec<Seg>)> = cells
+        .iter()
+        .map(|&c| {
+            (
+                c,
+                split_peg_profile(peg_profile(c, PEG_W_BOTTOM, PEG_R_BOTTOM), c, &peg_splits),
+                split_peg_profile(peg_profile(c, PEG_W_MID, PEG_R_MID), c, &peg_splits),
+                split_peg_profile(peg_profile(c, PEG_W_TOP, OUTER_R), c, &peg_splits),
+            )
+        })
+        .collect();
+    let peg_tops: Vec<(GridCell, Vec<Seg>)> =
+        peg_profiles.iter().map(|(c, _, _, t)| (*c, t.clone())).collect();
+    let outer_rings: Vec<(Vec<Seg>, Vec<bool>)> = o
+        .loops
+        .iter()
+        .map(|pieces| {
+            (pieces.iter().map(|p| p.seg).collect(), pieces.iter().map(|p| p.shared).collect())
+        })
+        .collect();
+    let full_hi_rings: Vec<Vec<Seg>> =
+        if openish { Vec::new() } else { outer_rings.iter().map(|(s, _)| s.clone()).collect() };
 
-    // 4) Outer wall from the composite profile. The bottom ring's shared
-    //    pieces intern onto the peg-top edges. Fully-walled pieces build the
-    //    wall in one span; open/seam pieces build only the floor band here
-    //    (PEG_HEIGHT → floor_z) — above the floor the wall exists only over
-    //    the sectors left between profile and cavity, built in step 7.
-    let mut bridge_rings: Vec<(Vec<Seg>, Vec<bool>)> = Vec::new();
-    let mut full_hi_rings: Vec<Vec<Seg>> = Vec::new();
-    for pieces in &o.loops {
-        let segs: Vec<Seg> = pieces.iter().map(|p| p.seg).collect();
-        let shared_flags: Vec<bool> = pieces.iter().map(|p| p.shared).collect();
-        let lo = ring(b, &segs, PEG_HEIGHT);
-        // Outward for the outer boundary loop (CCW, area > 0); a hole loop of a
-        // ring-shaped bin (CW) is an interior perimeter — its wall also faces
-        // away from the material, which `wall_between` derives from the segs'
-        // winding, so `outward = true` is correct for both.
-        if openish {
-            let mid = ring(b, &segs, floor_z);
-            wall_between(b, &segs, &segs, &lo, &mid, PEG_HEIGHT, floor_z, true);
-        } else {
-            let hi = ring(b, &segs, total_h);
-            wall_between(b, &segs, &segs, &lo, &hi, PEG_HEIGHT, total_h, true);
-            full_hi_rings.push(segs.clone());
-        }
-        bridge_rings.push((segs, shared_flags));
-    }
-
-    // 5) Bridge underside faces at PEG_HEIGHT: stitch the free (non-welded)
-    //    peg-top segments (forward) with the free outer-profile pieces
-    //    (reversed) into loops.
-    let mut free: Vec<DirEdge> = Vec::new();
-    for (c, s_top) in &peg_tops {
-        let r3 = ring(b, s_top, PEG_HEIGHT);
-        for (k, &(e, d)) in r3.edges.iter().enumerate() {
-            if peg_seg_free(&s_top[k], *c, &shared) {
-                let k1 = (k + 1) % r3.verts.len();
-                free.push(DirEdge { start: r3.verts[k], end: r3.verts[k1], entry: (e, d) });
-            }
-        }
-    }
-    for (segs, shared_flags) in &bridge_rings {
-        let lo = ring(b, segs, PEG_HEIGHT);
-        for (k, &(e, d)) in lo.edges.iter().enumerate() {
-            if !shared_flags[k] {
-                let k1 = (k + 1) % lo.verts.len();
-                free.push(DirEdge { start: lo.verts[k1], end: lo.verts[k], entry: (e, !d) });
-            }
-        }
-    }
-    for (outer, holes) in stitch_loops(&free, b) {
-        planar(b, PEG_HEIGHT, false, outer, holes);
-    }
-
-    // 6) Cavities: prisms + floors (+ fillet chains). Touched loops (with
-    //    coincident open/seam runs) build only their floor cap and island
-    //    towers here — their wall faces belong to the sector loops of step 7.
-    let mut blends: Vec<(EdgeId, f32)> = Vec::new();
+    // Cavity stage: plan every loop, collecting both the ops to emit and the
+    // geometry the rim assembly needs, without building anything yet.
+    let mut cav_ops: Vec<(String, POp)> = Vec::new();
+    let mut blend_edges: Vec<(Seg, f32, f32)> = Vec::new();
     let mut rim_holes: Vec<Vec<Seg>> = Vec::new();
     let mut island_tops: Vec<Vec<Seg>> = Vec::new();
     let mut touched: Vec<CavityLoop> = Vec::new();
 
-    for (cl, island_shapes, loop_fr, banded) in planned {
-        if !cl.touched() {
-            if let Some(bd) = banded {
-                let (bw, tops, rim) =
-                    build_cavity_banded(b, &bd, &island_shapes, floor_z, total_h);
-                island_tops.extend(tops);
-                blends.extend(bw);
-                // Rim hole from the stack's own top band, so its edges pair
-                // with the wall tops the stack just emitted.
-                rim_holes.extend(rim);
-                continue;
+    for (ci, (cl, island_shapes, loop_fr, banded)) in planned.into_iter().enumerate() {
+        if cl.touched() {
+            for isl in &island_shapes {
+                island_tops.push(isl.segs.clone());
             }
-            match slope {
-                Some(sl) => {
-                    island_tops.extend(build_cavity_sloped(
-                        b, bin_cells, &cl.segs, &island_shapes, floor_z, total_h, sl,
-                    ));
-                }
-                None => {
-                    let (fwe, tops) =
-                        build_cavity_flat(b, &cl.segs, &island_shapes, floor_z, total_h);
-                    island_tops.extend(tops);
-                    if loop_fr > 0.01 {
-                        blends.extend(fwe.into_iter().map(|e| (e, loop_fr)));
+            let segs = cl.segs.clone();
+            let isls: Vec<Vec<Seg>> = island_shapes.iter().map(|i| i.segs.clone()).collect();
+            cav_ops.push((
+                format!("cavity {ci} (open): floor + towers"),
+                POp::Custom(Box::new(move |b| {
+                    let r_lo = ring(b, &segs, floor_z);
+                    let mut floor_holes: Vec<Loop> = Vec::new();
+                    for isg in &isls {
+                        let i_lo = ring(b, isg, floor_z);
+                        let i_hi = ring(b, isg, total_h);
+                        wall_between(b, isg, isg, &i_lo, &i_hi, floor_z, total_h, true);
+                        floor_holes.push(loop_of(&i_lo, false));
+                    }
+                    planar(b, floor_z, true, loop_of(&r_lo, true), floor_holes);
+                    Ok(())
+                })),
+            ));
+            touched.push(cl);
+            continue;
+        }
+
+        if let Some(bd) = banded {
+            let (stack, opts, tops, rim, blends) =
+                plan_cavity_banded(&bd, &island_shapes, floor_z, total_h);
+            island_tops.extend(tops);
+            rim_holes.extend(rim);
+            blend_edges.extend(blends);
+            cav_ops.push((format!("cavity {ci}: banded slab stack"), POp::Slabs { stack, opts }));
+            continue;
+        }
+
+        match slope {
+            Some(sl) => {
+                for isl in &island_shapes {
+                    if isl.top.is_none() {
+                        island_tops.push(isl.segs.clone());
                     }
                 }
+                let (segs, cells_v) = (cl.segs.clone(), bin_cells.to_vec());
+                let isls = island_shapes.clone();
+                cav_ops.push((
+                    format!("cavity {ci}: sloped floor"),
+                    POp::Custom(Box::new(move |b| {
+                        build_cavity_sloped(b, &cells_v, &segs, &isls, floor_z, total_h, sl);
+                        Ok(())
+                    })),
+                ));
             }
-            // Rim hole for this cavity's opening.
-            rim_holes.push(cl.segs.clone());
-        } else {
-            let r_lo = ring(b, &cl.segs, floor_z);
-            let mut floor_holes: Vec<Loop> = Vec::new();
-            for isl in &island_shapes {
-                let i_lo = ring(b, &isl.segs, floor_z);
-                let i_hi = ring(b, &isl.segs, total_h);
-                wall_between(b, &isl.segs, &isl.segs, &i_lo, &i_hi, floor_z, total_h, true);
-                island_tops.push(isl.segs.clone());
-                // Reversed: the tower wall traverses its bottom ring forward.
-                floor_holes.push(loop_of(&i_lo, false));
-            }
-            // Forward traversal: the floor band's top edges and the sector
-            // walls' bottom edges both take the reversed direction here (the
-            // cavity has no wall of its own above the floor on this loop).
-            planar(b, floor_z, true, loop_of(&r_lo, true), floor_holes);
-            touched.push(cl);
-        }
-    }
-
-    // 7) Faces at total_h. On open/seam pieces the wall exists only over the
-    //    sectors left between outer profile and cavities.
-    let mut top_walls: Vec<Vec<Seg>> = full_hi_rings;
-    if openish {
-        top_walls = build_wall_sectors(b, &o, &touched, floor_z, total_h);
-    }
-
-    // Assemble total_h faces: wall tops and island caps are face outers;
-    // compartment openings (and a ring bin's inner-perimeter wall top) are
-    // holes of the INNERMOST containing face — a compartment inside an island
-    // belongs to the island's cap, not the rim.
-    let mut cap_outers: Vec<(f32, Vec<Seg>, Loop, Vec<Loop>)> = Vec::new();
-    let mut cap_holes: Vec<(Vec2, Loop)> = Vec::new();
-    for segs in top_walls {
-        let a = loop_area(&segs);
-        let lp = loop_of(&ring(b, &segs, total_h), true);
-        if a > 0.0 {
-            cap_outers.push((a, segs, lp, Vec::new()));
-        } else {
-            cap_holes.push((segs[0].start(), lp));
-        }
-    }
-    for segs in island_tops {
-        let a = loop_area(&segs).abs();
-        let lp = loop_of(&ring(b, &segs, total_h), true);
-        cap_outers.push((a, segs, lp, Vec::new()));
-    }
-    for segs in rim_holes {
-        let lp = loop_of(&ring(b, &segs, total_h), true);
-        cap_holes.push((segs[0].start(), lp));
-    }
-    for (pt, lp) in cap_holes {
-        let mut best: Option<usize> = None;
-        for (i, (a, segs, _, _)) in cap_outers.iter().enumerate() {
-            if point_in_segs(pt, segs)
-                && best.is_none_or(|bi| *a < cap_outers[bi].0)
-            {
-                best = Some(i);
+            None => {
+                let (stack, opts, tops, blends) =
+                    plan_cavity_flat(&cl.segs, &island_shapes, floor_z, total_h, loop_fr);
+                island_tops.extend(tops);
+                blend_edges.extend(blends);
+                cav_ops.push((format!("cavity {ci}: slab stack"), POp::Slabs { stack, opts }));
             }
         }
-        let bi = best.expect("total_h hole without a containing face");
-        cap_outers[bi].3.push(lp);
-    }
-    for (_, _, outer, holes) in cap_outers {
-        planar(b, total_h, true, outer, holes);
+        rim_holes.push(cl.segs.clone());
     }
 
-    blends
+    // Wall sectors of an open piece replace the full-height outer rings.
+    let sector_segs: Vec<Vec<Seg>> =
+        if openish { plan_wall_sectors(&o, &touched) } else { Vec::new() };
+    let top_walls: Vec<Vec<Seg>> =
+        if openish { sector_segs.clone() } else { full_hi_rings.clone() };
+
+    // -- 3) Pegs ----------------------------------------------------------
+    {
+        let (profs, params) = (peg_profiles.clone(), p.clone());
+        prog.push(
+            format!("{tag}: base pegs ({} cells)", profs.len()),
+            POp::Custom(Box::new(move |b| {
+                for (c, s_bot, s_mid, s_top) in &profs {
+                    let r0 = ring(b, s_bot, 0.0);
+                    let r1 = ring(b, s_mid, PEG_Z1);
+                    let r2 = ring(b, s_mid, PEG_Z2);
+                    let r3 = ring(b, s_top, PEG_HEIGHT);
+                    wall_between(b, s_bot, s_mid, &r0, &r1, 0.0, PEG_Z1, true);
+                    wall_between(b, s_mid, s_mid, &r1, &r2, PEG_Z1, PEG_Z2, true);
+                    wall_between(b, s_mid, s_top, &r2, &r3, PEG_Z2, PEG_HEIGHT, true);
+                    let pockets = cell_fasteners(b, &params, *c);
+                    let pocket_loops: Vec<Loop> =
+                        pockets.iter().map(|h| loop_of(&ring(b, h, 0.0), false)).collect();
+                    planar(b, 0.0, false, loop_of(&r0, false), pocket_loops);
+                }
+                Ok(())
+            })),
+        );
+    }
+
+    // -- 4) Outer wall ----------------------------------------------------
+    for (li, (segs, _)) in outer_rings.iter().enumerate() {
+        let z1 = if openish { floor_z } else { total_h };
+        prog.push(
+            format!("{tag}: outer wall {li}"),
+            POp::Wall {
+                lower: segs.clone(),
+                upper: segs.clone(),
+                z0: PEG_HEIGHT,
+                z1,
+                outward: true,
+            },
+        );
+    }
+
+    // -- 5) Bridge underside ----------------------------------------------
+    {
+        let (tops, rings, shared_c) = (peg_tops.clone(), outer_rings.clone(), shared.clone());
+        prog.push(
+            format!("{tag}: bridge underside"),
+            POp::Custom(Box::new(move |b| {
+                let mut free: Vec<DirEdge> = Vec::new();
+                for (c, s_top) in &tops {
+                    let r3 = ring(b, s_top, PEG_HEIGHT);
+                    for (k, &(e, d)) in r3.edges.iter().enumerate() {
+                        if peg_seg_free(&s_top[k], *c, &shared_c) {
+                            let k1 = (k + 1) % r3.verts.len();
+                            free.push(DirEdge {
+                                start: r3.verts[k],
+                                end: r3.verts[k1],
+                                entry: (e, d),
+                            });
+                        }
+                    }
+                }
+                for (segs, shared_flags) in &rings {
+                    let lo = ring(b, segs, PEG_HEIGHT);
+                    for (k, &(e, d)) in lo.edges.iter().enumerate() {
+                        if !shared_flags[k] {
+                            let k1 = (k + 1) % lo.verts.len();
+                            free.push(DirEdge {
+                                start: lo.verts[k1],
+                                end: lo.verts[k],
+                                entry: (e, !d),
+                            });
+                        }
+                    }
+                }
+                for (outer, holes) in stitch_loops(&free, b) {
+                    planar(b, PEG_HEIGHT, false, outer, holes);
+                }
+                Ok(())
+            })),
+        );
+    }
+
+    // -- 6) Cavities ------------------------------------------------------
+    for (label, op) in cav_ops {
+        prog.push(format!("{tag}: {label}"), op);
+    }
+
+    // -- 7) Sector walls (open pieces) + faces at the rim ------------------
+    for (si, sl) in sector_segs.iter().enumerate() {
+        prog.push(
+            format!("{tag}: wall sector {si}"),
+            POp::Wall {
+                lower: sl.clone(),
+                upper: sl.clone(),
+                z0: floor_z,
+                z1: total_h,
+                outward: true,
+            },
+        );
+    }
+    {
+        let (tw, it, rh) = (top_walls.clone(), island_tops.clone(), rim_holes.clone());
+        prog.push(
+            format!("{tag}: rim faces"),
+            POp::Custom(Box::new(move |b| {
+                let mut cap_outers: Vec<(f32, Vec<Seg>, Loop, Vec<Loop>)> = Vec::new();
+                let mut cap_holes: Vec<(Vec2, Loop)> = Vec::new();
+                for segs in &tw {
+                    let a = loop_area(segs);
+                    let lp = loop_of(&ring(b, segs, total_h), true);
+                    if a > 0.0 {
+                        cap_outers.push((a, segs.clone(), lp, Vec::new()));
+                    } else {
+                        cap_holes.push((segs[0].start(), lp));
+                    }
+                }
+                for segs in &it {
+                    let a = loop_area(segs).abs();
+                    let lp = loop_of(&ring(b, segs, total_h), true);
+                    cap_outers.push((a, segs.clone(), lp, Vec::new()));
+                }
+                for segs in &rh {
+                    let lp = loop_of(&ring(b, segs, total_h), true);
+                    cap_holes.push((segs[0].start(), lp));
+                }
+                for (pt, lp) in cap_holes {
+                    let mut best: Option<usize> = None;
+                    for (i, (a, segs, _, _)) in cap_outers.iter().enumerate() {
+                        if point_in_segs(pt, segs) && best.is_none_or(|bi| *a < cap_outers[bi].0) {
+                            best = Some(i);
+                        }
+                    }
+                    let bi = best.ok_or("total_h hole without a containing face")?;
+                    cap_outers[bi].3.push(lp);
+                }
+                for (_, _, outer, holes) in cap_outers {
+                    planar(b, total_h, true, outer, holes);
+                }
+                Ok(())
+            })),
+        );
+    }
+
+    // -- 8) Floor fillet ---------------------------------------------------
+    if !blend_edges.is_empty() {
+        prog.push(format!("{tag}: floor fillet"), POp::Blend { edges: blend_edges });
+    }
 }
 
 /// Wall sectors of an open/seam piece: the region between outer profile and
@@ -1608,13 +1679,7 @@ fn build_piece(
 /// gets prism walls (floor_z → total_h); its boundary edges weld with the
 /// floor band top, the cavity floor caps, and the rim by interning. Returns
 /// `(loop segs, top ring)` per sector for the rim assembly.
-fn build_wall_sectors(
-    b: &mut Builder,
-    o: &OuterLoops,
-    touched: &[CavityLoop],
-    floor_z: f32,
-    total_h: f32,
-) -> Vec<Vec<Seg>> {
+fn plan_wall_sectors(o: &OuterLoops, touched: &[CavityLoop]) -> Vec<Vec<Seg>> {
     let mut frags: Vec<Vec<Seg>> = Vec::new();
     for (li, pieces) in o.loops.iter().enumerate() {
         let cons = &o.consumed[li];
@@ -1664,15 +1729,7 @@ fn build_wall_sectors(
         flush(&mut run, &mut frags);
     }
 
-    let sectors = chain_fragments(frags);
-    let mut sector_rings: Vec<Vec<Seg>> = Vec::new();
-    for sl in &sectors {
-        let lo = ring(b, sl, floor_z);
-        let hi = ring(b, sl, total_h);
-        wall_between(b, sl, sl, &lo, &hi, floor_z, total_h, true);
-        sector_rings.push(sl.clone());
-    }
-    sector_rings
+    chain_fragments(frags)
 }
 
 /// Shape a traced cavity loop for an open/seam piece: corner rounding is
@@ -1734,109 +1791,88 @@ fn is_convex_arc(shape: &[Seg], s: &Seg) -> bool {
     }
 }
 
-/// Flat cavity: vertical walls, planar floor (with island holes), island
-/// towers. Returns the floor-wall edges (cavity ring + island rings) and the
-/// island top rings (capped by the total_h face assembly, which knows about
-/// compartments nested inside islands).
-fn build_cavity_flat(
-    b: &mut Builder,
+/// Plan a flat-floored cavity: the compartment void, minus one slab per island
+/// tower. Returns the slab stack, the full-height island top profiles (the rim
+/// assembly needs them), and the floor-wall blend edges named by `(seg, z, r)`.
+fn plan_cavity_flat(
     shape: &[Seg],
     islands: &[Island],
     floor_z: f32,
     total_h: f32,
-) -> (Vec<EdgeId>, Vec<Vec<Seg>>) {
-    // The cavity is a void: the compartment profile, minus each island tower
-    // over its own height. Partial-height islands need no separate capping
-    // code — the band machinery caps them where their slab ends. The rim is
-    // declared open because step 7 supplies that face.
-    let mut ops = vec![(Op::Union, Slab::new(vec![shape.to_vec()], floor_z, total_h))];
+    loop_fr: f32,
+) -> (Vec<(SlabOp, Slab)>, SlabOpts, Vec<Vec<Seg>>, Vec<(Seg, f32, f32)>) {
+    let mut stack = vec![(SlabOp::Union, Slab::new(vec![shape.to_vec()], floor_z, total_h))];
     for isl in islands {
-        ops.push((
-            Op::Difference,
+        stack.push((
+            SlabOp::Difference,
             Slab::new(vec![isl.segs.clone()], floor_z, isl.top.unwrap_or(total_h)),
         ));
     }
-    emit_slabs(b, &ops, &SlabOpts { cavity: true, open_at: vec![total_h] })
-        .expect("flat cavity slab stack");
-
-    // Re-derive what callers need. `seg_edge`/`ring` are interned, so these
-    // are the very edges the stack just emitted.
-    let mut fwe: Vec<EdgeId> = shape.iter().map(|s| seg_edge(b, s, floor_z).0).collect();
-    let mut tops: Vec<Vec<Seg>> = Vec::new();
+    let filleting = loop_fr > 0.01;
+    let mut blends: Vec<(Seg, f32, f32)> = Vec::new();
+    if filleting {
+        blends.extend(shape.iter().map(|s| (*s, floor_z, loop_fr)));
+    }
+    let mut tops = Vec::new();
     for isl in islands {
         if isl.top.is_none() {
-            fwe.extend(isl.segs.iter().map(|s| seg_edge(b, s, floor_z).0));
-            // The stack emitted this island as a CW *hole* of the void, so
-            // hand step 7 a ring wound that way — `loop_of(.., true)` there
-            // must oppose the wall top the stack just built.
+            if filleting {
+                blends.extend(isl.segs.iter().map(|s| (*s, floor_z, loop_fr)));
+            }
+            // The stack emits an island as a CW hole of the void, so the rim
+            // wants a profile wound that way.
             tops.push(reverse_loop(&isl.segs));
         }
     }
-    (fwe, tops)
+    (stack, SlabOpts { cavity: true, open_at: vec![total_h] }, tops, blends)
 }
 
-/// Z-banded cavity for a loop notched by boundary-contact partial-height
-/// inner walls. The notched outers (`outline_a`) carry the floor band and the
-/// full-height walls; the notch sides rise only to their wall's top; the
-/// contact runs exist only from the wall top up; each wall is capped at its
-/// own height; the rim opening uses the re-split original outline. Vertical
-/// edges at corners where spans differ are split at every breakpoint so the
-/// shared edges pair 1:1. No floor-wall fillet edges are returned (banded
-/// loops always build sharp).
-/// Z-banded cavity for a loop notched by partial-height inner walls.
-///
-/// One slab stack: the compartment void, minus each wall's footprint quad up
-/// to that wall's top, minus each island tower over its own height. The band
-/// machinery does the rest — a wall that reaches the loop boundary, one fully
-/// inside it, and one crossing it are all just differences, and each gets its
-/// top capped where its slab ends.
-///
-/// Returns the ramp blends, the full-height island tops, and the top band's
-/// cross-section (the rim opening, which the caller closes).
-fn build_cavity_banded(
-    b: &mut Builder,
+/// Plan a z-banded cavity: as [`plan_cavity_flat`], plus one slab per
+/// partial-height inner wall (floor to that wall's top). Also returns the top
+/// band's cross-section, which is the rim opening the caller closes, and the
+/// wall-top runout blends. Only the ramp needs the planner's contact runs —
+/// they name those edges by provenance rather than by coordinate.
+fn plan_cavity_banded(
     bd: &Banded,
     islands: &[Island],
     floor_z: f32,
     total_h: f32,
-) -> (Vec<(EdgeId, f32)>, Vec<Vec<Seg>>, Vec<Vec<Seg>>) {
+) -> (Vec<(SlabOp, Slab)>, SlabOpts, Vec<Vec<Seg>>, Vec<Vec<Seg>>, Vec<(Seg, f32, f32)>) {
     const TRANSITION_R: f32 = 4.0;
 
-    let mut ops = vec![(Op::Union, Slab::new(vec![bd.outline_b.clone()], floor_z, total_h))];
+    let mut stack = vec![(SlabOp::Union, Slab::new(vec![bd.outline_b.clone()], floor_z, total_h))];
     for n in &bd.notches {
-        ops.push((Op::Difference, Slab::new(vec![n.quad.clone()], floor_z, n.top)));
+        stack.push((SlabOp::Difference, Slab::new(vec![n.quad.clone()], floor_z, n.top)));
     }
     for isl in islands {
-        ops.push((
-            Op::Difference,
+        stack.push((
+            SlabOp::Difference,
             Slab::new(vec![isl.segs.clone()], floor_z, isl.top.unwrap_or(total_h)),
         ));
     }
-    let bands = emit_slabs(b, &ops, &SlabOpts { cavity: true, open_at: vec![total_h] })
-        .expect("banded cavity slab stack");
+    let opts = SlabOpts { cavity: true, open_at: vec![total_h] };
 
-    let mut tops: Vec<Vec<Seg>> = Vec::new();
+    let rim = plan_bands(&stack)
+        .map(|(_, bands)| bands.last().cloned().unwrap_or_default())
+        .unwrap_or_default();
+
+    let mut tops = Vec::new();
     for isl in islands {
         if isl.top.is_none() {
             tops.push(reverse_loop(&isl.segs));
         }
     }
 
-    // The wall top runs out into the taller face with a rolling-ball blend.
-    // The contact runs are the planner's, so the edges are named by
-    // provenance rather than matched by coordinate.
-    let mut blends: Vec<(EdgeId, f32)> = Vec::new();
+    let mut blends: Vec<(Seg, f32, f32)> = Vec::new();
     for n in &bd.notches {
         let r = (total_h - n.top).min(TRANSITION_R);
         if r < 0.05 {
             continue;
         }
-        for s in &n.contact {
-            blends.push((seg_edge(b, s, n.top).0, r));
-        }
+        blends.extend(n.contact.iter().map(|s| (*s, n.top, r)));
     }
 
-    (blends, tops, bands.last().cloned().unwrap_or_default())
+    (stack, opts, tops, rim, blends)
 }
 
 /// Sloped cavity: single tilted plane floor over the bin's bounding box, sharp

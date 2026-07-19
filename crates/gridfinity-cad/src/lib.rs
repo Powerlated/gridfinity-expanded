@@ -55,6 +55,25 @@ mod tests {
         coords.iter().map(|&(x, y)| GridCell { x, y }).collect()
     }
 
+    /// The model is a kernel program: every prefix of it runs, and running all
+    /// of it reproduces `build`. This is what the geometry debugger steps
+    /// through, so a stage that secretly depended on an earlier stage's edge
+    /// ids would surface here as a prefix that fails to run.
+    #[test]
+    fn model_is_a_runnable_program() {
+        use crate::kernel::program;
+        let p = gridfinity::Params::default();
+        let prog = gridfinity::program(&p);
+        assert!(prog.len() >= 5, "expected several ops, got {}", prog.len());
+        for n in 0..=prog.len() {
+            program::run(&prog, |i| i < n)
+                .unwrap_or_else(|e| panic!("prefix of {n} op(s) failed: {e}"));
+        }
+        let whole = program::run_all(&prog).expect("whole program");
+        whole.validate().expect("whole program is manifold");
+        assert_eq!(whole.faces.len(), gridfinity::build(&p).faces.len());
+    }
+
     #[test]
     fn box_prism_is_valid_and_watertight() {
         let s = Sketch::rectangle(0.0, 0.0, 10.0, 20.0);
