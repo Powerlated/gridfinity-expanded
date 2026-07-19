@@ -12,6 +12,7 @@
 //! they live here rather than beside the Gridfinity code.
 
 pub mod build;
+pub mod audit;
 pub mod chamfer;
 pub mod fillet;
 pub mod geom;

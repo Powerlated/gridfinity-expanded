@@ -12,6 +12,7 @@ pub mod printers;
 pub mod region;
 
 pub use gridfinity::{Params, build as build_gridfinity};
+pub use kernel::audit::{audit, tessellation_leaks, AuditReport, Defect, Severity, Category, TessLeak};
 pub use kernel::mesh::Mesh;
 pub use kernel::tess::{Tessellation, tessellate};
 pub use kernel::topo::Solid;
@@ -537,6 +538,40 @@ mod tests {
         assert_watertight(&tessellate(&solid, 6).to_mesh());
     }
 
+    /// Mirror of the TS `full-height wall` fixture. Pins two facts the fix
+    /// must satisfy: the B-rep audits clean (every edge lies on every face
+    /// that references it, vertices welded, loops closed), and the
+    /// tessellation currently leaks at the island wall's semicircle end-caps.
+    ///
+    /// Leak attribution via [`tessellation_leaks`]: all 8 unpaired mesh edges
+    /// sit at z = floor_z (8.2 mm), on the `ta` tangent circle of the two
+    /// torus blend faces at the wall's left (face 134, centre (7,42,10.68),
+    /// major 3.48 / minor 2.48) and right (face 137, centre (77,42,10.68))
+    /// ends — paired against the cavity floor face (131). The B-rep says these
+    /// three faces share their edges correctly; the tessellator disagrees.
+    /// That isolates the defect to `tess.rs`'s handling of the floor face's
+    /// hole triangulation against the torus's structured-grid boundary.
+    #[test]
+    fn full_height_wall_fixture_audit() {
+        let p = gridfinity::Params {
+            inner_walls: vec![gridfinity::InnerWall {
+                x1: 6.0,
+                y1: 42.0,
+                x2: 78.0,
+                y2: 42.0,
+                width: 2.0,
+                height: None,
+            }],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&p);
+        solid.validate().expect("full-height wall topology valid");
+        let report = audit(&solid);
+        assert!(report.is_ok(), "B-rep must be geometrically sound:\n{report}");
+        // When the tessellation bug is fixed, uncomment this:
+        // assert!(tessellation_leaks(&tessellate(&solid, 6)).is_empty());
+    }
+
     #[test]
     fn open_edge_bin_is_watertight_and_loses_volume() {
         // 2Ã—2 bin with the whole north face open (both H edges at y=2).
@@ -755,5 +790,186 @@ mod tests {
             .fold(f32::NEG_INFINITY, f32::max);
         assert!((low - floor_z).abs() < 0.6, "low-side floor z {low} â‰ˆ floor_z {floor_z}");
         assert!(high > floor_z + 3.0, "high-side floor z {high} should rise above floor_z");
+    }
+    /// Floor-blend faces (`Torus` about +Z) whose centre lies within `d` of the
+    /// segment `a`–`b`, and the minor radius they share. The radius is returned
+    /// rather than asserted against `floor_fillet`: the model clamps the blend
+    /// to what the cavity can absorb, so the effective value (2.48 mm for the
+    /// default bin's requested 3.0) is the model's answer, not the test's.
+    fn blends_near(solid: &crate::Solid, a: (f32, f32), b: (f32, f32), d: f32) -> (usize, f32) {
+        use crate::kernel::math::Vec2;
+        let (a, b) = (Vec2::new(a.0, a.1), Vec2::new(b.0, b.1));
+        let ab = b - a;
+        solid
+            .faces
+            .iter()
+            .filter(|f| match f.surface {
+                geom::Surface::Torus { center, axis, .. } => {
+                    if axis.z.abs() < 0.999 {
+                        return false;
+                    }
+                    let p = crate::kernel::math::Vec2::new(center.x, center.y);
+                    // `a == b` is the "anywhere" query; guard the 0/0.
+                    let l2 = ab.dot(ab);
+                    let t = if l2 < 1e-9 { 0.0 } else { ((p - a).dot(ab) / l2).clamp(0.0, 1.0) };
+                    (p - (a + ab * t)).length() <= d
+                }
+                _ => false,
+            })
+            .fold((0usize, 0.0f32), |(n, r), f| match f.surface {
+                geom::Surface::Torus { minor_r, .. } => (n + 1, minor_r),
+                _ => (n, r),
+            })
+    }
+
+    /// A freeform dividing wall that floats clear of the cavity boundary is a
+    /// concave floor edge like any other, so its corners must carry the floor
+    /// fillet — not just the compartment's outer corners.
+    ///
+    /// This is the regression guard on `inner_wall_quad_in`'s clearance test.
+    /// The island's corners are only rounded when its blend footprint (the wall
+    /// grown by `2·fr`) fits inside the cavity loop, and rounding them is what
+    /// lets the blend's tangent chain run around the island at all — a single
+    /// sharp corner anywhere on a loop drops that loop's blend entirely. Skewed
+    /// deliberately: the wall is at no grid angle, so nothing here can be
+    /// satisfied by an axis-aligned special case.
+    #[test]
+    fn freeform_floating_divider_is_filleted() {
+        let wall = gridfinity::InnerWall {
+            x1: 22.0, y1: 30.0, x2: 62.0, y2: 55.0, width: 2.4, height: None,
+        };
+        let p = gridfinity::Params {
+            inner_walls: vec![wall.clone()],
+            ..gridfinity::Params::default()
+        };
+        let plain = gridfinity::build(&gridfinity::Params::default());
+        let solid = gridfinity::build(&p);
+        solid.validate().expect("floating divider topology valid");
+        assert!(crate::audit(&solid).is_ok(), "B-rep must be sound:
+{}", crate::audit(&solid));
+        assert_watertight(&tessellate(&solid, 6).to_mesh());
+
+        // Four corner blends around the island, and the compartment's own four
+        // are still there — the island must add to them, not replace them.
+        let (on_wall, r) = blends_near(&solid, (22.0, 30.0), (62.0, 55.0), 6.0);
+        assert_eq!(on_wall, 4, "want 4 blend faces around the island, got {on_wall}");
+        assert!(r > 0.1, "island blend radius collapsed to {r}");
+        let (total, _) = blends_near(&solid, (41.75, 41.75), (41.75, 41.75), 1e4);
+        let (base, br) = blends_near(&plain, (41.75, 41.75), (41.75, 41.75), 1e4);
+        assert_eq!(base, 4, "plain bin should have 4 corner blends, got {base}");
+        assert_eq!(total, base + 4, "island blends must add to the compartment's");
+        assert!((r - br).abs() < 1e-3, "island blend {r} should match the wall's {br}");
+    }
+
+    /// The clearance test's other side: a wall whose blend footprint would reach
+    /// past the cavity boundary stays sharp, and therefore unfilleted. Rounding
+    /// it would enable a blend that eats floor the boundary's own blend has
+    /// already taken, leaving the floor face with a hole loop crossing its outer
+    /// loop. Unfilleted is the correct answer here, not a shortfall.
+    #[test]
+    fn divider_too_close_to_the_wall_stays_sharp_and_sound() {
+        let p = gridfinity::Params {
+            inner_walls: vec![gridfinity::InnerWall {
+                x1: 6.0, y1: 42.0, x2: 78.0, y2: 42.0, width: 2.0, height: None,
+            }],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&p);
+        solid.validate().expect("tight divider topology valid");
+        assert!(crate::audit(&solid).is_ok(), "B-rep must be sound:
+{}", crate::audit(&solid));
+        let (on_wall, _) = blends_near(&solid, (6.0, 42.0), (78.0, 42.0), 6.0);
+        assert_eq!(on_wall, 0, "a wall this close to the boundary must stay sharp");
+    }
+
+    /// A divider that crosses the cavity boundary notches the loop, and the
+    /// notch corners are kept sharp so the boolean's cut points line up exactly
+    /// with the cavity's own split points (see `inner_wall_quad_in`). Sharp
+    /// corners drop the loop's blend, so a crossing divider is currently not
+    /// filleted anywhere — including the compartment's outer corners, which
+    /// have done nothing wrong.
+    #[test]
+    #[ignore = "crossing dividers keep sharp notch corners, which drops the whole loop's floor blend"]
+    fn freeform_crossing_divider_is_filleted() {
+        let p = gridfinity::Params {
+            inner_walls: vec![gridfinity::InnerWall {
+                x1: -5.0, y1: 30.0, x2: 90.0, y2: 55.0, width: 2.4, height: None,
+            }],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&p);
+        let (n, _) = blends_near(&solid, (0.0, 0.0), (83.5, 83.5), 1e4);
+        assert!(n > 0, "a crossing divider should still leave the floor filleted");
+    }
+
+}
+
+/// Tests for the heavy soundness checker itself: it must be quiet on a
+/// known-good model and loud when a defect is planted.
+#[cfg(test)]
+mod audit_tests {
+    use crate::{audit, tessellation_leaks};
+    use crate::gridfinity;
+    use crate::kernel::geom::Surface;
+    use crate::kernel::math::Vec3;
+    use crate::kernel::tess::tessellate;
+    use crate::kernel::topo::{Builder, Loop};
+
+    #[test]
+    fn audit_clean_on_default_bin() {
+        let solid = gridfinity::build(&gridfinity::Params::default());
+        let report = audit(&solid);
+        assert!(report.is_ok(), "default bin should audit clean:\n{report}");
+    }
+
+    #[test]
+    fn audit_catches_edge_curve_not_landing_on_vertex() {
+        // Two quads sharing an edge, but one edge's curve is deliberately
+        // offset so its endpoint doesn't sit on the vertex it claims — the
+        // kind of defect a mis-authored blend would introduce.
+        let mut b = Builder::new();
+        let v0 = b.vertex(Vec3::new(0.0, 0.0, 0.0));
+        let v1 = b.vertex(Vec3::new(10.0, 0.0, 0.0));
+        let v2 = b.vertex(Vec3::new(10.0, 10.0, 0.0));
+        let v3 = b.vertex(Vec3::new(0.0, 10.0, 0.0));
+        let v4 = b.vertex(Vec3::new(0.0, 0.0, 5.0));
+        let v5 = b.vertex(Vec3::new(10.0, 0.0, 5.0));
+        let (e01, _) = b.line(v0, v1);
+        let (e12, _) = b.line(v1, v2);
+        let (e23, _) = b.line(v2, v3);
+        let (e30, _) = b.line(v3, v0);
+        let (e04, _) = b.line(v0, v4);
+        let (e45, _) = b.line(v4, v5);
+        let (e51, _) = b.line(v5, v1);
+        let bottom = Loop::new(vec![(e01, true), (e12, true), (e23, true), (e30, true)]);
+        let front = Loop::new(vec![(e01, false), (e51, false), (e45, true), (e04, false)]);
+        b.face(Surface::plane_z(0.0), true, bottom, vec![]);
+        b.face(
+            Surface::Plane {
+                origin: Vec3::new(0.0, 0.0, 0.0),
+                normal: Vec3::new(0.0, -1.0, 0.0),
+                u_dir: Vec3::new(1.0, 0.0, 0.0),
+                v_dir: Vec3::new(0.0, 0.0, 1.0),
+            },
+            true,
+            front,
+            vec![],
+        );
+        let mut solid = b.build();
+        // Tamper: shift one edge's t1 so its curve no longer hits v1.
+        solid.edges[e01].t1 = 9.5;
+        let report = audit(&solid);
+        assert!(!report.is_ok(), "audit should catch the planted defect");
+        assert!(
+            report.defects.iter().any(|d| d.category == crate::Category::EdgeVertexGeometry),
+            "expected an EdgeVertexGeometry defect:\n{report}"
+        );
+    }
+
+    #[test]
+    fn tessellation_leaks_empty_on_default_bin() {
+        let solid = gridfinity::build(&gridfinity::Params::default());
+        let tess = tessellate(&solid, 6);
+        assert!(tessellation_leaks(&tess).is_empty(), "default bin should tessellate closed");
     }
 }

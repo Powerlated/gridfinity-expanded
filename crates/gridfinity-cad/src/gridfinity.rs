@@ -13,8 +13,9 @@
 //!   "bridge" underside is authored as planar faces stitched from the free
 //!   peg-top and outer-profile segments.
 //! - The **outer wall** follows the traced polyomino boundary, inset 0.25 mm
-//!   from the pitch lines with convex corners rounded `OUTER_R` (concave
-//!   corners sharp) — the spec profile.
+//!   from the pitch lines with both convex and concave corners rounded
+//!   `OUTER_R` — the spec profile. (The reference rounds reentrant corners the
+//!   same way, via `closeReentrantCorners(footprint, outerCornerRadius)`.)
 //! - The **cavity** is planned as axis-aligned rectangles exactly like the
 //!   reference (`cells − walled strips − divider strips − concave patches`),
 //!   resolved by the [`rectregion`](crate::kernel::rectregion) engine, with convex
@@ -521,11 +522,17 @@ struct SharedWithPegs {
 }
 
 /// Author the outer wall profile for one boundary loop: pitch lines inset by
-/// `inset(edge)`, convex corners rounded `OUTER_R` (only when both adjacent
-/// insets equal `HALF_TOL` **and** both adjacent edges agree on walled-ness —
-/// seam faces and mixed walled/open corners stay square, so open-face pinch
-/// points always land on straight pieces), straight runs split at the peg
-/// tangent points so peg-top edges weld with the wall's bottom ring.
+/// `inset(edge)`, corners rounded `OUTER_R` — convex ones welding with the
+/// corner cell's peg top, concave (reentrant) ones unshared (only when both
+/// adjacent insets equal `HALF_TOL` **and** both adjacent edges agree on
+/// walled-ness — seam faces and mixed walled/open corners stay square, so
+/// open-face pinch points always land on straight pieces), straight runs split
+/// at the peg tangent points so peg-top edges weld with the wall's bottom ring.
+///
+/// Rounding the reentrant corners is not cosmetic: a sharp one is a point the
+/// cavity's own concave rounding (radius `fr`) sweeps past once
+/// `fr > wall_thickness · (2 + √2)`, which leaves the rim strip between them a
+/// geometrically invalid face — its hole crossing its own outer boundary.
 fn author_outer_loop(
     steps: &[Step],
     inset: &dyn Fn(&GridEdge) -> f32,
@@ -578,9 +585,30 @@ fn author_outer_loop(
                 edge: None,
             });
             shared.corners.insert(s.to);
+        } else if cross < 0.0 && both_std && same_side {
+            // Concave (reentrant) spec corner: the OUTER_R fillet. Its centre
+            // sits in the void at OUTER_R from both inset lines, so the arc is
+            // tangent to each; `PEG_TANGENT = HALF_TOL + OUTER_R` leaves a
+            // HALF_TOL straight stub either side, keeping the corner inside
+            // its own span. Unshared — a reentrant corner never meets a peg
+            // top, so this lands in the stitched bridge underside.
+            let q = mm(s.to) + nrm * ins + n1 * ins_next;
+            let center = q - nrm * OUTER_R - n1 * OUTER_R;
+            let t1 = center + nrm * OUTER_R;
+            let t2 = center + n1 * OUTER_R;
+            let a0 = f32::atan2(t1.y - center.y, t1.x - center.x);
+            let a1 = f32::atan2(t2.y - center.y, t2.x - center.x);
+            let (a0, a1) = short_arc(a0, a1);
+            pieces.push(OuterPiece { seg: Seg::Line { a: start, b: t1 }, shared: false, edge: None });
+            pieces.push(OuterPiece {
+                seg: Seg::Arc { a: t1, b: t2, center, radius: OUTER_R, a0, a1 },
+                shared: false,
+                edge: None,
+            });
+            pieces.push(OuterPiece { seg: Seg::Line { a: t2, b: end }, shared: false, edge: None });
         } else {
-            // Concave corner, non-spec inset, or a mixed walled/open corner:
-            // sharp — two lines meeting at the inset-line intersection.
+            // Non-spec inset or a mixed walled/open corner: sharp — two lines
+            // meeting at the inset-line intersection.
             let q = mm(s.to) + nrm * ins + n1 * ins_next;
             pieces.push(OuterPiece { seg: Seg::Line { a: start, b: q }, shared: false, edge: None });
             pieces.push(OuterPiece { seg: Seg::Line { a: q, b: end }, shared: false, edge: None });
@@ -996,7 +1024,7 @@ struct Banded {
 
 /// CCW footprint quad of an inner-wall segment (`None` when degenerate).
 /// Widths clamp to ≥ 0.4 mm like the reference.
-fn inner_wall_quad(w: &InnerWall) -> Option<Vec<Seg>> {
+fn inner_wall_quad(w: &InnerWall, r: f32) -> Option<Vec<Seg>> {
     let a = Vec2::new(w.x1, w.y1);
     let b = Vec2::new(w.x2, w.y2);
     let d = b - a;
@@ -1008,13 +1036,116 @@ fn inner_wall_quad(w: &InnerWall) -> Option<Vec<Seg>> {
     let n = Vec2::new(-u.y, u.x);
     let hw = w.width.max(0.4) / 2.0;
     let (p0, p1, p2, p3) = (a - n * hw, b - n * hw, b + n * hw, a + n * hw);
-    let segs = vec![
+    let sharp = vec![
         Seg::Line { a: p0, b: p1 },
         Seg::Line { a: p1, b: p2 },
         Seg::Line { a: p2, b: p3 },
         Seg::Line { a: p3, b: p0 },
     ];
-    Some(if loop_area(&segs) < 0.0 { reverse_loop(&segs) } else { segs })
+    let mut corners = vec![p0, p1, p2, p3];
+    let sharp = if loop_area(&sharp) < 0.0 {
+        corners.reverse();
+        reverse_loop(&sharp)
+    } else {
+        sharp
+    };
+    // Sharp corners on the quad propagate through the region boolean into the
+    // cavity loop, and a sharp corner anywhere on a loop forces that loop's
+    // floor blend off entirely (the chain has no tangent to continue through).
+    // Round them so the blend survives: the ball rolls *outside* a wall's
+    // convex corner, so the torus there is (corner radius + fillet) major by
+    // fillet minor — any positive radius is valid, unlike a concave corner
+    // where the radius must exceed the fillet.
+    // Clamped to the half-width, not just under it: at `r == hw` the two
+    // corners of a short end meet and the wall becomes a stadium. Stopping
+    // short would leave a sliver of straight line between them, and a blend
+    // rolling over a sub-tenth-of-a-millimetre edge is what breaks the chain.
+    let r = r.min(hw).min(len / 2.0);
+    if r < 0.02 {
+        return Some(sharp);
+    }
+    let n_c = corners.len();
+    // Tangent points either side of each (90°, CCW) corner.
+    let tangents: Vec<(Vec2, Vec2, Vec2)> = (0..n_c)
+        .map(|i| {
+            let v = corners[i];
+            let din = (v - corners[(i + n_c - 1) % n_c]).normalize();
+            let dout = (corners[(i + 1) % n_c] - v).normalize();
+            let t_in = v - din * r;
+            (t_in, v + dout * r, t_in + Vec2::new(-din.y, din.x) * r)
+        })
+        .collect();
+    let mut out = Vec::with_capacity(n_c * 2);
+    for i in 0..n_c {
+        let (t_in, t_out, center) = tangents[i];
+        let a0 = f32::atan2(t_in.y - center.y, t_in.x - center.x);
+        let a1 = f32::atan2(t_out.y - center.y, t_out.x - center.x);
+        let (a0, a1) = short_arc(a0, a1);
+        out.push(Seg::Arc { a: t_in, b: t_out, center, radius: r, a0, a1 });
+        let next_in = tangents[(i + 1) % n_c].0;
+        if (next_in - t_out).length() > 1e-4 {
+            out.push(Seg::Line { a: t_out, b: next_in });
+        }
+    }
+    Some(out)
+}
+
+/// [`inner_wall_quad`] rounded by `r` when the wall's blend footprint floats
+/// clear inside `outer`; sharp otherwise.
+///
+/// The notch case is the reason this exists. A wall that crosses `outer`'s
+/// boundary gets booleaned against the cavity loop, which cuts the loop at the
+/// intersection points computed from the wall's *edges*. If those edges are
+/// arcs (rounded corners) the cut points land on the arc, a float-epsilon away
+/// from where the cavity's own split routines would place them — and that
+/// epsilon is enough to break the tessellation's edge-pairing at the notch
+/// mouth (the two faces sharing that edge emit vertices at slightly different
+/// parameters). Keeping the wall sharp when it touches the boundary makes the
+/// cut points line up exactly. A free-floating wall never cuts the loop (it
+/// becomes an island), so rounding *there* would be safe for the boolean and is
+/// what would let the floor blend's tangent chain continue around the island's
+/// corners.
+///
+/// Floating free is necessary but not sufficient. Removing the island's sharp
+/// corners is what *enables* its floor blend, and the blend then consumes `r` of
+/// floor in every direction outward from the island. A wall tip that stops less
+/// than `r` short of `outer` — e.g. the full-height fixture's wall, which ends
+/// 2.5 mm from the cavity wall with `r = 2.8` — puts the island's blend
+/// footprint past `outer`'s own boundary, and the floor face then has a hole
+/// loop crossing its outer loop (`audit` reports `LoopContainment`). So the test
+/// is on the footprint, not the wall: grow the quad on all four sides and
+/// require *that* to sit inside `outer`. `region_difference` decides it exactly,
+/// in closed form, with no distance query needed.
+///
+/// The growth is `2r`, not `r`. `outer`'s own floor-wall edge is concave too, so
+/// its blend eats `r` of floor inward all the way round — the island's `r` of
+/// sweep has to clear a boundary that has already retreated by `r`. Testing
+/// against `outer` grown inward by `r` is the same thing as testing the island
+/// grown by `2r` against `outer`, and only one of those needs an offset.
+fn inner_wall_quad_in(w: &InnerWall, r: f32, outer: &[Seg]) -> Option<Vec<Seg>> {
+    let sharp = inner_wall_quad(w, 0.0)?;
+    if r < 0.02 {
+        return Some(sharp);
+    }
+    let (a, b) = (Vec2::new(w.x1, w.y1), Vec2::new(w.x2, w.y2));
+    let d = b - a;
+    let len = d.length();
+    if len < 0.1 {
+        return Some(sharp);
+    }
+    let u = d / len;
+    let g = 2.0 * r;
+    let grown = InnerWall {
+        x1: a.x - u.x * g,
+        y1: a.y - u.y * g,
+        x2: b.x + u.x * g,
+        y2: b.y + u.y * g,
+        width: w.width.max(0.4) + 2.0 * g,
+        height: w.height,
+    };
+    let Some(footprint) = inner_wall_quad(&grown, g) else { return Some(sharp) };
+    let clears = region_difference(&[footprint], &[outer.to_vec()]).is_empty();
+    if clears { inner_wall_quad(w, r) } else { Some(sharp) }
 }
 
 // ── Peg authoring ────────────────────────────────────────────────────────────
@@ -1302,7 +1433,7 @@ fn plan_piece(
             .inner_walls
             .iter()
             .filter(|w| w.height.is_none_or(|h| h >= cavity_depth))
-            .filter_map(inner_wall_quad)
+            .filter_map(|w| inner_wall_quad_in(w, fr, &cl.segs))
             .collect();
         let mut entries: Vec<(CavityLoop, Vec<Island>, Option<Banded>)> = Vec::new();
         if cl.touched() || full_walls.is_empty() {
@@ -1348,7 +1479,11 @@ fn plan_piece(
         // contact runs build only above the wall top, and the wall is capped
         // at its own height. Restrictions: partial walls must not touch
         // islands or each other, and sloped bins skip boundary-contact ones.
-        let partial_walls: Vec<(Vec<Seg>, f32)> = p
+        // Footprints build sharp here; the island branch rounds its copy so
+        // the floor blend chain survives around a free-floating wall, while
+        // the notch path keeps the sharp form so its cut points weld cleanly
+        // (see `inner_wall_quad_in`).
+        let partial_walls: Vec<(&InnerWall, Vec<Seg>, f32)> = p
             .inner_walls
             .iter()
             .filter_map(|w| {
@@ -1356,10 +1491,10 @@ fn plan_piece(
                 if h >= cavity_depth {
                     return None;
                 }
-                Some((inner_wall_quad(w)?, floor_z + h.max(0.5)))
+                Some((w, inner_wall_quad(w, 0.0)?, floor_z + h.max(0.5)))
             })
             .collect();
-        'walls: for (q, t) in &partial_walls {
+        'walls: for &(w, ref q, t) in &partial_walls {
             for (ecl, eisl, band) in &mut entries {
                 if ecl.touched() {
                     continue;
@@ -1375,8 +1510,11 @@ fn plan_piece(
                 if !clear {
                     continue 'walls; // touches an island: unsupported
                 }
-                if n_in == 4 {
-                    eisl.push(Island { segs: q.clone(), top: Some(*t) });
+                if n_in == corners.len() {
+                    // Free-floating: round the corners so the floor blend's
+                    // tangent chain can continue around the tower.
+                    let rounded = inner_wall_quad(w, fr).expect("non-degenerate (filtered above)");
+                    eisl.push(Island { segs: rounded, top: Some(t) });
                     continue 'walls;
                 }
                 if slope.is_some() {
@@ -1413,7 +1551,7 @@ fn plan_piece(
                 bd.notches.push(Notch {
                     quad: q.clone(),
                     contact: sa.a_inside.into_iter().map(|(s, _)| s).collect(),
-                    top: *t,
+                    top: t,
                 });
                 continue 'walls;
             }
@@ -1447,6 +1585,15 @@ fn plan_piece(
             // Banded loops always carry sharp notch corners in outline_a.
             if cl.touched() || banded.is_some() {
                 loop_fr = 0.0;
+            }
+            if std::env::var("DIAG_LOOP").is_ok() {
+                eprintln!("loop_fr={loop_fr} segs={} islands={}", cl.segs.len(), islands.len());
+                let n = cl.segs.len();
+                for i in 0..n {
+                    let o = seg_tangent(&cl.segs[i], true);
+                    let v = seg_tangent(&cl.segs[(i + 1) % n], false);
+                    eprintln!("   {i:2} {:?} -> dot {:.5}", cl.segs[i], o.dot(v));
+                }
             }
             planned.push((cl, islands, loop_fr, banded));
         }
@@ -1964,11 +2111,31 @@ fn shape_cavity_loop(lp: &TracedLoop, rc: f32, rf: f32) -> Vec<Seg> {
     if loop_area(&segs) < 0.0 { reverse_loop(&segs) } else { segs }
 }
 
+/// Unit tangent where a segment leaves (`end`) or is entered (`start`).
+fn seg_tangent(s: &Seg, end: bool) -> Vec2 {
+    match *s {
+        Seg::Line { a, b } => (b - a).normalize(),
+        Seg::Arc { a0, a1, .. } => {
+            let t = if end { a1 } else { a0 };
+            let dir = if a1 >= a0 { 1.0 } else { -1.0 };
+            Vec2::new(-t.sin(), t.cos()) * dir
+        }
+    }
+}
+
+/// Whether any junction in the loop breaks tangent continuity.
+///
+/// A blend chain has nothing to continue through at such a corner, so its loop
+/// must build sharp. This is a real tangent test rather than a Line/Line scan:
+/// a rounded inner-wall quad meets the cavity boundary at an Arc/Line junction
+/// that is every bit as sharp, and missing those let the fillet engage on a
+/// loop that could not carry it.
 fn has_sharp_corner(shape: &[Seg]) -> bool {
-    // Consecutive Line/Line pairs are sharp corners.
     let n = shape.len();
     (0..n).any(|i| {
-        matches!(shape[i], Seg::Line { .. }) && matches!(shape[(i + 1) % n], Seg::Line { .. })
+        let out = seg_tangent(&shape[i], true);
+        let inn = seg_tangent(&shape[(i + 1) % n], false);
+        out.dot(inn) < 0.9995
     })
 }
 
@@ -2006,10 +2173,14 @@ fn plan_cavity_flat(
     }
     let mut tops = Vec::new();
     for isl in islands {
+        // Every island has a floor-wall edge at `floor_z`, regardless of how
+        // high its tower rises — partial-height ones still meet the floor and
+        // need the blend there just as much. (The top check below gates only
+        // rim assembly: a tower below the rim does not contribute a hole.)
+        if filleting {
+            blends.extend(isl.segs.iter().map(|s| (*s, floor_z, loop_fr)));
+        }
         if isl.top.is_none() {
-            if filleting {
-                blends.extend(isl.segs.iter().map(|s| (*s, floor_z, loop_fr)));
-            }
             // The stack emits an island as a CW hole of the void, so the rim
             // wants a profile wound that way.
             tops.push(reverse_loop(&isl.segs));
@@ -2180,6 +2351,11 @@ fn build_baseplate(p: &Params) -> Solid {
         &[],
     );
     let inset = |_: usize, _: Vec2, _: Vec2| 0.0f32;
+    // Convex only, unlike the bin's outer profile. The bin rounds its reentrant
+    // corners because a sharp one collides with the cavity's `fr` rounding; the
+    // baseplate has no cavity and no floor blend, so nothing sweeps past a sharp
+    // corner here and there is no correctness driver to match. The reference has
+    // no baseplate at all, so it offers no guidance either.
     let radius = |_: usize, convex: bool| if convex { OUTER_R } else { 0.0 };
     let mut outer_top: Vec<Loop> = Vec::new();
     let mut outer_bot: Vec<Loop> = Vec::new();
@@ -2225,3 +2401,4 @@ fn build_baseplate(p: &Params) -> Solid {
     }
     b.build()
 }
+

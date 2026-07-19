@@ -91,7 +91,12 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   `Builder` interns vertices and edges (edge key = sorted endpoints **+ welded midpoint**, so a
   circle's two semicircle arcs don't collapse into one edge). `Solid::validate()` enforces the
   manifold invariant: **every edge used exactly twice, once in each direction** — assert it in
-  tests after any construction change.
+  tests after any construction change. `Solid::validate()` is the cheap topology check;
+  [`audit`](gridfinity_cad::audit) is the heavy *geometric* soundness checker that also confirms
+  each edge's curve lands on its vertices and lies on every face surface that references it.
+  When a mesh leaks but `validate` passes, run `audit` first — it pins the failure to a
+  specific edge/face if the B-rep is at fault, and rules the B-rep out otherwise (pointing at
+  the tessellator).
 - **`sketch.rs`** — 2D profiles as closed loops of `Line`/`Arc` segments (`rectangle`,
   `rounded_rect`, `circle`). Corner radii are real arcs. Outer loops CCW.
 - **`build.rs`** — features. Three primitives write into a shared `Builder`: `ring` (profile at a
@@ -176,8 +181,13 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   optional floor slope); `Params::rect(gx,gy)` is the rectangular convenience. **Each bin is built
   in one `Builder`** so interface edges are shared automatically — there is *no general boolean*.
   Model structure: a boundary walk traces each bin's cells into loops; the outer profile is the
-  pitch lines inset `HALF_TOL=0.25` with `OUTER_R=3.75` convex corners, split at
-  `PEG_TANGENT=4.0` from corners so peg-top edges weld with the wall's bottom ring. The base is
+  pitch lines inset `HALF_TOL=0.25` with `OUTER_R=3.75` corners — convex ones welding with the
+  corner cell's peg top, concave (reentrant) ones unshared — split at `PEG_TANGENT=4.0`
+  (`= HALF_TOL + OUTER_R`, which is exactly what leaves a straight stub either side of a reentrant
+  fillet) so peg-top edges weld with the wall's bottom ring. Reentrant corners **must** be rounded:
+  the cavity rounds its own concave corners by the fillet radius `fr`, and a sharp outer one pokes
+  out through that arc once `fr > wall_thickness · (2 + √2)`, leaving the rim strip between them a
+  face whose hole crosses its own outer boundary. The base is
   **one chamfered connector peg per cell** (three lofted profiles, 0 → `PEG_HEIGHT=4.75`;
   `PEG_R_MID=1.6` so all three corner arcs share an axis and the chamfers are coaxial cones). Peg
   ring segments that don't weld to the wall, plus non-shared outer pieces, are stitched

@@ -320,22 +320,23 @@ mod tests {
         assert_eq!(unclosed_edges(&soup), 0, "soup has unpaired edges");
     }
 
-    /// Cases the app's printability gate flags, all of them **pre-existing
-    /// kernel limitations** rather than boundary problems.
+    /// A large floor fillet on a shape with a reentrant outer corner must still
+    /// tessellate closed.
     ///
-    /// Each builds a valid B-rep — `Solid::validate()` passes, every edge used
-    /// exactly twice — but tessellates with unpaired mesh edges on the rim
-    /// plane, at the inner corners of a shape with an enclosed hole.
+    /// This used to leak. The cavity rounds its concave corners by the fillet
+    /// radius `fr` (so the floor blend chain stays tangent-continuous), and the
+    /// outer profile used to leave its reentrant corners sharp. The rim strip
+    /// between the two is then a face whose hole crosses its own outer
+    /// boundary as soon as
     ///
-    /// The trigger is fillet radius alone, independent of the cavity corner
-    /// radius: on a 3x3 ring it is clean through `fr = 4.0` and leaks from
-    /// `fr = 4.5` up, with `rc` anywhere from 5 to 8. The gaps break at
-    /// exactly `HALF_TOL + OUTER_R = 4.0`-ish from each corner, which is where
-    /// adjacent floor blends start to overlap around a short corner run.
-    /// Fixing it means teaching `fillet.rs` to merge overlapping blends at a
-    /// corner — real work in the most delicate part of the kernel, and
-    /// explicitly not something to paper over downstream.
-    #[ignore = "pre-existing fillet.rs limitation: blends overlap at corners when fr > ~4.25"]
+    ///     fr > wall_thickness · (2 + √2)      (= 4.097 mm at wt = 1.2)
+    ///
+    /// — the sharp corner pokes out through the cavity's corner arc, earcut
+    /// cannot bridge it and paves over the hole instead. The B-rep was valid
+    /// throughout; only the tessellation showed it. Rounding the outer
+    /// reentrant corners by `OUTER_R`, which is what the reference does
+    /// (`closeReentrantCorners(footprint, outerCornerRadius)`), restores
+    /// containment across the whole slider range up to `fr = 5.6`.
     #[test]
     fn ring_and_large_fillet_cases_stay_closed() {
         const RING: &str = r#""cells":[{"x":0,"y":0},{"x":1,"y":0},{"x":2,"y":0},
@@ -344,7 +345,6 @@ mod tests {
             {"x":0,"y":1},{"x":2,"y":1},{"x":0,"y":2},{"x":2,"y":2}]"#;
         let cases: &[(&str, f32, f32, &str, &str)] = &[
             ("ring baseline", 21.0, 2.8, RING, "[]"),
-            ("ring + hole opening", 21.0, 2.8, RING, r#"[{"x":1,"y":1,"orientation":"v"}]"#),
             ("ring + fillet 5", 21.0, 5.0, RING, "[]"),
             ("U + slider-max fillet", 14.0, 5.6, U, "[]"),
         ];
@@ -370,6 +370,37 @@ mod tests {
             }
         }
         assert!(leaks.is_empty(), "unclosed output:\n  {}", leaks.join("\n  "));
+    }
+
+    /// An opening on the boundary of an enclosed hole merges the hole's void
+    /// with the cavity's, and the rim assembly does not notice.
+    ///
+    /// The rim face at `z = total_h` comes out with the **whole** bin-hole
+    /// square still listed as an inner loop alongside the cavity's outer loop,
+    /// even though the cavity outer already encloses it — the hole is
+    /// subtracted twice, so earcut bridges across the face and emits chords
+    /// spanning the entire bin. The unpaired run is the hole's own side.
+    ///
+    /// Distinct from [`ring_and_large_fillet_cases_stay_closed`]: this one is
+    /// insensitive to the fillet radius and reproduces at the 2.8 mm default.
+    /// It sits in the open/seam rim assembly, not the corner geometry.
+    #[ignore = "open/seam rim assembly double-subtracts a hole an opening merged into the cavity"]
+    #[test]
+    fn opening_on_a_hole_boundary_stays_closed() {
+        const RING: &str = r#""cells":[{"x":0,"y":0},{"x":1,"y":0},{"x":2,"y":0},
+            {"x":0,"y":1},{"x":2,"y":1},{"x":0,"y":2},{"x":1,"y":2},{"x":2,"y":2}]"#;
+        let json = format!(
+            r#"[{{"binId":"b","height":21,"perimeterThickness":1.2,
+               "filletRadius":2.8,"fasteners":{{"magnets":false,"m3":false}},
+               {RING},"openings":[{{"x":1,"y":1,"orientation":"v"}}],"walls":[],
+               "pieces":[[{{"x":0,"y":0}}]]}}]"#
+        );
+        let mut bin = parse(&json).pop().unwrap();
+        bin.pieces = vec![bin.cells.clone()];
+        let solid =
+            gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None).unwrap();
+        solid.validate().expect("B-rep stays manifold even while the mesh leaks");
+        assert_eq!(unclosed_edges(&triangle_soup(&solid)), 0, "rim leaks at the opening");
     }
 
     /// Every piece the kernel hands back must be a closed 2-manifold, since

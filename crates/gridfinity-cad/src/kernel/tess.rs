@@ -20,9 +20,15 @@ pub struct Tri {
 }
 
 /// The tessellated result: a triangle soup carrying smooth analytic normals.
+///
+/// `face_of_tri` parallels `tris` — the source face index for each triangle —
+/// so a leak found in the welded mesh can be attributed back to the B-rep
+/// face(s) that emitted it. Populated by [`tessellate`]; left empty by
+/// anything that builds a `Tessellation` by hand.
 #[derive(Clone, Default)]
 pub struct Tessellation {
     pub tris: Vec<Tri>,
+    pub face_of_tri: Vec<usize>,
 }
 
 impl Tessellation {
@@ -71,7 +77,7 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
     }
 
     let mut out = Tessellation::default();
-    for face in &solid.faces {
+    for (fi, face) in solid.faces.iter().enumerate() {
         let sign = if face.sense { 1.0 } else { -1.0 };
 
         // Structured-grid path for non-planar 4-sided faces (blend patches,
@@ -79,6 +85,7 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
         // or constant-v boundary runs. Boundary grid points reuse the cached
         // edge samples, so watertightness with neighbouring faces is preserved.
         if let Some(grid) = tess_grid_face(face, &edge_pts, sign) {
+            out.face_of_tri.extend(std::iter::repeat(fi).take(grid.len()));
             out.tris.extend(grid);
             continue;
         }
@@ -171,6 +178,7 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
             } else {
                 ([pts3[a], pts3[b], pts3[c]], [nrm[a], nrm[b], nrm[c]])
             };
+            out.face_of_tri.push(fi);
             out.tris.push(Tri { pos: p, nrm: nm });
         }
     }
