@@ -39,7 +39,7 @@ use crate::kernel::program::{
 };
 use crate::kernel::slab::{Op as SlabOp, Slab, SlabOpts, plan_bands};
 use crate::kernel::sketch::{Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop};
-use crate::kernel::topo::{Builder, EdgeId, Loop, Solid, VertexId};
+use crate::kernel::topo::{Builder, Loop, Solid, VertexId};
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
 
@@ -1125,14 +1125,6 @@ fn plan_cavity(cells: &[GridCell], walls: &EffectiveWalls, wall_thickness: f32) 
 
 // ── Piece build ──────────────────────────────────────────────────────────────
 
-/// Directed reference to an authored ring segment, for stitching bridge faces.
-#[derive(Clone, Copy)]
-struct DirEdge {
-    start: VertexId,
-    end: VertexId,
-    entry: (EdgeId, bool),
-}
-
 /// Build one bin/piece into `b`; returns the floor-wall edges to blend.
 /// `cells` is the piece's cell set; `bin_cells` the whole logical bin's (for
 /// seam classification and the shared sloped-floor plane).
@@ -1602,44 +1594,49 @@ fn plan_piece(
     }
 
     // -- 5) Bridge underside ----------------------------------------------
+    // The free peg-top segs plus the non-shared outer-ring segs (reversed)
+    // chain into closed loops; interior loops become holes of their innermost
+    // containing outer. Each (outer, holes) pair becomes one PlanarFace at
+    // PEG_HEIGHT facing down. Used to be one Custom because stitch_loops
+    // worked on builder VertexIds; the seg-space stitcher (stitch_loops_2d)
+    // makes it plannable.
     {
         let (tops, rings, shared_c) = (peg_tops.clone(), outer_rings.clone(), shared.clone());
-        prog.push(
-            format!("{tag}: bridge underside"),
-            POp::Custom(Box::new(move |b| {
-                let mut free: Vec<DirEdge> = Vec::new();
-                for (c, s_top) in &tops {
-                    let r3 = ring(b, s_top, PEG_HEIGHT);
-                    for (k, &(e, d)) in r3.edges.iter().enumerate() {
-                        if peg_seg_free(&s_top[k], *c, &shared_c) {
-                            let k1 = (k + 1) % r3.verts.len();
-                            free.push(DirEdge {
-                                start: r3.verts[k],
-                                end: r3.verts[k1],
-                                entry: (e, d),
-                            });
-                        }
-                    }
+        let mut free: Vec<Seg> = Vec::new();
+        for (c, s_top) in &tops {
+            for (k, seg) in s_top.iter().enumerate() {
+                if peg_seg_free(&s_top[k], *c, &shared_c) {
+                    free.push(*seg);
                 }
-                for (segs, shared_flags) in &rings {
-                    let lo = ring(b, segs, PEG_HEIGHT);
-                    for (k, &(e, d)) in lo.edges.iter().enumerate() {
-                        if !shared_flags[k] {
-                            let k1 = (k + 1) % lo.verts.len();
-                            free.push(DirEdge {
-                                start: lo.verts[k1],
-                                end: lo.verts[k],
-                                entry: (e, !d),
-                            });
-                        }
-                    }
+            }
+        }
+        for (segs, shared_flags) in &rings {
+            for (k, seg) in segs.iter().enumerate() {
+                if !shared_flags[k] {
+                    // Reversed: the outer-ring's free run is the return path
+                    // of the chain (mirrors the original DirEdge direction
+                    // swap on outer pieces).
+                    free.push(seg.reversed());
                 }
-                for (outer, holes) in stitch_loops(&free, b) {
-                    planar(b, PEG_HEIGHT, false, outer, holes);
-                }
-                Ok(())
-            })),
-        );
+            }
+        }
+        let stitched = stitch_loops_2d(free);
+        for (i, (outer, holes)) in stitched.into_iter().enumerate() {
+            let label = if i == 0 {
+                format!("{tag}: bridge underside")
+            } else {
+                format!("{tag}: bridge underside {i}")
+            };
+            let hole_loops: Vec<POpDirLoop> = holes.into_iter().map(|h| (h, true)).collect();
+            prog.push(
+                label,
+                POp::PlanarFace {
+                    plane: PPlaneRef::Z { z: PEG_HEIGHT, up: false },
+                    outer: (outer, true),
+                    holes: hole_loops,
+                },
+            );
+        }
     }
 
     // -- 6) Cavities ------------------------------------------------------
@@ -2043,95 +2040,52 @@ fn point_in_rect_loop(pt: Vec2, lp: &TracedLoop) -> bool {
 
 // ── Bridge stitching ─────────────────────────────────────────────────────────
 
-/// Stitch directed edges into closed loops by chaining end → start vertices,
-/// then group hole loops under the outer loop containing them. Returns
-/// `(outer, holes)` pairs ready for planar faces.
-fn stitch_loops(free: &[DirEdge], b: &Builder) -> Vec<(Loop, Vec<Loop>)> {
-    let mut by_start: HashMap<VertexId, Vec<usize>> = HashMap::new();
-    for (i, de) in free.iter().enumerate() {
-        by_start.entry(de.start).or_default().push(i);
+/// Pure 2D seg-space stitcher: chain directed segs into closed loops, then
+/// group interior loops as holes of their innermost containing outer. The
+/// bridge-underside face plan runs entirely in seg-space, producing
+/// `(outer, holes)` pairs ready for `Op::PlanarFace`.
+/// `(outer, holes)` pairs ready for `Op::PlanarFace`.
+///
+/// Direction matters: peg-top free segs come in as-authored (CCW around the
+/// peg top); outer-ring free segs come in reversed (so the chain zips them
+/// together as the return path). The chained loops inherit those directions.
+fn stitch_loops_2d(free: Vec<Seg>) -> Vec<(Vec<Seg>, Vec<Vec<Seg>>)> {
+    let chained = chain_loops(free.into_iter().map(|s| (s, ())).collect());
+    let loops: Vec<Vec<Seg>> =
+        chained.into_iter().map(|lp| lp.into_iter().map(|(s, _)| s).collect()).collect();
+    if loops.is_empty() {
+        return Vec::new();
     }
-    let mut used = vec![false; free.len()];
-    let mut loops: Vec<Vec<usize>> = Vec::new();
-    for i in 0..free.len() {
-        if used[i] {
-            continue;
-        }
-        let mut seq = vec![i];
-        used[i] = true;
-        let mut cur = free[i].end;
-        while cur != free[i].start {
-            let Some(cands) = by_start.get(&cur) else { break };
-            let Some(&j) = cands.iter().find(|&&j| !used[j]) else { break };
-            used[j] = true;
-            seq.push(j);
-            cur = free[j].end;
-        }
-        if cur == free[i].start && seq.len() >= 2 {
-            loops.push(seq);
-        }
-    }
-    // Group loops geometrically: a loop strictly contained in another (an
-    // interior peg's top ring inside the surrounding bridge region, or the
-    // inner perimeter of a ring-shaped bin) is a hole of its innermost
-    // container, not a face of its own — emitting it standalone would cap the
-    // peg with a disk that overlaps the real bridge face.
-    let polys: Vec<Vec<(f32, f32)>> = loops
-        .iter()
-        .map(|seq| {
-            seq.iter()
-                .map(|&j| {
-                    let p = b.point(free[j].start);
-                    (p.x, p.y)
-                })
-                .collect()
-        })
-        .collect();
-    let inside = |pt: (f32, f32), poly: &[(f32, f32)]| -> bool {
-        let mut c = false;
-        let n = poly.len();
-        for i in 0..n {
-            let (x0, y0) = poly[i];
-            let (x1, y1) = poly[(i + 1) % n];
-            if (y0 > pt.1) != (y1 > pt.1)
-                && pt.0 < (x1 - x0) * (pt.1 - y0) / (y1 - y0) + x0
-            {
-                c = !c;
-            }
-        }
-        c
-    };
-    // Containers of each loop, and nesting depth = number of containers.
-    let containers: Vec<Vec<usize>> = (0..loops.len())
+    let n = loops.len();
+    // Containers of each loop = loops whose boundary contains loops[i][0].
+    let containers: Vec<Vec<usize>> = (0..n)
         .map(|i| {
-            (0..loops.len())
-                .filter(|&j| j != i && inside(polys[i][0], &polys[j]))
+            (0..n)
+                .filter(|&j| j != i && point_in_segs(loops[i][0].start(), &loops[j]))
                 .collect()
         })
         .collect();
-    let mk_loop = |seq: &[usize]| {
-        Loop::new(seq.iter().map(|&j| free[j].entry).collect::<Vec<_>>())
-    };
-    let mut out: Vec<(usize, Loop, Vec<Loop>)> = Vec::new();
-    for (i, seq) in loops.iter().enumerate() {
+    // Even nesting depth = outer; odd = hole of innermost containing outer.
+    let mut out: Vec<(Vec<Seg>, Vec<Vec<Seg>>)> = Vec::new();
+    let mut out_idx: HashMap<usize, usize> = HashMap::new();
+    for (i, lp) in loops.iter().enumerate() {
         if containers[i].len() % 2 == 0 {
-            out.push((i, mk_loop(seq), Vec::new()));
+            out_idx.insert(i, out.len());
+            out.push((lp.clone(), Vec::new()));
         }
     }
-    for (i, seq) in loops.iter().enumerate() {
+    for (i, lp) in loops.iter().enumerate() {
         if containers[i].len() % 2 == 1 {
-            // Innermost containing outer = the container with the most
-            // containers itself.
             let owner = *containers[i]
                 .iter()
                 .filter(|&&j| containers[j].len() % 2 == 0)
                 .max_by_key(|&&j| containers[j].len())
                 .expect("hole loop without containing outer");
-            let slot = out.iter_mut().find(|(o, _, _)| *o == owner).unwrap();
-            slot.2.push(mk_loop(seq));
+            let slot = out_idx[&owner];
+            out[slot].1.push(lp.clone());
         }
     }
-    out.into_iter().map(|(_, o, h)| (o, h)).collect()
+    out
 }
 
 // ── Baseplate ────────────────────────────────────────────────────────────────
