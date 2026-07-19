@@ -17,26 +17,26 @@
 //!   corners sharp) — the spec profile.
 //! - The **cavity** is planned as axis-aligned rectangles exactly like the
 //!   reference (`cells − walled strips − divider strips − concave patches`),
-//!   resolved by the [`rectregion`](crate::rectregion) engine, with convex
+//!   resolved by the [`rectregion`](crate::kernel::rectregion) engine, with convex
 //!   corners rounded by `cavity_corner_radius` and concave corners rounded by
 //!   the fillet radius so the floor-wall blend chain stays tangent-continuous.
 //! - The **floor fillet** is a true rolling-ball blend
-//!   ([`fillet::blend_edges`](crate::fillet::blend_edges)) over each cavity
+//!   ([`fillet::blend_edges`](crate::kernel::fillet::blend_edges)) over each cavity
 //!   loop's floor-wall edges.
 
-use crate::build::{RingEdges, loop_of, ring, wall_between};
-use crate::fillet::blend_edges;
-use crate::geom::Surface;
+use crate::kernel::build::{RingEdges, loop_of, ring, wall_between};
+use crate::kernel::fillet::blend_edges;
+use crate::kernel::geom::Surface;
 use crate::layout::{
     EdgeClass, EffectiveWalls, GridCell, GridEdge, Orientation, SplitLine, cell_edges,
     classify_edge, effective_walls, partition_cells,
 };
-use crate::math::{Vec2, Vec3, vec3_of};
-use crate::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
-use crate::build::{seg_edge, wall_seg};
-use crate::segdiff::{chain_loops, split_region_by_quad, subtract_convex_quad};
-use crate::sketch::{Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop};
-use crate::topo::{Builder, EdgeId, Loop, Solid, VertexId};
+use crate::kernel::math::{Vec2, Vec3, vec3_of};
+use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
+use crate::kernel::build::{seg_edge, wall_seg};
+use crate::kernel::segdiff::{chain_loops, split_region_by_quad, subtract_convex_quad};
+use crate::kernel::sketch::{Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop};
+use crate::kernel::topo::{Builder, EdgeId, Loop, Solid, VertexId};
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
 
@@ -891,9 +891,6 @@ struct Island {
 /// One boundary-contact partial-height inner wall's pieces on a cavity loop.
 #[derive(Clone, Debug)]
 struct Notch {
-    /// Quad boundary pieces inside the region, quad-CCW direction. These are
-    /// the wall's own side faces (span floor → top).
-    sides: Vec<Seg>,
     /// Region boundary pieces inside the quad — the taller face is absent
     /// below the wall top there (span top → total_h).
     contact: Vec<Seg>,
@@ -1388,7 +1385,6 @@ fn build_piece(
                     .map(|(s, _)| s)
                     .collect();
                 bd.notches.push(Notch {
-                    sides: sa.quad_inside.into_iter().map(|(s, _)| s).collect(),
                     contact: sa.inside.into_iter().map(|(s, _)| s).collect(),
                     caps,
                     top: *t,
@@ -1510,7 +1506,9 @@ fn build_piece(
     for (cl, island_shapes, loop_fr, banded) in planned {
         if !cl.touched() {
             if let Some(bd) = banded {
-                island_tops.extend(build_cavity_banded(b, &bd, &island_shapes, floor_z, total_h));
+                let (bw, tops) = build_cavity_banded(b, &bd, &island_shapes, floor_z, total_h);
+                island_tops.extend(tops);
+                blends.extend(bw);
                 // Rim hole from the re-split outline so its edges pair with
                 // the contact walls' top edges.
                 let top_ring = ring(b, &bd.outline_b, total_h);
@@ -1785,70 +1783,21 @@ fn build_cavity_banded(
     islands: &[Island],
     floor_z: f32,
     total_h: f32,
-) -> Vec<(Vec<Seg>, RingEdges)> {
+) -> (Vec<(EdgeId, f32)>, Vec<(Vec<Seg>, RingEdges)>) {
     let key = |p: Vec2| ((p.x * 1024.0).round() as i64, (p.y * 1024.0).round() as i64);
 
-    // Ramp planning: a straight contact whose two endpoints each meet a
-    // straight notch side gets a rolling quarter-cylinder into the taller
-    // face (radius = min(TRANSITION_R, headroom)); the ramp's side cuts by
-    // the (generally skewed) wall side planes are exact ellipse arcs.
-    // `corner_ramps`: contact endpoint → (toe point, wall top, radius).
+    // The wall top runs out into the taller face with a rolling-ball blend of
+    // radius min(TRANSITION_R, headroom). It is NOT built here: the prism is
+    // built sharp and the cap↔contact edges are handed to `blend_edges`,
+    // which trims the blend against the wall's side planes itself (the exact
+    // cylinder/plane runout ellipse).
     const TRANSITION_R: f32 = 4.0;
-    // (notch idx, contact idx, r, toe_a, toe_b) — contacts named by index, so
-    // every later lookup is exact provenance, not float seg matching.
-    let mut ramped: Vec<(usize, usize, f32, Vec2, Vec2)> = Vec::new();
-    let mut corner_ramps: HashMap<(i64, i64), (Vec2, f32, f32)> = HashMap::new();
-    for (ni, n) in bd.notches.iter().enumerate() {
-        let r = (total_h - n.top).min(TRANSITION_R);
-        if r < 0.05 {
-            continue;
-        }
-        for (ci, c) in n.contact.iter().enumerate() {
-            let Seg::Line { a: p2, b: q2 } = *c else { continue };
-            let len = (q2 - p2).length();
-            if len < 0.1 {
-                continue;
-            }
-            let d = (q2 - p2) / len;
-            let left = Vec2::new(-d.y, d.x);
-            // Toe point at one contact end: offset along the adjacent side's
-            // line so the ellipse lands exactly in the side plane. Contact and
-            // side endpoints at a shared corner are the same split point from
-            // `split_region_by_quad` (computed once), so equality is exact.
-            let toe_of = |end: Vec2| -> Option<Vec2> {
-                let side = n.sides.iter().find_map(|s| {
-                    let (sa, sb) = (s.start(), s.end());
-                    if sa == end {
-                        Some((sb - sa).normalize_or_zero())
-                    } else if sb == end {
-                        Some((sa - sb).normalize_or_zero())
-                    } else {
-                        Option::None
-                    }
-                })?;
-                let denom = d.x * side.y - d.y * side.x;
-                if denom.abs() < 1e-3 {
-                    return Option::None;
-                }
-                let k = -r * (left.x * side.y - left.y * side.x) / denom;
-                Some(end + d * k + left * r)
-            };
-            let (Some(toe_a), Some(toe_b)) = (toe_of(p2), toe_of(q2)) else { continue };
-            // Toe line must keep positive length and stay ordered along d.
-            if (toe_b - toe_a).dot(d) < 0.05 {
-                continue;
-            }
-            corner_ramps.insert(key(p2), (toe_a, n.top, r));
-            corner_ramps.insert(key(q2), (toe_b, n.top, r));
-            ramped.push((ni, ci, r, toe_a, toe_b));
-        }
-    }
 
-    // 1) Wall spans per segment, with per-corner heights (a ramped corner
-    //    raises its vertical to top + r).
+    // 1) Wall spans per segment. Sides run floor → wall top, contacts run
+    //    wall top → rim; the blend eats into both afterwards.
     enum Kind {
         Plain { za: f32, zb: f32 },
-        Side { top: f32 }, // notch side, possibly ramp-trimmed at either end
+        Side { top: f32 }, // notch side: floor → wall top
     }
     let mut faces: Vec<(Seg, Kind)> = Vec::new();
     for lp in &bd.outline_a {
@@ -1859,32 +1808,21 @@ fn build_cavity_banded(
             }
         }
     }
-    for (ni, n) in bd.notches.iter().enumerate() {
-        for (ci, s) in n.contact.iter().enumerate() {
-            let za = match ramped.iter().find(|&&(rn, rc, ..)| rn == ni && rc == ci) {
-                Some((_, _, r, ..)) => n.top + r,
-                Option::None => n.top,
-            };
-            faces.push((*s, Kind::Plain { za, zb: total_h }));
+    for n in &bd.notches {
+        for s in &n.contact {
+            faces.push((*s, Kind::Plain { za: n.top, zb: total_h }));
         }
     }
-    // Corner heights per face end.
-    let end_heights = |s: &Seg, kind: &Kind, at_start: bool| -> (f32, f32) {
+    let span = |kind: &Kind| -> (f32, f32) {
         match kind {
             Kind::Plain { za, zb } => (*za, *zb),
-            Kind::Side { top } => {
-                let pt = if at_start { s.start() } else { s.end() };
-                match corner_ramps.get(&key(pt)) {
-                    Some((_, t, r)) => (floor_z, t + r),
-                    Option::None => (floor_z, *top),
-                }
-            }
+            Kind::Side { top } => (floor_z, *top),
         }
     };
     let mut breaks: HashMap<(i64, i64), Vec<f32>> = HashMap::new();
     for (s, kind) in &faces {
+        let (za, zb) = span(kind);
         for at_start in [true, false] {
-            let (za, zb) = end_heights(s, kind, at_start);
             let pt = if at_start { s.start() } else { s.end() };
             let e = breaks.entry(key(pt)).or_default();
             e.push(za);
@@ -1895,108 +1833,12 @@ fn build_cavity_banded(
         breaks.get(&key(p)).cloned().unwrap_or_default()
     };
 
-    // The ellipse arc at a ramped corner: θ = 0 at the toe (z = top), π/2 at
-    // the corner's shoulder (z = top + r); centre = toe at shoulder height.
-    let ellipse_at = |b: &mut Builder, corner: Vec2, toe: Vec2, top: f32, r: f32, up: bool| {
-        let c3 = Vec3::new(toe.x, toe.y, top + r);
-        let ea = Vec3::new(0.0, 0.0, -r);
-        let eb = Vec3::new(corner.x - toe.x, corner.y - toe.y, 0.0);
-        let v_toe = b.vertex(Vec3::new(toe.x, toe.y, top));
-        let v_sh = b.vertex(Vec3::new(corner.x, corner.y, top + r));
-        if up {
-            b.ellipse(v_toe, v_sh, c3, ea, eb, 0.0, std::f32::consts::FRAC_PI_2)
-        } else {
-            b.ellipse(v_sh, v_toe, c3, ea, eb, std::f32::consts::FRAC_PI_2, 0.0)
-        }
-    };
-
+    // Every face is a plain span now — the blend is the kernel's job.
     for (s, kind) in &faces {
-        match kind {
-            Kind::Plain { za, zb } => {
-                let bl = get_breaks(&breaks, s.start());
-                let br = get_breaks(&breaks, s.end());
-                wall_seg(b, s, *za, *zb, &bl, &br, false);
-            }
-            Kind::Side { top } => {
-                let ramp_s = corner_ramps.get(&key(s.start())).copied();
-                let ramp_e = corner_ramps.get(&key(s.end())).copied();
-                if ramp_s.is_none() && ramp_e.is_none() {
-                    let bl = get_breaks(&breaks, s.start());
-                    let br = get_breaks(&breaks, s.end());
-                    wall_seg(b, s, floor_z, *top, &bl, &br, false);
-                    continue;
-                }
-                // Ramp-trimmed side face: planar, with an ellipse boundary
-                // at each ramped end and the top edge pulled back to the toe.
-                let (sp, se) = (s.start(), s.end());
-                let a_top = ramp_s.map_or(sp, |(toe, ..)| toe);
-                let b_top = ramp_e.map_or(se, |(toe, ..)| toe);
-                let bottom = seg_edge(b, s, floor_z);
-                let vt0 = b.vertex(Vec3::new(a_top.x, a_top.y, *top));
-                let vt1 = b.vertex(Vec3::new(b_top.x, b_top.y, *top));
-                let top_e = b.line(vt0, vt1);
-                let h_s = ramp_s.map_or(*top, |(_, t, r)| t + r);
-                let h_e = ramp_e.map_or(*top, |(_, t, r)| t + r);
-                let chain = |b: &mut Builder, p: Vec2, hi: f32, brks: &[f32]| {
-                    let mut hs: Vec<f32> = vec![floor_z];
-                    hs.extend(brks.iter().copied().filter(|&h| h > floor_z + 1e-4 && h < hi - 1e-4));
-                    hs.sort_by(f32::total_cmp);
-                    hs.push(hi);
-                    hs.dedup_by(|x, y| (*x - *y).abs() < 1e-4);
-                    let mut out: Vec<(EdgeId, bool)> = Vec::new();
-                    for w in hs.windows(2) {
-                        let v0 = b.vertex(Vec3::new(p.x, p.y, w[0]));
-                        let v1 = b.vertex(Vec3::new(p.x, p.y, w[1]));
-                        out.push(b.line(v0, v1));
-                    }
-                    out
-                };
-                let bl = get_breaks(&breaks, sp);
-                let br = get_breaks(&breaks, se);
-                let left = chain(b, sp, h_s, &bl);
-                let right = chain(b, se, h_e, &br);
-                let mut lp: Vec<(EdgeId, bool)> = vec![bottom];
-                lp.extend(right.iter().copied());
-                if let Some((toe, t, r)) = ramp_e {
-                    lp.push(ellipse_at(b, se, toe, t, r, false));
-                }
-                lp.push((top_e.0, !top_e.1));
-                if let Some((toe, t, r)) = ramp_s {
-                    lp.push(ellipse_at(b, sp, toe, t, r, true));
-                }
-                lp.extend(left.iter().rev().map(|&(e, d)| (e, !d)));
-                let dir = se - sp;
-                let surface =
-                    Surface::plane(Vec3::new(sp.x, sp.y, floor_z), Vec3::new(dir.y, -dir.x, 0.0));
-                b.face(surface, false, Loop::new(lp), vec![]);
-            }
-        }
-    }
-
-    // Ramp faces: quarter cylinders between toe line and shoulder line.
-    for &(ni, ci, r, toe_a, toe_b) in &ramped {
-        let n = &bd.notches[ni];
-        let (c, top, r, toe_a, toe_b) = (&n.contact[ci], &n.top, &r, &toe_a, &toe_b);
-        let Seg::Line { a: p2, b: q2 } = *c else { unreachable!() };
-        let d = (q2 - p2).normalize_or_zero();
-        let toe_seg = Seg::Line { a: *toe_a, b: *toe_b };
-        let toe = seg_edge(b, &toe_seg, *top);
-        let shoulder = seg_edge(b, c, *top + *r);
-        let ell_q = ellipse_at(b, q2, *toe_b, *top, *r, true);
-        let ell_p = ellipse_at(b, p2, *toe_a, *top, *r, false);
-        // Axis line runs at the shoulder height, offset r inward from the
-        // contact face; outward at the toe tangent is +Z while the cylinder's
-        // analytic normal there points to −Z, so sense = false.
-        let left = Vec2::new(-d.y, d.x);
-        let base = Vec3::new(p2.x + left.x * *r, p2.y + left.y * *r, *top + *r);
-        let surface = Surface::Cylinder {
-            base,
-            axis: Vec3::new(d.x, d.y, 0.0),
-            radius: *r,
-            ref_dir: -Vec3::Z,
-        };
-        let lp = Loop::new(vec![toe, ell_q, (shoulder.0, !shoulder.1), ell_p]);
-        b.face(surface, false, lp, vec![]);
+        let (za, zb) = span(kind);
+        let bl = get_breaks(&breaks, s.start());
+        let br = get_breaks(&breaks, s.end());
+        wall_seg(b, s, za, zb, &bl, &br, false);
     }
 
     // 2) Island towers + floor caps per notched outer.
@@ -2038,7 +1880,22 @@ fn build_cavity_banded(
             planar(b, n.top, true, loop_of(&r, false), Vec::new());
         }
     }
-    tops
+
+    // 4) Hand the cap↔contact edges to the kernel to blend. `seg_edge` is
+    //    interned, so this re-derives the very edges the cap and the contact
+    //    wall already share — no float matching. `blend_edges` runs each
+    //    chain out against the wall's side planes on its own.
+    let mut blends: Vec<(EdgeId, f32)> = Vec::new();
+    for n in &bd.notches {
+        let r = (total_h - n.top).min(TRANSITION_R);
+        if r < 0.05 {
+            continue;
+        }
+        for s in &n.contact {
+            blends.push((seg_edge(b, s, n.top).0, r));
+        }
+    }
+    (blends, tops)
 }
 
 /// Sloped cavity: single tilted plane floor over the bin's bounding box, sharp

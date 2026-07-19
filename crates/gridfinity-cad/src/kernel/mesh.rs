@@ -4,7 +4,7 @@
 //! triangulated and welded into a `Mesh`, which the GUI renders and which the
 //! STL writer serializes for slicers.
 
-use crate::math::{Vec3, weld_key};
+use crate::kernel::math::{Vec3, weld_key};
 use std::collections::HashMap;
 
 /// An indexed triangle mesh in millimetres.

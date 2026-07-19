@@ -9,7 +9,7 @@
 //! `ref_dir` pointing at the *start* of their bounding arc, so a partial
 //! (quarter- or half-) surface never straddles the `atan2` branch cut.
 
-use crate::math::Vec3;
+use crate::kernel::math::Vec3;
 use std::f32::consts::PI;
 
 /// A 2D parameter point on a surface.

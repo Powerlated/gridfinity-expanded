@@ -7,9 +7,9 @@
 //! bridging. Vertex normals come from the analytic surface, so cylinders and
 //! fillets shade smoothly while creases stay hard.
 
-use crate::math::{Vec2, Vec3};
-use crate::mesh::{Mesh, weld_triangles};
-use crate::topo::{EdgeId, Solid};
+use crate::kernel::math::{Vec2, Vec3};
+use crate::kernel::mesh::{Mesh, weld_triangles};
+use crate::kernel::topo::{EdgeId, Solid};
 use std::collections::HashMap;
 
 /// A triangle with a position and an outward normal at each corner.
@@ -116,7 +116,7 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
 
         // Curved faces parameterise u as an angle; unwrap it along each loop so
         // the uv polygon stays continuous (no ±2π branch jump) and simple.
-        if !matches!(face.surface, crate::geom::Surface::Plane { .. }) {
+        if !matches!(face.surface, crate::kernel::geom::Surface::Plane { .. }) {
             for &(s, e) in &loop_spans {
                 let mut prev = uv[s].x;
                 for p in uv.iter_mut().take(e).skip(s + 1) {
@@ -281,11 +281,11 @@ fn split_boundary_chords(
 /// blend-patch and cylinder-wall case). Returns `None` if the face doesn't fit
 /// that shape, so the caller can fall back to earcut.
 fn tess_grid_face(
-    face: &crate::topo::Face,
+    face: &crate::kernel::topo::Face,
     edge_pts: &HashMap<EdgeId, Vec<Vec3>>,
     sign: f32,
 ) -> Option<Vec<Tri>> {
-    use crate::geom::Surface;
+    use crate::kernel::geom::Surface;
     if matches!(face.surface, Surface::Plane { .. }) {
         return None;
     }

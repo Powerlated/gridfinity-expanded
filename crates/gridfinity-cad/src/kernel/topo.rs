@@ -8,8 +8,8 @@
 //! The manifold invariant (`validate`): every edge is used exactly twice across
 //! all loops, once in each direction.
 
-use crate::geom::{Curve, Surface};
-use crate::math::{Vec3, weld_key};
+use crate::kernel::geom::{Curve, Surface};
+use crate::kernel::math::{Vec3, weld_key};
 use std::collections::HashMap;
 
 pub type VertexId = usize;
@@ -258,7 +258,7 @@ impl Builder {
         &mut self,
         a: VertexId,
         b: VertexId,
-        mid: crate::math::Vec3,
+        mid: crate::kernel::math::Vec3,
         make: impl FnOnce() -> Edge,
     ) -> (EdgeId, bool) {
         let (lo, hi) = if a < b { (a, b) } else { (b, a) };

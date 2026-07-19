@@ -12,8 +12,8 @@
 //! the left" rule), which is the orientation the planar-face triangulator wants.
 
 use crate::layout::GridCell;
-use crate::math::Vec2;
-use crate::sketch::{Seg, loop_area};
+use crate::kernel::math::Vec2;
+use crate::kernel::sketch::{Seg, loop_area};
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
 
@@ -240,7 +240,7 @@ pub fn region_loops(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sketch::loop_area;
+    use crate::kernel::sketch::loop_area;
 
     fn cells(coords: &[(i32, i32)]) -> Vec<GridCell> {
         coords.iter().map(|&(x, y)| GridCell { x, y }).collect()

@@ -3,7 +3,7 @@
 //! rounded rectangle becomes true cylindrical corner faces. Outer loops are
 //! authored CCW; `build.rs` reorients hole loops to CW as needed.
 
-use crate::math::Vec2;
+use crate::kernel::math::Vec2;
 use std::f32::consts::PI;
 
 /// One boundary segment. `a`/`b` are the endpoints in traversal order; for an

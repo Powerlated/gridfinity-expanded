@@ -9,6 +9,37 @@ model built on it, with an **egui** front-end that previews the model in 3D and 
 It reproduces the purpose of the TypeScript reference at `../gridfinity-expanded` (parametric
 Gridfinity generator + watertight STL) as a small Rust workspace.
 
+## Hard rule: no mesh operations before export/render
+
+**Triangles are a terminal output format, never a modelling medium.** Everything upstream of
+`tess.rs` is analytic B-rep — exact surfaces, exact curves, closed-form intersections — and the
+mesh is produced once, at the very end, and never read back.
+
+Prohibited anywhere in the modelling pipeline (`sketch` → `build` → `topo` → `fillet`, plus
+`gridfinity.rs`, `segdiff.rs`, `rectregion.rs`, `region.rs`):
+
+- **Mesh booleans / CSG** of any kind, including pulling in a library for them.
+- **Voxels, SDFs, marching cubes, point sampling,** or any discretised volume representation.
+- **Remeshing, mesh healing, decimation, vertex-merge-to-fix-gaps,** or any "tessellate first,
+  then repair the result" strategy. Watertightness is a property of the B-rep, guaranteed by the
+  manifold invariant and by `tess.rs` sampling each edge exactly once — it is never something a
+  post-process patches up.
+- **Numerically approximating a curve or surface** (polyline/facet stand-ins) where a closed-form
+  `Curve`/`Surface` is the correct answer. If the needed analytic primitive doesn't exist yet, add
+  it to `geom.rs` — `Curve::Ellipse` was added exactly this way.
+- **Reading a `Mesh` back into modelling.** `Mesh` is write-only downstream of `tessellate`.
+
+Explicitly still allowed, because they sit *at or after* the tessellation boundary:
+
+- `earcutr` inside `tess.rs`, for final planar-face-with-holes triangulation only.
+- `weld_triangles`, `to_stl_binary`, `flat_vertices`, bounds — export and GL upload.
+- Mesh-based *verification* in tests (`assert_watertight`, `signed_volume`): checking the analytic
+  result, never producing it.
+
+If a task looks like it needs a prohibited operation, that means either a missing analytic
+primitive or a missing B-rep operator (e.g. blend runout in `fillet.rs`). **Stop and ask** — do not
+reach for a mesh fallback.
+
 ## Commands
 
 ```bash
@@ -31,9 +62,23 @@ Two crates (`Cargo.toml` = virtual workspace, edition 2024, resolver 3):
   for final planar-face-with-holes triangulation; the B-rep kernel itself is hand-rolled).
 - **`crates/gridfinity-gui`** — the eframe/egui/glow app. Depends on `gridfinity-cad`.
 
+Inside `gridfinity-cad`, the CAD engine lives in **`src/kernel/`** and the parametric model beside
+it in `src/`:
+
+- `src/kernel/` — `math`, `geom`, `sketch`, `topo`, `build`, `fillet`, `tess`, `mesh`, plus the 2D
+  region engines `segdiff` and `rectregion`. **Nothing here knows about Gridfinity**, and the
+  dependency direction is one-way: no kernel module may import from the model layer. Paths are
+  `crate::kernel::topo`, `gridfinity_cad::kernel::geom`, etc.
+- `src/` — `gridfinity` (the model), `layout` (grid cells/edges), `region` (polyomino boundary
+  tracing, grid-coupled), `printers` (bed fitting; pure logic).
+
+`Mesh`, `Solid`, `Tessellation`/`tessellate` and `Params` stay re-exported at the crate root, so
+the GUI is unaffected by the split.
+
 ## Engine architecture (the big picture)
 
 Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet` → `tess` → `mesh` → STL.**
+(All paths below are under `src/kernel/` unless noted.)
 
 - **`geom.rs`** — analytic `Surface` (`Plane`/`Cylinder`/`Cone`/`Torus`/`Sphere`) and `Curve`
   (`Line`/`Circle`). Every radial surface and `Circle` carries an explicit `axis` (arbitrary
@@ -59,8 +104,14 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
 - **`fillet.rs`** — `blend_edges(&solid, &[(EdgeId, r)])`: true rolling-ball edge blending as a
   B-rep operator. Plane/plane edges become `Cylinder` blends, plane/coaxial-cylinder circle edges
   become `Torus` blends; adjacent faces are trimmed back to the exact tangent curves and quarter-
-  circle connect arcs join neighbouring blends. Every blended vertex must be shared by exactly two
-  blended edges (closed smooth chain; spherical corner patches unimplemented → `Err`). The whole
+  circle connect arcs join neighbouring blends. A vertex with **two** blended edges continues the
+  chain; a vertex with **one** is a *runout* — the chain terminates against a third face, and the
+  blend is trimmed by it instead of closed off: tangent curves extend to meet the plane, the exact
+  cylinder/plane intersection (a `Curve::Ellipse`) becomes the trim curve, and it is spliced into
+  the runout face's loop where its sharp corner was. The runout face is found by adjacency,
+  skipping faces coplanar with the blended pair (a coplanar neighbour continues the surface rather
+  than terminating the blend). Three or more blended edges at a vertex still needs a spherical
+  corner patch → `Err`. The partial-height inner wall's top ramp is built this way. The whole
   solid is rebuilt through a fresh `Builder` and `validate()`d. Gotcha: when re-emitting an arc
   reversed, the angle range must be swapped too — `Builder::arc` trusts that its first vertex sits
   at the first angle.

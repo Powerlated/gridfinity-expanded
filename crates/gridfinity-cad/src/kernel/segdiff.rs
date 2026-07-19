@@ -12,8 +12,8 @@
 //! Degenerate inputs (a quad edge collinear-overlapping a region edge,
 //! tangencies) are not supported — callers author walls at generic positions.
 
-use crate::math::Vec2;
-use crate::sketch::{Seg, loop_area, point_in_segs};
+use crate::kernel::math::Vec2;
+use crate::kernel::sketch::{Seg, loop_area, point_in_segs};
 
 const EPS: f32 = 1e-4;
 

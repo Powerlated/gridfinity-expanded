@@ -13,8 +13,8 @@
 //! Only axis-aligned input is supported; that is exactly the reference's cavity
 //! model (cells, wall strips, divider strips, patches are all axis-aligned).
 
-use crate::math::Vec2;
-use crate::sketch::Seg;
+use crate::kernel::math::Vec2;
+use crate::kernel::sketch::Seg;
 use std::collections::HashMap;
 use std::f32::consts::PI;
 
@@ -331,7 +331,7 @@ fn short_arc(a0: f32, a1: f32) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sketch::loop_area;
+    use crate::kernel::sketch::loop_area;
 
     fn style(inset: f32, rc: f32, rf: f32) -> (Box<dyn Fn(usize, Vec2, Vec2) -> f32>, Box<dyn Fn(usize, bool) -> f32>) {
         (

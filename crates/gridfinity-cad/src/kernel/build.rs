@@ -11,10 +11,10 @@
 //! point out of the loop) or *outside* it (`false` → a hole/cavity, normals
 //! point into the loop).
 
-use crate::geom::Surface;
-use crate::math::{Vec2, Vec3, vec3_of};
-use crate::sketch::{Seg, Sketch, loop_area, reverse_loop};
-use crate::topo::{Builder, EdgeId, Loop, Solid, VertexId};
+use crate::kernel::geom::Surface;
+use crate::kernel::math::{Vec2, Vec3, vec3_of};
+use crate::kernel::sketch::{Seg, Sketch, loop_area, reverse_loop};
+use crate::kernel::topo::{Builder, EdgeId, Loop, Solid, VertexId};
 
 /// The vertices and profile edges of one ring (a profile realised at a height).
 pub struct RingEdges {

@@ -4,33 +4,26 @@
 //! Pipeline: [`sketch`] â†’ [`build`] features â†’ [`topo`] B-rep solid â†’
 //! `boolean`/`fillet` â†’ [`tess`] â†’ [`mesh`] â†’ STL.
 
-pub mod build;
-pub mod fillet;
-pub mod geom;
+pub mod kernel;
+
 pub mod gridfinity;
 pub mod layout;
-pub mod math;
-pub mod mesh;
 pub mod printers;
-pub mod rectregion;
 pub mod region;
-pub mod segdiff;
-pub mod sketch;
-pub mod tess;
-pub mod topo;
 
 pub use gridfinity::{Params, build as build_gridfinity};
-pub use mesh::Mesh;
-pub use tess::{Tessellation, tessellate};
-pub use topo::Solid;
+pub use kernel::mesh::Mesh;
+pub use kernel::tess::{Tessellation, tessellate};
+pub use kernel::topo::Solid;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build::{Ring, extrude, loft};
+    use crate::kernel::build::{Ring, extrude, loft};
+    use crate::kernel::geom;
     use crate::gridfinity::{BinSlope, LogicalBin, Mode, SlopeDir};
     use crate::layout::{Axis, GridCell, GridEdge, Orientation, SplitLine};
-    use crate::sketch::Sketch;
+    use crate::kernel::sketch::Sketch;
     use std::collections::HashMap;
 
     /// Every directed edge of the indexed mesh must be matched by its reverse â€”
@@ -110,7 +103,7 @@ mod tests {
 
     #[test]
     fn annulus_prism_watertight() {
-        use crate::build::prism;
+        use crate::kernel::build::prism;
         let outer = Sketch::rectangle(0.0, 0.0, 40.0, 40.0);
         let hole = Sketch::rectangle(0.0, 0.0, 20.0, 20.0);
         let solid = prism(&outer, &[hole], 0.0, 10.0);
@@ -446,31 +439,21 @@ mod tests {
             ..gridfinity::Params::default()
         };
         let solid = gridfinity::build(&p);
-        {
-            let e = &solid.edges[261];
-            eprintln!(
-                "edge 261: v0={:?} v1={:?}",
-                solid.verts[e.v0].point, solid.verts[e.v1].point
-            );
-            for (fi, f) in solid.faces.iter().enumerate() {
-                for lp in f.loops() {
-                    for &(eid, fwd) in &lp.edges {
-                        if eid == 261 {
-                            eprintln!("  face {fi} surf={:?} fwd={fwd}", f.surface);
-                            for &(e2, d2) in &lp.edges {
-                                let ee = &solid.edges[e2];
-                                eprintln!(
-                                    "    e{e2} d={d2} {:?} -> {:?}",
-                                    solid.verts[ee.v0].point, solid.verts[ee.v1].point
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
         solid.validate().expect("banded notch wall topology valid");
         assert_watertight(&tessellate(&solid, 6).to_mesh());
+        // The wall top is 4 mm below the rim, so the kernel must have rolled a
+        // r=4 blend along the contact and run it out on the wall's side planes
+        // (horizontal axis distinguishes it from any vertical corner round).
+        let ramp = solid.faces.iter().any(|f| match f.surface {
+            geom::Surface::Cylinder { axis, radius, .. } => {
+                (radius - 4.0).abs() < 1e-3 && axis.z.abs() < 1e-3
+            }
+            _ => false,
+        });
+        assert!(ramp, "wall-top runout blend is missing");
+        // ...and the runout trim curve is a real ellipse, not a circle.
+        let ell = solid.edges.iter().any(|e| matches!(e.curve, geom::Curve::Ellipse { .. }));
+        assert!(ell, "runout ellipse is missing");
     }
 
     #[test]
@@ -685,7 +668,7 @@ mod tests {
 
     #[test]
     fn fillet_cylinder_top_is_watertight() {
-        use crate::fillet::blend_edges;
+        use crate::kernel::fillet::blend_edges;
         // Cylinder radius 10, height 5. Filleting the top circle (between the
         // top plane face and the cylinder side face) yields a torus blend.
         let s = Sketch::circle(0.0, 0.0, 10.0);
@@ -694,13 +677,13 @@ mod tests {
         let top_edges: Vec<_> = (0..solid.edges.len())
             .filter(|&i| {
                 let e = solid.edges[i];
-                if !matches!(e.curve, crate::geom::Curve::Circle { .. }) {
+                if !matches!(e.curve, crate::kernel::geom::Curve::Circle { .. }) {
                     return false;
                 }
                 (solid.verts[e.v0].point.z - 5.0).abs() < 1e-3
                     && (solid.verts[e.v1].point.z - 5.0).abs() < 1e-3
             })
-            .map(|i| i as crate::topo::EdgeId)
+            .map(|i| i as crate::kernel::topo::EdgeId)
             .collect();
         assert_eq!(top_edges.len(), 2, "cylinder top should have 2 arc edges");
         let blends: Vec<_> = top_edges.iter().map(|&e| (e, 2.0_f32)).collect();

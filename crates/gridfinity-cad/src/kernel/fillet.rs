@@ -20,13 +20,21 @@
 //! and the tangent point on each face is `C − r · m_face`. Uniform over
 //! concave and convex edges.
 //!
-//! Scope: every blended vertex must be shared by exactly two blended edges (a
-//! closed smooth chain, e.g. a pocket floor-wall loop). Partial / non-smooth
-//! vertices needing a spherical corner patch are rejected for now.
+//! A blended vertex shared by **two** blended edges continues the chain (the
+//! two blends share a connect arc). A vertex with **one** blended edge is a
+//! *runout*: the chain terminates against a third face, and the blend surface
+//! is trimmed by that face instead of closed with a quarter arc. For a
+//! cylindrical blend cut by an oblique plane the exact trim curve is an
+//! ellipse arc (`Curve::Ellipse`), and the two tangent curves are extended to
+//! meet the plane. The runout face gets that ellipse spliced into its loop
+//! where its sharp corner used to be, so the arc is used exactly twice.
+//!
+//! Scope: vertices with three or more blended edges (spherical corner patches)
+//! are still rejected, and runout is implemented for cylindrical blends only.
 
-use crate::geom::{Curve, Surface};
-use crate::math::Vec3;
-use crate::topo::{Builder, EdgeId, Loop, Solid};
+use crate::kernel::geom::{Curve, Surface};
+use crate::kernel::math::Vec3;
+use crate::kernel::topo::{Builder, EdgeId, Loop, Solid};
 use std::collections::HashMap;
 
 /// A curve with its parameter range, as emitted between two endpoints.
@@ -68,19 +76,28 @@ pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, Str
         }
     }
 
-    // Every blended vertex must be shared by exactly two blended edges.
+    // Two blended edges continue a chain; one is a runout (the chain
+    // terminates against a third face). Three or more needs a spherical
+    // corner patch, still unsupported.
     let mut vertex_blends: HashMap<usize, Vec<EdgeId>> = HashMap::new();
     for &e in want.keys() {
         let ed = solid.edges[e];
         vertex_blends.entry(ed.v0).or_default().push(e);
         vertex_blends.entry(ed.v1).or_default().push(e);
     }
+    let mut terminating: HashMap<usize, EdgeId> = HashMap::new();
     for (v, es) in &vertex_blends {
-        if es.len() != 2 {
-            return Err(format!(
-                "blend: vertex {v} has {} blended edges (want 2; spherical corners unsupported)",
-                es.len()
-            ));
+        match es.len() {
+            2 => {}
+            1 => {
+                terminating.insert(*v, es[0]);
+            }
+            n => {
+                return Err(format!(
+                    "blend: vertex {v} has {n} blended edges (want 1 or 2; \
+                     spherical corners unsupported)"
+                ));
+            }
         }
     }
 
@@ -91,6 +108,7 @@ pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, Str
     };
 
     let mut bm: HashMap<EdgeId, Blend> = HashMap::new();
+    let mut runouts: HashMap<usize, Runout> = HashMap::new();
     let mut want_sorted: Vec<EdgeId> = want.keys().copied().collect();
     want_sorted.sort_unstable();
     for &e in &want_sorted {
@@ -140,7 +158,7 @@ pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, Str
         // How face a traverses edge e in its loop (determines blend loop orientation).
         let fwd_a = loop_edge_dir(&solid.faces[fa], e);
 
-        let blend = if plane_a.is_some() && plane_b.is_some() {
+        let mut blend = if plane_a.is_some() && plane_b.is_some() {
             build_cyl_blend(ed, cv0, cv1, ma, na0, ta_p0, ta_p1, tb_p0, tb_p1, r, fwd_a)?
         } else if cyl.is_some() && is_circle && (plane_a.is_some() || plane_b.is_some()) {
             // ta/tb stay per-face (ta on fa, tb on fb); the torus is symmetric.
@@ -150,6 +168,43 @@ pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, Str
                 "blend: edge {e} pair not supported (only plane/plane or plane/coaxial-cylinder)"
             ));
         };
+
+        // Runout: where this chain terminates, trim the blend against the
+        // face it dies into instead of closing it with a quarter arc.
+        for (at_v0, v) in [(true, ed.v0), (false, ed.v1)] {
+            if terminating.get(&v) != Some(&e) {
+                continue;
+            }
+            if plane_a.is_none() || plane_b.is_none() {
+                return Err(format!(
+                    "blend: runout at vertex {v} is only supported for cylindrical blends"
+                ));
+            }
+            let ft = find_runout_face(solid, v, fa, fb)?;
+            let plane = as_plane(&solid.faces[ft].surface).ok_or_else(|| {
+                format!("blend: runout face {ft} at vertex {v} is not planar")
+            })?;
+            let dir = match ed.curve {
+                Curve::Line { dir, .. } => dir,
+                _ => return Err(format!("blend: runout at vertex {v} needs a straight edge")),
+            };
+            let (cv, tap, tbp) =
+                if at_v0 { (cv0, ta_p0, tb_p0) } else { (cv1, ta_p1, tb_p1) };
+            let (ta_new, tb_new, arc) = runout_cyl(cv, dir, r, tap, tbp, plane)?;
+            if at_v0 {
+                blend.ta_p0 = ta_new;
+                blend.tb_p0 = tb_new;
+                blend.ca0 = arc;
+            } else {
+                blend.ta_p1 = ta_new;
+                blend.tb_p1 = tb_new;
+                blend.ca1 = arc;
+            }
+            runouts.insert(
+                v,
+                Runout { face: ft, arc, ta_p: ta_new, tb_p: tb_new, fa, fb },
+            );
+        }
         bm.insert(e, blend);
     }
 
@@ -164,10 +219,10 @@ pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, Str
     let mut b = Builder::new();
 
     for (fi, face) in solid.faces.iter().enumerate() {
-        let outer = rebuild_loop(solid, &bm, &vinfo, &want, fi, &face.outer, &mut b)?;
+        let outer = rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, &face.outer, &mut b)?;
         let mut inners = Vec::with_capacity(face.inners.len());
         for lp in &face.inners {
-            inners.push(rebuild_loop(solid, &bm, &vinfo, &want, fi, lp, &mut b)?);
+            inners.push(rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, lp, &mut b)?);
         }
         b.face(face.surface, face.sense, outer, inners);
     }
@@ -205,7 +260,7 @@ pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, Str
 }
 
 /// How a face traverses `e` in its loops (true = v0→v1).
-fn loop_edge_dir(face: &crate::topo::Face, e: EdgeId) -> bool {
+fn loop_edge_dir(face: &crate::kernel::topo::Face, e: EdgeId) -> bool {
     for lp in face.loops() {
         for &(ee, f) in &lp.edges {
             if ee == e {
@@ -245,9 +300,109 @@ fn as_cyl(s: &Surface) -> Option<(Vec3, Vec3, f32)> {
     }
 }
 
+/// Where a blend chain dies into a third face, and the trim curve there.
+#[derive(Clone, Copy)]
+struct Runout {
+    face: usize,
+    arc: CurvEdge,
+    /// Tangent points extended onto the runout face.
+    ta_p: Vec3,
+    tb_p: Vec3,
+    fa: usize,
+    fb: usize,
+}
+
+fn faces_at_vertex(solid: &Solid, v: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (fi, f) in solid.faces.iter().enumerate() {
+        let mut hit = false;
+        for lp in f.loops() {
+            for &(e, _) in &lp.edges {
+                let ed = solid.edges[e];
+                if ed.v0 == v || ed.v1 == v {
+                    hit = true;
+                }
+            }
+        }
+        if hit {
+            out.push(fi);
+        }
+    }
+    out
+}
+
+fn coplanar(x: &Surface, y: &Surface) -> bool {
+    match (as_plane(x), as_plane(y)) {
+        (Some((o0, n0)), Some((o1, n1))) => {
+            let (n0, n1) = (n0.normalize_or_zero(), n1.normalize_or_zero());
+            n0.cross(n1).length() < 1e-5 && (o1 - o0).dot(n0).abs() < 1e-4
+        }
+        _ => false,
+    }
+}
+
+/// The face a blend chain runs out onto at `v`: it touches `v`, is neither of
+/// the blended pair, and is not coplanar with either — a coplanar neighbour
+/// continues the same surface rather than terminating the blend.
+fn find_runout_face(solid: &Solid, v: usize, fa: usize, fb: usize) -> Result<usize, String> {
+    let mut cands = Vec::new();
+    for fi in faces_at_vertex(solid, v) {
+        if fi == fa
+            || fi == fb
+            || coplanar(&solid.faces[fi].surface, &solid.faces[fa].surface)
+            || coplanar(&solid.faces[fi].surface, &solid.faces[fb].surface)
+        {
+            continue;
+        }
+        cands.push(fi);
+    }
+    match cands.len() {
+        1 => Ok(cands[0]),
+        0 => Err(format!("blend runout: no terminating face at vertex {v}")),
+        n => Err(format!("blend runout: {n} candidate terminating faces at vertex {v}")),
+    }
+}
+
+/// Trim one end of a cylindrical blend against the plane it runs out onto.
+///
+/// Sliding a cylinder point onto the plane along the axis is affine in
+/// `(cos t, sin t)`, so the cut really is `p(t) = C + cos t·A + sin t·B` with
+/// `A`/`B` conjugate semi-diameters — an exact ellipse, no approximation. The
+/// frame is chosen with `e1` aimed at face a's tangent, so the arc starts
+/// there at `t = 0` and sweeps to face b's tangent.
+fn runout_cyl(
+    cv: Vec3,
+    axis: Vec3,
+    r: f32,
+    ta_p: Vec3,
+    tb_p: Vec3,
+    plane: (Vec3, Vec3),
+) -> Result<(Vec3, Vec3, CurvEdge), String> {
+    let (q, n) = plane;
+    let n = n.normalize_or_zero();
+    let d = axis.normalize_or_zero();
+    let dn = d.dot(n);
+    if dn.abs() < 1e-6 {
+        return Err("blend runout: terminating face is parallel to the blend axis".into());
+    }
+    let onto = |p: Vec3| p + d * ((q - p).dot(n) / dn);
+    let e1 = (ta_p - cv).normalize_or_zero();
+    let e2 = d.cross(e1);
+    let a_vec = d * (-r * e1.dot(n) / dn) + e1 * r;
+    let b_vec = d * (-r * e2.dot(n) / dn) + e2 * r;
+    let u = (tb_p - cv).normalize_or_zero();
+    let t1 = u.dot(e2).atan2(u.dot(e1));
+    let arc = CurvEdge {
+        curve: Curve::Ellipse { center: onto(cv), a: a_vec, b: b_vec },
+        t0: 0.0,
+        t1,
+    };
+    Ok((onto(ta_p), onto(tb_p), arc))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_cyl_blend(
-    ed: crate::topo::Edge,
+    ed: crate::kernel::topo::Edge,
     cv0: Vec3,
     cv1: Vec3,
     ma: Vec3,
@@ -282,7 +437,7 @@ fn build_cyl_blend(
 
 #[allow(clippy::too_many_arguments)]
 fn build_torus_blend(
-    ed: crate::topo::Edge,
+    ed: crate::kernel::topo::Edge,
     cv0: Vec3,
     cv1: Vec3,
     na0: Vec3,
@@ -376,10 +531,21 @@ fn connect_arc(center: Vec3, axis: Vec3, from_pt: Vec3, to_pt: Vec3) -> Result<C
     })
 }
 
+/// One rebuilt loop entry, with the endpoints it was actually emitted between
+/// (needed to spot the gap a runout corner opens up).
+struct Emitted {
+    edge: (EdgeId, bool),
+    start: Vec3,
+    end_v: usize,
+    end: Vec3,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn rebuild_loop(
     solid: &Solid,
     bm: &HashMap<EdgeId, Blend>,
     vinfo: &HashMap<usize, (Vec3, Vec3)>,
+    runouts: &HashMap<usize, Runout>,
     want: &HashMap<EdgeId, f32>,
     fi: usize,
     lp: &Loop,
@@ -387,21 +553,42 @@ fn rebuild_loop(
 ) -> Result<Loop, String> {
     let face_surface = solid.faces[fi].surface;
     let ef = solid.edge_faces();
-    let mut out = Vec::with_capacity(lp.edges.len());
+    // On the runout face the corner vertex splits in two: the edge it shares
+    // with face a ends at the extended face-a tangent, the one it shares with
+    // face b at the face-b tangent. `move_vertex` cannot choose between them
+    // — both tangents lie exactly in this face — so decide by adjacency.
+    let split_at = |v: usize, e: EdgeId| -> Option<Vec3> {
+        let ro = runouts.get(&v)?;
+        if ro.face != fi {
+            return None;
+        }
+        if ef[e].contains(&ro.fa) {
+            Some(ro.ta_p)
+        } else if ef[e].contains(&ro.fb) {
+            Some(ro.tb_p)
+        } else {
+            None
+        }
+    };
+
+    let mut items: Vec<Emitted> = Vec::with_capacity(lp.edges.len());
     for &(e, fwd) in &lp.edges {
+        let ed = solid.edges[e];
+        let end_v = if fwd { ed.v1 } else { ed.v0 };
         if want.contains_key(&e) {
             let bld = &bm[&e];
             let side_a = ef[e][0] == fi;
             let ce = if side_a { bld.ta } else { bld.tb };
             let (tp0, tp1) = if side_a { (bld.ta_p0, bld.ta_p1) } else { (bld.tb_p0, bld.tb_p1) };
             let (start, end) = if fwd { (tp0, tp1) } else { (tp1, tp0) };
-            out.push(emit_curv(b, start, end, ce));
+            items.push(Emitted { edge: emit_curv(b, start, end, ce), start, end_v, end });
         } else {
-            let ed = solid.edges[e];
             let pos0 = solid.verts[ed.v0].point;
             let pos1 = solid.verts[ed.v1].point;
-            let new0 = move_vertex(vinfo, ed.v0, pos0, face_surface);
-            let new1 = move_vertex(vinfo, ed.v1, pos1, face_surface);
+            let new0 = split_at(ed.v0, e)
+                .unwrap_or_else(|| move_vertex(vinfo, ed.v0, pos0, face_surface));
+            let new1 = split_at(ed.v1, e)
+                .unwrap_or_else(|| move_vertex(vinfo, ed.v1, pos1, face_surface));
             let (start, end) = if fwd { (new0, new1) } else { (new1, new0) };
             let vs = b.vertex(start);
             let ve = b.vertex(end);
@@ -418,7 +605,20 @@ fn rebuild_loop(
                     b.ellipse(vs, ve, center, ea, eb, t0, t1)
                 }
             };
-            out.push(eid);
+            items.push(Emitted { edge: eid, start, end_v, end });
+        }
+    }
+
+    // Splice the trim arc into the gap the split corner opened.
+    let n = items.len();
+    let mut out = Vec::with_capacity(n + 2);
+    for i in 0..n {
+        out.push(items[i].edge);
+        let next_start = items[(i + 1) % n].start;
+        if let Some(ro) = runouts.get(&items[i].end_v) {
+            if ro.face == fi && (next_start - items[i].end).length() > 1e-6 {
+                out.push(emit_curv(b, items[i].end, next_start, ro.arc));
+            }
         }
     }
     Ok(Loop::new(out))
@@ -450,18 +650,20 @@ fn dist_to_surface(p: Vec3, s: Surface) -> f32 {
 fn emit_curv(b: &mut Builder, start: Vec3, end: Vec3, ce: CurvEdge) -> (EdgeId, bool) {
     let vs = b.vertex(start);
     let ve = b.vertex(end);
+    // Walk the stored t0→t1 if it already maps start→end; else reverse.
+    let forward = || {
+        let at_start = ce.curve.point(ce.t0);
+        (at_start - start).length() < (ce.curve.point(ce.t1) - start).length()
+    };
     match ce.curve {
         Curve::Line { .. } => b.line(vs, ve),
-        Curve::Ellipse { .. } => unreachable!("blend construction emits only lines and circles"),
         Curve::Circle { center, axis, radius, ref_dir } => {
-            // Walk the stored t0→t1 if it already maps start→end; else reverse.
-            let at_start = ce.curve.point(ce.t0);
-            let forward = (at_start - start).length() < (ce.curve.point(ce.t1) - start).length();
-            if forward {
-                b.arc(vs, ve, center, axis, radius, ref_dir, ce.t0, ce.t1)
-            } else {
-                b.arc(vs, ve, center, axis, radius, ref_dir, ce.t1, ce.t0)
-            }
+            let (t0, t1) = if forward() { (ce.t0, ce.t1) } else { (ce.t1, ce.t0) };
+            b.arc(vs, ve, center, axis, radius, ref_dir, t0, t1)
+        }
+        Curve::Ellipse { center, a: ea, b: eb } => {
+            let (t0, t1) = if forward() { (ce.t0, ce.t1) } else { (ce.t1, ce.t0) };
+            b.ellipse(vs, ve, center, ea, eb, t0, t1)
         }
     }
 }
@@ -469,7 +671,7 @@ fn emit_curv(b: &mut Builder, start: Vec3, end: Vec3, ce: CurvEdge) -> (EdgeId, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::math::Vec3;
+    use crate::kernel::math::Vec3;
 
     fn approx(a: Vec3, b: Vec3) -> bool {
         (a - b).length() < 1e-4
