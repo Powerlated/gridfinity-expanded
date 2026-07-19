@@ -16,6 +16,7 @@ pub mod fillet;
 pub mod geom;
 pub mod math;
 pub mod mesh;
+pub mod program;
 pub mod rectregion;
 pub mod region2d;
 pub mod slab;
