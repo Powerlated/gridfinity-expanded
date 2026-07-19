@@ -167,6 +167,14 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   whenever their results must weld to each other. `split_regions` exposes the classified pieces with
   caller-supplied provenance tags, which is how the inner-wall planner names contact runs without
   ever comparing coordinates.
+  **Coincident boundary runs are classified explicitly**, not by the inside/outside point test: where
+  the two boundaries run together the midpoint lies exactly *on* the other boundary, where even–odd
+  is undefined. Those pieces go to `on_same`/`on_opposite` by relative traversal direction (A's copy
+  only, so a shared run is represented once), and each boolean states which it keeps — union and
+  intersection take `on_same`, difference takes `on_opposite`. Getting this wrong made `A − (A − N)`
+  return *empty* whenever the operands shared most of their boundary, which is exactly the shape of
+  a slab band interface, so a partial-height inner wall got no top cap and the solid was
+  non-manifold.
 - **`slab.rs`** — the **restricted boolean**: `build_slabs(&[(Op, Slab)])`, where a `Slab` is a 2D
   region swept over a z-range. z endpoints cut the stack into bands, each band's cross-section is
   the 2D boolean of the slabs covering it, and the solid is assembled band by band — walls per band

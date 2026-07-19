@@ -900,6 +900,43 @@ mod tests {
     /// Rounding has to happen after the cut, not before: rounding the wall
     /// first moves the intersection points off where the cavity's own split
     /// routines put them, and the notch mouth stops welding.
+    /// A partial-height wall must get a **top face**.
+    ///
+    /// The banded slab stack caps a band interface from the difference of the
+    /// cross-sections either side of it. Here those two are `outline − wall`
+    /// and `outline`, which share their whole boundary bar the wall's mouth —
+    /// the case where coincident boundary runs used to fall through
+    /// `region_difference`'s inside/outside test and return empty. The wall
+    /// then had open sides and no top, and the solid was non-manifold.
+    #[test]
+    fn partial_height_wall_gets_a_top_face() {
+        let p = gridfinity::Params {
+            bins: vec![LogicalBin { cells: cells(&[(1, 0)]), ..Default::default() }],
+            inner_walls: vec![gridfinity::InnerWall {
+                x1: 80.5, y1: 26.0, x2: 3.0, y2: 95.0, width: 5.6, height: Some(6.5),
+            }],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::try_build(&p).expect("partial wall builds");
+        solid.validate().expect("partial-height wall topology valid");
+        assert!(crate::audit(&solid).is_ok(), "B-rep must be sound:\n{}", crate::audit(&solid));
+        assert_watertight(&tessellate(&solid, 6).to_mesh());
+
+        // The cap itself: a horizontal face at floor + wall height.
+        let top_z = 8.2 + 6.5;
+        let caps = solid
+            .faces
+            .iter()
+            .filter(|f| match f.surface {
+                geom::Surface::Plane { origin, normal, .. } => {
+                    normal.x.abs() < 1e-4 && normal.y.abs() < 1e-4 && (origin.z - top_z).abs() < 1e-3
+                }
+                _ => false,
+            })
+            .count();
+        assert!(caps > 0, "the wall's top at z={top_z} must be capped");
+    }
+
     #[test]
     fn notching_divider_keeps_its_floor_fillet() {
         let p = gridfinity::Params {

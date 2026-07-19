@@ -30,11 +30,45 @@ const EPS: f32 = 1e-4;
 /// piece classified by whether it lies inside the *other* region. Cut points
 /// are computed once and shared verbatim by both sides, so the selected
 /// pieces chain into closed loops exactly.
+/// `*_outside` / `*_inside` hold only runs *strictly* off or inside the other
+/// region. Runs where the two boundaries **coincide** cannot be classified that
+/// way — their midpoints sit exactly on the other boundary, where the even–odd
+/// test is undefined — so they land in `on_same` / `on_opposite` instead,
+/// carrying A's copy only (B's duplicate is dropped, so a shared run is
+/// represented exactly once and the selected pieces still chain 1:1).
 pub struct RegionSplit<T> {
     pub a_outside: Vec<(Seg, T)>,
     pub a_inside: Vec<(Seg, T)>,
     pub b_outside: Vec<(Seg, T)>,
     pub b_inside: Vec<(Seg, T)>,
+    /// Shared boundary run with both regions' material on the same side.
+    /// Belongs to the union and the intersection, not the difference.
+    pub on_same: Vec<(Seg, T)>,
+    /// Shared boundary run traversed in opposite directions, so the regions
+    /// touch back-to-back. Belongs to the difference.
+    pub on_opposite: Vec<(Seg, T)>,
+}
+
+/// Unit tangent of `seg` at `p`, in traversal direction.
+fn seg_dir_at(seg: &Seg, p: Vec2) -> Vec2 {
+    match *seg {
+        Seg::Line { a, b } => (b - a).normalize_or_zero(),
+        Seg::Arc { center, a0, a1, .. } => {
+            let r = p - center;
+            let t = Vec2::new(-r.y, r.x).normalize_or_zero();
+            if a1 >= a0 { t } else { -t }
+        }
+    }
+}
+
+/// The seg of `loops` that `piece` runs along, if any.
+///
+/// Both boundaries are already split at every mutual crossing, so a transversal
+/// crossing lands on an endpoint and never on `piece`'s midpoint. A midpoint
+/// that is *on* the other boundary therefore means the two run together.
+fn coincident_with<'a>(loops: &'a [Vec<Seg>], piece: &Seg) -> Option<&'a Seg> {
+    let m = seg_mid(piece);
+    loops.iter().flatten().find(|s| on_seg(s, m))
 }
 
 /// Split two regions (outers CCW, holes CW) against each other. This is the
@@ -73,15 +107,24 @@ pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> Regio
         a_inside: Vec::new(),
         b_outside: Vec::new(),
         b_inside: Vec::new(),
+        on_same: Vec::new(),
+        on_opposite: Vec::new(),
     };
     for (li, lp) in a.iter().enumerate() {
         for (si, &(ref seg, tag)) in lp.iter().enumerate() {
             let mut cuts = std::mem::take(&mut a_cuts[li][si]);
             for piece in split_seg(seg, &mut cuts) {
-                if inside(&b_bare, seg_mid(&piece)) {
-                    out.a_inside.push((piece, tag));
-                } else {
-                    out.a_outside.push((piece, tag));
+                match coincident_with(&b_bare, &piece) {
+                    Some(other) => {
+                        let m = seg_mid(&piece);
+                        if seg_dir_at(&piece, m).dot(seg_dir_at(other, m)) >= 0.0 {
+                            out.on_same.push((piece, tag));
+                        } else {
+                            out.on_opposite.push((piece, tag));
+                        }
+                    }
+                    None if inside(&b_bare, seg_mid(&piece)) => out.a_inside.push((piece, tag)),
+                    None => out.a_outside.push((piece, tag)),
                 }
             }
         }
@@ -90,6 +133,10 @@ pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> Regio
         for (si, &(ref seg, tag)) in lp.iter().enumerate() {
             let mut cuts = std::mem::take(&mut b_cuts[li][si]);
             for piece in split_seg(seg, &mut cuts) {
+                // A's copy already stands for this run.
+                if coincident_with(&a_bare, &piece).is_some() {
+                    continue;
+                }
                 if inside(&a_bare, seg_mid(&piece)) {
                     out.b_inside.push((piece, tag));
                 } else {
@@ -164,27 +211,38 @@ fn untag(loops: Vec<Vec<(Seg, ())>>) -> Vec<Vec<Seg>> {
 /// other. Disjoint operands come back as separate loops and a contained
 /// operand simply vanishes — both fall out of the classification, no
 /// special-casing.
+/// A run the two share codirectionally bounds the union exactly once; one they
+/// share back-to-back is interior to it and drops out.
 pub fn region_union(a: &[Vec<Seg>], b: &[Vec<Seg>]) -> Vec<Vec<Seg>> {
     let s = split_regions(&tagged(a), &tagged(b));
     let mut kept = s.a_outside;
     kept.extend(s.b_outside);
+    kept.extend(s.on_same);
     untag(chain_loops(kept))
 }
 
 /// `A − B`: A's boundary outside B, plus B's boundary inside A traversed
 /// backwards (so a fully contained B becomes a hole).
+/// A codirectional shared run has B's material on the same side, so it is being
+/// removed and drops out; a back-to-back one bounds what survives and is kept.
+/// Getting this wrong is what used to make `A − (A − N)` come back empty
+/// whenever the two shared most of their boundary.
 pub fn region_difference(a: &[Vec<Seg>], b: &[Vec<Seg>]) -> Vec<Vec<Seg>> {
     let s = split_regions(&tagged(a), &tagged(b));
     let mut kept = s.a_outside;
     kept.extend(s.b_inside.iter().map(|&(p, t)| (p.reversed(), t)));
+    kept.extend(s.on_opposite);
     untag(chain_loops(kept))
 }
 
 /// `A ∩ B`: the parts of each boundary lying inside the other.
+/// As with the union, a codirectional shared run bounds the result once; a
+/// back-to-back one has the two regions on opposite sides and meets in nothing.
 pub fn region_intersection(a: &[Vec<Seg>], b: &[Vec<Seg>]) -> Vec<Vec<Seg>> {
     let s = split_regions(&tagged(a), &tagged(b));
     let mut kept = s.a_inside;
     kept.extend(s.b_inside);
+    kept.extend(s.on_same);
     untag(chain_loops(kept))
 }
 
@@ -400,6 +458,36 @@ mod tests {
         let lhs = area(a) + area(b);
         let rhs = area(&region_union(a, b)) + area(&region_intersection(a, b));
         assert!((lhs - rhs).abs() < 1e-2, "area not conserved: {lhs} vs {rhs}");
+    }
+
+    /// `A − (A − N)` must give back `A ∩ N`.
+    ///
+    /// This is how [`slab`](crate::kernel::slab) builds the cap at a band
+    /// interface: the band below is `outline − notch`, the band above is
+    /// `outline`, and the cap is their difference. The two operands then share
+    /// their entire boundary bar the notch mouth, which is the case that used
+    /// to come back empty — leaving a partial-height inner wall with no top
+    /// face and the solid non-manifold.
+    #[test]
+    fn difference_against_a_subset_sharing_most_of_its_boundary() {
+        let outline = vec![rect(0.0, 0.0, 100.0, 100.0)];
+        // Bites into the top edge rather than crossing, so `below` stays one loop.
+        let notch = vec![rect(40.0, 80.0, 60.0, 120.0)];
+        let below = region_difference(&outline, &notch);
+        assert!((area(&below) - 9600.0).abs() < 1e-2, "notched area {}", area(&below));
+
+        let cap = region_difference(&outline, &below);
+        assert!(
+            (area(&cap) - 400.0).abs() < 1e-2,
+            "cap should be the 20x20 bite, got area {} from {} loop(s)",
+            area(&cap),
+            cap.len()
+        );
+        // And the other orientation must be empty: `below` is a subset.
+        assert!(
+            area(&region_difference(&below, &outline)).abs() < 1e-2,
+            "subset minus superset must be empty"
+        );
     }
 
     #[test]

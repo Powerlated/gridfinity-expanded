@@ -422,11 +422,11 @@ fn env_u64(key: &str, default: u64) -> u64 {
 /// Pinned to the free-form inner-wall space, which is where the floating /
 /// notching / crossing divider fillet work lives.
 ///
-/// **Baseline at the default seed: 52/150 cases fail, 6 distinct defects.**
-/// (Was 89/150 and 10 before `blend_best_effort`, which converted every
-/// "blender refused the chain" class into a partial fillet.) What is left is
-/// one non-manifold-input class, tessellation leaks, and an audit failure —
-/// real defects, not blender limitations.
+/// **Baseline at the default seed: 36/150 cases fail, 6 distinct defects.**
+/// Was 89/150 and 10 before `blend_best_effort` (which converted every "blender
+/// refused the chain" class into a partial fillet), then 52 before
+/// `region_difference` learned to classify coincident boundary runs (which
+/// restored the missing cap on a partial-height wall's top).
 ///
 /// Asserts clean but is `#[ignore]`d until those are dealt with; promote it to
 /// a gate by dropping the attribute once the report comes back empty.
