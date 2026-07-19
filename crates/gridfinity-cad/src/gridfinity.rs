@@ -33,7 +33,7 @@ use crate::layout::{
 };
 use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
-use crate::kernel::build::{seg_edge, wall_seg};
+use crate::kernel::build::seg_edge;
 use crate::kernel::segdiff::{chain_loops, split_region_by_quad, subtract_convex_quad};
 use crate::kernel::slab::{Op, Slab, SlabOpts, emit_slabs};
 use crate::kernel::sketch::{Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop};
@@ -892,11 +892,12 @@ struct Island {
 /// One boundary-contact partial-height inner wall's pieces on a cavity loop.
 #[derive(Clone, Debug)]
 struct Notch {
+    /// The wall's own footprint quad — the slab that gets differenced out of
+    /// the cavity void between the floor and `top`.
+    quad: Vec<Seg>,
     /// Region boundary pieces inside the quad — the taller face is absent
     /// below the wall top there (span top → total_h).
     contact: Vec<Seg>,
-    /// Chained CCW cap loops at `top` (sides forward + contact forward).
-    caps: Vec<Vec<Seg>>,
     top: f32,
 }
 
@@ -1364,12 +1365,6 @@ fn build_piece(
                 if sa.quad_inside.is_empty() || sa.inside.is_empty() {
                     continue 'walls;
                 }
-                let caps = chain_loops(
-                    sa.quad_inside.iter().chain(sa.inside.iter()).copied().collect(),
-                )
-                .into_iter()
-                .map(|lp| lp.into_iter().map(|(s, _)| s).collect())
-                .collect();
                 let mut kept = sa.outside.clone();
                 kept.extend(sa.quad_inside.iter().map(|&(s, t)| (s.reversed(), t)));
                 bd.outline_a = chain_loops(kept);
@@ -1386,8 +1381,8 @@ fn build_piece(
                     .map(|(s, _)| s)
                     .collect();
                 bd.notches.push(Notch {
+                    quad: q.clone(),
                     contact: sa.inside.into_iter().map(|(s, _)| s).collect(),
-                    caps,
                     top: *t,
                 });
                 continue 'walls;
@@ -1507,13 +1502,16 @@ fn build_piece(
     for (cl, island_shapes, loop_fr, banded) in planned {
         if !cl.touched() {
             if let Some(bd) = banded {
-                let (bw, tops) = build_cavity_banded(b, &bd, &island_shapes, floor_z, total_h);
+                let (bw, tops, rim) =
+                    build_cavity_banded(b, &bd, &island_shapes, floor_z, total_h);
                 island_tops.extend(tops);
                 blends.extend(bw);
-                // Rim hole from the re-split outline so its edges pair with
-                // the contact walls' top edges.
-                let top_ring = ring(b, &bd.outline_b, total_h);
-                rim_holes.push((bd.outline_b.clone(), loop_of(&top_ring, true)));
+                // Rim hole from the stack's own top band, so its edges pair
+                // with the wall tops the stack just emitted.
+                for lp in rim {
+                    let top_ring = ring(b, &lp, total_h);
+                    rim_holes.push((lp, loop_of(&top_ring, true)));
+                }
                 continue;
             }
             match slope {
@@ -1783,114 +1781,48 @@ fn build_cavity_flat(
 /// edges at corners where spans differ are split at every breakpoint so the
 /// shared edges pair 1:1. No floor-wall fillet edges are returned (banded
 /// loops always build sharp).
+/// Z-banded cavity for a loop notched by partial-height inner walls.
+///
+/// One slab stack: the compartment void, minus each wall's footprint quad up
+/// to that wall's top, minus each island tower over its own height. The band
+/// machinery does the rest — a wall that reaches the loop boundary, one fully
+/// inside it, and one crossing it are all just differences, and each gets its
+/// top capped where its slab ends.
+///
+/// Returns the ramp blends, the full-height island tops, and the top band's
+/// cross-section (the rim opening, which the caller closes).
 fn build_cavity_banded(
     b: &mut Builder,
     bd: &Banded,
     islands: &[Island],
     floor_z: f32,
     total_h: f32,
-) -> (Vec<(EdgeId, f32)>, Vec<(Vec<Seg>, RingEdges)>) {
-    let key = |p: Vec2| ((p.x * 1024.0).round() as i64, (p.y * 1024.0).round() as i64);
-
-    // The wall top runs out into the taller face with a rolling-ball blend of
-    // radius min(TRANSITION_R, headroom). It is NOT built here: the prism is
-    // built sharp and the cap↔contact edges are handed to `blend_edges`,
-    // which trims the blend against the wall's side planes itself (the exact
-    // cylinder/plane runout ellipse).
+) -> (Vec<(EdgeId, f32)>, Vec<(Vec<Seg>, RingEdges)>, Vec<Vec<Seg>>) {
     const TRANSITION_R: f32 = 4.0;
 
-    // 1) Wall spans per segment. Sides run floor → wall top, contacts run
-    //    wall top → rim; the blend eats into both afterwards.
-    enum Kind {
-        Plain { za: f32, zb: f32 },
-        Side { top: f32 }, // notch side: floor → wall top
-    }
-    let mut faces: Vec<(Seg, Kind)> = Vec::new();
-    for lp in &bd.outline_a {
-        for &(s, tag) in lp {
-            match tag {
-                Some(ni) => faces.push((s, Kind::Side { top: bd.notches[ni].top })),
-                Option::None => faces.push((s, Kind::Plain { za: floor_z, zb: total_h })),
-            }
-        }
-    }
+    let mut ops = vec![(Op::Union, Slab::new(vec![bd.outline_b.clone()], floor_z, total_h))];
     for n in &bd.notches {
-        for s in &n.contact {
-            faces.push((*s, Kind::Plain { za: n.top, zb: total_h }));
-        }
+        ops.push((Op::Difference, Slab::new(vec![n.quad.clone()], floor_z, n.top)));
     }
-    let span = |kind: &Kind| -> (f32, f32) {
-        match kind {
-            Kind::Plain { za, zb } => (*za, *zb),
-            Kind::Side { top } => (floor_z, *top),
-        }
-    };
-    let mut breaks: HashMap<(i64, i64), Vec<f32>> = HashMap::new();
-    for (s, kind) in &faces {
-        let (za, zb) = span(kind);
-        for at_start in [true, false] {
-            let pt = if at_start { s.start() } else { s.end() };
-            let e = breaks.entry(key(pt)).or_default();
-            e.push(za);
-            e.push(zb);
-        }
-    }
-    let get_breaks = |breaks: &HashMap<(i64, i64), Vec<f32>>, p: Vec2| -> Vec<f32> {
-        breaks.get(&key(p)).cloned().unwrap_or_default()
-    };
-
-    // Every face is a plain span now — the blend is the kernel's job.
-    for (s, kind) in &faces {
-        let (za, zb) = span(kind);
-        let bl = get_breaks(&breaks, s.start());
-        let br = get_breaks(&breaks, s.end());
-        wall_seg(b, s, za, zb, &bl, &br, false);
-    }
-
-    // 2) Island towers + floor caps per notched outer.
-    let mut tops: Vec<(Vec<Seg>, RingEdges)> = Vec::new();
-    let mut floor_holes: Vec<Vec<Loop>> = vec![Vec::new(); bd.outline_a.len()];
     for isl in islands {
-        let t = isl.top.unwrap_or(total_h);
-        let i_lo = ring(b, &isl.segs, floor_z);
-        let i_hi = ring(b, &isl.segs, t);
-        wall_between(b, &isl.segs, &isl.segs, &i_lo, &i_hi, floor_z, t, true);
-        if isl.top.is_some() {
-            planar(b, t, true, loop_of(&i_hi, true), Vec::new());
-        } else {
-            tops.push((isl.segs.clone(), i_hi));
-        }
-        let pt = isl.segs[0].start();
-        let owner = bd
-            .outline_a
-            .iter()
-            .position(|lp| {
-                let bare: Vec<Seg> = lp.iter().map(|&(s, _)| s).collect();
-                point_in_segs(pt, &bare)
-            })
-            .unwrap_or(0);
-        floor_holes[owner].push(loop_of(&i_lo, false));
+        ops.push((
+            Op::Difference,
+            Slab::new(vec![isl.segs.clone()], floor_z, isl.top.unwrap_or(total_h)),
+        ));
     }
-    for (li, lp) in bd.outline_a.iter().enumerate() {
-        let bare: Vec<Seg> = lp.iter().map(|&(s, _)| s).collect();
-        let r_lo = ring(b, &bare, floor_z);
-        planar(b, floor_z, true, loop_of(&r_lo, false), std::mem::take(&mut floor_holes[li]));
-    }
+    let bands = emit_slabs(b, &ops, &SlabOpts { cavity: true, open_at: vec![total_h] })
+        .expect("banded cavity slab stack");
 
-    // 3) Wall-top caps (reversed traversal, opposing the side walls' top
-    //    edges and the contact walls' bottom edges — same pattern as the
-    //    floor cap).
-    for n in &bd.notches {
-        for cap_lp in &n.caps {
-            let r = ring(b, cap_lp, n.top);
-            planar(b, n.top, true, loop_of(&r, false), Vec::new());
+    let mut tops: Vec<(Vec<Seg>, RingEdges)> = Vec::new();
+    for isl in islands {
+        if isl.top.is_none() {
+            tops.push((isl.segs.clone(), ring(b, &reverse_loop(&isl.segs), total_h)));
         }
     }
 
-    // 4) Hand the cap↔contact edges to the kernel to blend. `seg_edge` is
-    //    interned, so this re-derives the very edges the cap and the contact
-    //    wall already share — no float matching. `blend_edges` runs each
-    //    chain out against the wall's side planes on its own.
+    // The wall top runs out into the taller face with a rolling-ball blend.
+    // The contact runs are the planner's, so the edges are named by
+    // provenance rather than matched by coordinate.
     let mut blends: Vec<(EdgeId, f32)> = Vec::new();
     for n in &bd.notches {
         let r = (total_h - n.top).min(TRANSITION_R);
@@ -1901,7 +1833,8 @@ fn build_cavity_banded(
             blends.push((seg_edge(b, s, n.top).0, r));
         }
     }
-    (blends, tops)
+
+    (blends, tops, bands.last().cloned().unwrap_or_default())
 }
 
 /// Sloped cavity: single tilted plane floor over the bin's bounding box, sharp

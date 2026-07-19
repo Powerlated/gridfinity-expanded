@@ -151,8 +151,13 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   the surface normal, never the loop direction, so a cavity's walls traverse exactly like a solid's
   — `slab::emit_cap` therefore keeps solid-mode winding and flips only `Builder::face`'s `sense`.
   Using `build::cap` there instead would flip winding too and break the wall/cap pairing.
-  `build_cavity_flat` is the first model consumer: the compartment void minus one slab per island
-  tower, which gets partial-height islands capped by the band machinery for free.
+  Both cavity builders are stacks now. `build_cavity_flat` is the compartment void minus one slab
+  per island tower; `build_cavity_banded` is the same plus one slab per partial-height inner wall
+  (floor → that wall's top). A wall reaching the loop boundary, one fully inside it and one
+  crossing it are all just differences — the band machinery caps each where its slab ends, so none
+  of them needs its own code. The stack's returned top band **is** the rim opening, which the
+  caller closes. Only the ramp blend still needs the planner: the contact runs name those edges by
+  provenance rather than by coordinate.
 - **`rectregion.rs`** — rectilinear region engine: unions/differences of axis-aligned rects
   resolved on a compressed coordinate grid, traced material-on-the-left (outer CCW, holes CW), then
   per-corner arc rounding with clamping (`trace_rects`, `shape_loop`). The cavity planner and
