@@ -452,10 +452,22 @@ fn env_u64(key: &str, default: u64) -> u64 {
 /// genuinely-distinct near vertices makes the tessellation leak. Loosening the
 /// weld is treating the symptom.
 ///
-/// The fix belongs at the source: the flat and banded paths must *share* their
-/// cut points rather than each solving for them, which is what
-/// `presplit_regions` exists for. Today `plan_piece` presplits within a path but
-/// not across the two.
+/// The fix belongs at the source: whichever two routes derive that point must
+/// *share* the solve rather than each doing it, which is what
+/// `presplit_regions` exists for. **Which** two routes is still open.
+///
+/// Ruled out so far — presplitting `outline_b` against the notch quad in
+/// `plan_piece` before handing them to the slab stack (the obvious candidate,
+/// since `plan_bands` presplits the stack itself and so appears to solve the
+/// same crossings a second time). Tried; the fuzzer did not move off 36 and the
+/// x18 class was unchanged, so the stack is not where the duplicate comes from.
+/// Reverted rather than kept as a plausible-looking no-op.
+///
+/// Next place to look: the two faces that fail to pair are the cavity-boundary
+/// wall (axis-aligned, exact coordinate) and the inner-wall face (angled,
+/// solved). Find which producer emits each and work back from there — an
+/// axis-aligned boundary coordinate arriving exact on one side and solved on
+/// the other is the signature.
 #[test]
 #[ignore = "known-failing: 6 open defects at the default seed"]
 fn fuzz_inner_walls() {
