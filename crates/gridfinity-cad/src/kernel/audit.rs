@@ -315,7 +315,7 @@ fn audit_manifold(solid: &Solid, defects: &mut Vec<Defect>) {
                 category: Category::Manifold,
                 message: format!(
                     "edge used fwd={} bwd={} (want 1/1); faces {:?}",
-                    fwd[e], bwd[e], edge_faces[e]
+                    fwd[e], bwd[e], &edge_faces[e]
                 ),
                 location: Some(Location::Edge(e)),
             });

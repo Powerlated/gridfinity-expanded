@@ -700,7 +700,7 @@ fn rebuild_loop(
     want: &HashMap<EdgeId, f32>,
     fi: usize,
     lp: &[(EdgeId, bool)],
-    ef: &[Vec<usize>],
+    ef: &crate::kernel::topo::EdgeFaces,
     b: &mut Builder,
 ) -> Result<Loop, String> {
     let face_surface = solid.faces[fi].surface;

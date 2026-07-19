@@ -372,7 +372,7 @@ fn rebuild_loop(
     want: &HashMap<EdgeId, (f32, f32)>,
     fi: usize,
     lp: &[(EdgeId, bool)],
-    ef: &[Vec<usize>],
+    ef: &crate::kernel::topo::EdgeFaces,
     b: &mut Builder,
 ) -> Result<Loop, String> {
     let mut out: Vec<(EdgeId, bool)> = Vec::with_capacity(lp.len());
@@ -429,7 +429,7 @@ fn moved_vertex(
     v: usize,
     fallback: Vec3,
     fi: usize,
-    ef: &[Vec<usize>],
+    ef: &crate::kernel::topo::EdgeFaces,
 ) -> Vec3 {
     let Some(&(pa, pb)) = vinfo.get(&v) else {
         return fallback;

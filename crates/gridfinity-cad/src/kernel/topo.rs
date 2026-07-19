@@ -202,18 +202,64 @@ impl Solid {
     }
 
     /// Faces on each side of every edge, `[EdgeId] -> up to two FaceIds`.
-    pub fn edge_faces(&self) -> Vec<Vec<usize>> {
-        let mut map = vec![Vec::new(); self.edges.len()];
+    ///
+    /// Returned as a flat CSR ([`EdgeFaces`]) rather than `Vec<Vec<usize>>`: a
+    /// solid with E edges used to cost E tiny `Vec` allocations here, and
+    /// `blend_edges`/`chamfer` call this repeatedly — the single biggest churn
+    /// source after the earcut floor. Now it is five flat `Vec`s regardless of E.
+    /// Indexing (`ef[e]`) yields the face-id slice, so callers are unchanged.
+    pub fn edge_faces(&self) -> EdgeFaces {
+        let ne = self.edges.len();
+        // Pass 1: count distinct faces per edge. Faces are visited in ascending
+        // id order, so an edge's uses within one face are contiguous — dedup by
+        // "last face seen" reproduces the old `contains` check exactly.
+        let mut counts = vec![0u32; ne];
+        let mut last = vec![usize::MAX; ne];
         for fi in 0..self.faces.len() {
             for lp in self.face_loops(fi) {
                 for &(e, _) in lp {
-                    if !map[e].contains(&fi) {
-                        map[e].push(fi);
+                    if last[e] != fi {
+                        last[e] = fi;
+                        counts[e] += 1;
                     }
                 }
             }
         }
-        map
+        let mut off = vec![0u32; ne + 1];
+        for e in 0..ne {
+            off[e + 1] = off[e] + counts[e];
+        }
+        // Pass 2: scatter face ids into the flat array at each edge's cursor.
+        let mut flat = vec![0usize; off[ne] as usize];
+        let mut cursor: Vec<u32> = off[..ne].to_vec();
+        last.iter_mut().for_each(|x| *x = usize::MAX);
+        for fi in 0..self.faces.len() {
+            for lp in self.face_loops(fi) {
+                for &(e, _) in lp {
+                    if last[e] != fi {
+                        last[e] = fi;
+                        flat[cursor[e] as usize] = fi;
+                        cursor[e] += 1;
+                    }
+                }
+            }
+        }
+        EdgeFaces { off, flat }
+    }
+}
+
+/// Flat CSR of the faces touching each edge (see [`Solid::edge_faces`]).
+/// `ef[e]` is the slice of face ids for edge `e`.
+#[derive(Clone, Debug)]
+pub struct EdgeFaces {
+    off: Vec<u32>,
+    flat: Vec<usize>,
+}
+
+impl std::ops::Index<usize> for EdgeFaces {
+    type Output = [usize];
+    fn index(&self, e: usize) -> &[usize] {
+        &self.flat[self.off[e] as usize..self.off[e + 1] as usize]
     }
 }
 
