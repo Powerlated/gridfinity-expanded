@@ -346,6 +346,21 @@ impl Debugger {
                             RichText::new(format!("{}", Count(r.calls))).small().monospace(),
                         ),
                     );
+                    // Allocations are charged to the innermost scope (exclusive),
+                    // so unlike the time column these do sum meaningfully.
+                    ui.add_sized(
+                        [56.0, 14.0],
+                        egui::Label::new(
+                            RichText::new(if r.alloc_bytes > 0 {
+                                format!("{}", Bytes(r.alloc_bytes))
+                            } else {
+                                "—".into()
+                            })
+                            .small()
+                            .monospace()
+                            .color(Color32::from_rgb(0xc8, 0x9b, 0x6a)),
+                        ),
+                    );
                     let (rect, _) = ui.allocate_exact_size([40.0, 6.0].into(), Sense::hover());
                     ui.painter().rect_filled(rect, 1.0, Color32::from_gray(0x33));
                     let mut fill = rect;

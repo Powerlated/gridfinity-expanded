@@ -17,6 +17,16 @@ pub use kernel::mesh::Mesh;
 pub use kernel::tess::{Tessellation, tessellate};
 pub use kernel::topo::Solid;
 
+// Install the allocation counter in the unit-test binary so `perf_report` can
+// read the churn scorecard headlessly. The GUI binary installs its own; a
+// library must not choose the allocator for its dependents, so this is
+// `cfg(test)` only. It is off unless `perf::set_enabled(true)`, so ordinary
+// tests pay only a relaxed load per allocation.
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOC: kernel::perf::CountingAlloc<std::alloc::System> =
+    kernel::perf::CountingAlloc::new(std::alloc::System);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -953,8 +963,12 @@ mod tests {
             ],
             ..gridfinity::Params::default()
         };
-        perf::reset();
+        // Measure the *second* rebuild: warm any process-level state on the
+        // first, then reset and report the repeat — the number a slider drag
+        // actually pays.
         perf::set_enabled(true);
+        let _ = tessellate(&gridfinity::build(&p), 6);
+        perf::reset();
         let t = std::time::Instant::now();
         let solid = gridfinity::build(&p);
         let tess = tessellate(&solid, 6);
@@ -962,16 +976,30 @@ mod tests {
         perf::set_enabled(false);
 
         println!("
-rebuild {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().indices.len() / 3);
-        println!("{:<34} {:>10} {:>12}", "metric", "time", "calls");
+rebuild #2 {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().indices.len() / 3);
+        println!("{:<34} {:>10} {:>10} {:>12} {:>10}", "metric", "time", "calls", "churn B", "allocs");
         for r in perf::snapshot() {
-            println!("{:<34} {:>10} {:>12}", r.name, format!("{:?}", std::time::Duration::from_nanos(r.nanos)), r.calls);
+            println!(
+                "{:<34} {:>10} {:>10} {:>12} {:>10}",
+                r.name,
+                format!("{:?}", std::time::Duration::from_nanos(r.nanos)),
+                r.calls,
+                r.alloc_bytes,
+                r.alloc_calls,
+            );
         }
         let a = perf::allocs();
         if a.count == 0 {
-            println!("(allocations unmeasured: `CountingAlloc` is installed by the GUI binary, not the test harness)");
+            println!("(allocations unmeasured: no CountingAlloc global_allocator in this binary)");
         } else {
-            println!("allocs {} · churn {} kB · peak {} kB", a.count, a.bytes / 1000, a.peak_live_bytes / 1000);
+            let attributed: u64 = perf::snapshot().iter().map(|r| r.alloc_bytes).sum();
+            println!(
+                "total allocs {} · churn {} kB · peak {} kB · unattributed churn {} kB",
+                a.count,
+                a.bytes / 1000,
+                a.peak_live_bytes / 1000,
+                a.bytes.saturating_sub(attributed) / 1000,
+            );
         }
     }
 

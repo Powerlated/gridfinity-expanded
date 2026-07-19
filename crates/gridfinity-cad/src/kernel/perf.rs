@@ -17,6 +17,7 @@
 //! the wall-clock readings would need revisiting.
 
 use std::alloc::{GlobalAlloc, Layout};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
 
@@ -92,6 +93,69 @@ const ZERO: AtomicU64 = AtomicU64::new(0);
 static CALLS: [AtomicU64; N] = [ZERO; N];
 static NANOS: [AtomicU64; N] = [ZERO; N];
 
+/// Allocations credited to each metric, **exclusive**: an allocation is charged
+/// to the innermost open [`scope`] at the moment it happens, so — unlike
+/// [`NANOS`], which nest — these columns partition the attributed allocations
+/// rather than double-counting them. Allocations made outside every scope
+/// (most construction, e.g. the transient `Loop` Vecs) land in neither array;
+/// the shortfall against the global [`ALLOCS`]/[`ALLOC_BYTES`] total is exactly
+/// that unattributed churn, which is what the SoA rework is meant to remove.
+static ALLOC_CALLS_BY: [AtomicU64; N] = [ZERO; N];
+static ALLOC_BYTES_BY: [AtomicU64; N] = [ZERO; N];
+
+/// Fixed-depth stack of the currently-open metric scopes, innermost last, one
+/// per thread. **Deliberately allocation-free** (a plain `Copy` array in a
+/// `Cell`, never a `Vec`): it is read and written from inside the global
+/// allocator, so pushing a scope must not itself allocate or the allocator
+/// re-enters. Overflow past `STACK_MAX` silently stops nesting deeper — an
+/// attribution gap, never a crash.
+const STACK_MAX: usize = 32;
+
+#[derive(Clone, Copy)]
+struct ScopeStack {
+    len: usize,
+    items: [u8; STACK_MAX],
+}
+
+impl ScopeStack {
+    const fn new() -> ScopeStack {
+        ScopeStack { len: 0, items: [0; STACK_MAX] }
+    }
+}
+
+thread_local! {
+    static SCOPES: Cell<ScopeStack> = const { Cell::new(ScopeStack::new()) };
+}
+
+fn push_scope(m: Metric) {
+    SCOPES.with(|s| {
+        let mut st = s.get();
+        if st.len < STACK_MAX {
+            st.items[st.len] = m as u8;
+            st.len += 1;
+            s.set(st);
+        }
+    });
+}
+
+fn pop_scope() {
+    SCOPES.with(|s| {
+        let mut st = s.get();
+        if st.len > 0 {
+            st.len -= 1;
+            s.set(st);
+        }
+    });
+}
+
+/// Index of the innermost open scope, if any.
+fn innermost_scope() -> Option<usize> {
+    SCOPES.with(|s| {
+        let st = s.get();
+        (st.len > 0).then(|| st.items[st.len - 1] as usize)
+    })
+}
+
 /// Allocations and bytes since the last [`reset`], filled in by
 /// [`CountingAlloc`]. Separate from the metric table because allocation is a
 /// property of the whole rebuild, not of one operation.
@@ -113,6 +177,8 @@ pub fn reset() {
     for i in 0..N {
         CALLS[i].store(0, Relaxed);
         NANOS[i].store(0, Relaxed);
+        ALLOC_CALLS_BY[i].store(0, Relaxed);
+        ALLOC_BYTES_BY[i].store(0, Relaxed);
     }
     ALLOCS.store(0, Relaxed);
     ALLOC_BYTES.store(0, Relaxed);
@@ -139,7 +205,12 @@ pub fn count(m: Metric) {
 /// anywhere under this operation".
 #[inline]
 pub fn scope(m: Metric) -> Scope {
-    Scope { m, start: if enabled() { Some(Instant::now()) } else { None } }
+    if enabled() {
+        push_scope(m);
+        Scope { m, start: Some(Instant::now()) }
+    } else {
+        Scope { m, start: None }
+    }
 }
 
 pub struct Scope {
@@ -150,6 +221,9 @@ pub struct Scope {
 impl Drop for Scope {
     fn drop(&mut self) {
         if let Some(t) = self.start {
+            // Pop before recording so a re-entrant allocation here is not
+            // mis-credited to a scope that is already closing.
+            pop_scope();
             CALLS[self.m as usize].fetch_add(1, Relaxed);
             NANOS[self.m as usize].fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
         }
@@ -157,10 +231,15 @@ impl Drop for Scope {
 }
 
 /// One metric's totals since the last [`reset`].
+///
+/// `nanos` nest (time spent anywhere under the op); `alloc_calls`/`alloc_bytes`
+/// are exclusive (charged to the innermost open scope) — see [`ALLOC_CALLS_BY`].
 pub struct Row {
     pub name: &'static str,
     pub calls: u64,
     pub nanos: u64,
+    pub alloc_calls: u64,
+    pub alloc_bytes: u64,
 }
 
 /// Allocation totals since the last [`reset`].
@@ -179,6 +258,8 @@ pub fn snapshot() -> Vec<Row> {
             name: m.name(),
             calls: CALLS[m as usize].load(Relaxed),
             nanos: NANOS[m as usize].load(Relaxed),
+            alloc_calls: ALLOC_CALLS_BY[m as usize].load(Relaxed),
+            alloc_bytes: ALLOC_BYTES_BY[m as usize].load(Relaxed),
         })
         .filter(|r| r.calls > 0)
         .collect();
@@ -220,17 +301,30 @@ impl<A> CountingAlloc<A> {
 unsafe impl<A: GlobalAlloc> GlobalAlloc for CountingAlloc<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if enabled() {
+            let size = layout.size() as u64;
             ALLOCS.fetch_add(1, Relaxed);
-            ALLOC_BYTES.fetch_add(layout.size() as u64, Relaxed);
-            let live = LIVE.fetch_add(layout.size() as u64, Relaxed) + layout.size() as u64;
+            ALLOC_BYTES.fetch_add(size, Relaxed);
+            // `saturating_add`: geometry is single-threaded in production, but the
+            // test harness installs this allocator and runs tests in parallel, so
+            // the live/peak counters can race. Saturating keeps it panic-free and
+            // bounded (peak is then approximate under concurrency); the churn
+            // totals above use fetch_add and stay exact regardless of ordering.
+            let live = LIVE.fetch_add(size, Relaxed).saturating_add(size);
             PEAK_LIVE.fetch_max(live, Relaxed);
+            if let Some(mi) = innermost_scope() {
+                ALLOC_CALLS_BY[mi].fetch_add(1, Relaxed);
+                ALLOC_BYTES_BY[mi].fetch_add(size, Relaxed);
+            }
         }
         unsafe { self.inner.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if enabled() {
-            LIVE.fetch_sub((layout.size() as u64).min(LIVE.load(Relaxed)), Relaxed);
+            // CAS loop so a concurrent dealloc can't drive LIVE below zero and
+            // wrap to a huge value (which would then overflow the add above).
+            let size = layout.size() as u64;
+            let _ = LIVE.fetch_update(Relaxed, Relaxed, |v| Some(v.saturating_sub(size)));
         }
         unsafe { self.inner.dealloc(ptr, layout) }
     }
@@ -284,5 +378,36 @@ mod tests {
             rows.windows(2).all(|w| w[0].nanos >= w[1].nanos),
             "snapshot must be sorted heaviest first"
         );
+    }
+
+    /// An allocation made inside a scope is charged to that scope; the
+    /// attribution is exclusive, so a deeper nested scope keeps its own bytes.
+    #[test]
+    fn allocations_are_charged_to_the_innermost_scope() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_enabled(true);
+        reset();
+        {
+            let _outer = scope(Metric::SplitRegions);
+            // Attributed to SplitRegions.
+            let a: Vec<u8> = Vec::with_capacity(4096);
+            std::hint::black_box(&a);
+            {
+                let _inner = scope(Metric::SegSegPoints);
+                // Attributed to SegSegPoints, not SplitRegions.
+                let b: Vec<u8> = Vec::with_capacity(8192);
+                std::hint::black_box(&b);
+            }
+        }
+        let rows = snapshot();
+        set_enabled(false);
+
+        let outer = rows.iter().find(|r| r.name == Metric::SplitRegions.name()).expect("charged");
+        let inner = rows.iter().find(|r| r.name == Metric::SegSegPoints.name()).expect("charged");
+        // The stack is global; parallel tests may add to these, so assert our
+        // own contribution is present rather than an exact byte count.
+        assert!(outer.alloc_bytes >= 4096, "outer got {} B", outer.alloc_bytes);
+        assert!(inner.alloc_bytes >= 8192, "inner got {} B", inner.alloc_bytes);
+        assert!(outer.alloc_calls >= 1 && inner.alloc_calls >= 1);
     }
 }
