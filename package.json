@@ -9,7 +9,8 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "classify:changes": "node scripts/classify-changes.mjs",
-    "check:manifold": "esbuild scripts/check-manifold.ts --bundle --platform=node --format=esm --external:manifold-3d --outfile=node_modules/.cache/check-manifold.mjs --log-level=error && node node_modules/.cache/check-manifold.mjs",
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "check:manifold": "npm run build:wasm && esbuild scripts/check-manifold.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/check-manifold.mjs --log-level=error && node node_modules/.cache/check-manifold.mjs",
     "test": "vitest run",
     "test:e2e": "playwright test"
   },
@@ -17,7 +18,6 @@
     "@babylonjs/core": "^9.14.0",
     "@mantine/core": "^9.4.1",
     "@mantine/hooks": "^9.4.1",
-    "manifold-3d": "^3.5.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "zustand": "^5.0.14"

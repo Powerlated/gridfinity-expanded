@@ -1,8 +1,9 @@
 /** Production-path manifold and serialized-STL printability gate. */
 import { buildBinParameters } from '../src/lib/binParameters';
 import { trianglesToStl } from '../src/lib/export/stl';
-import { generateGeometry } from '../src/lib/geometry/gridfinity';
-import { initManifold } from '../src/lib/geometry/manifold';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { generateGeometry, initKernel } from '../src/lib/geometry/kernel';
 import { previewLayout } from '../src/lib/preview';
 import { cutsForPrinter } from '../src/lib/printers';
 import {
@@ -328,7 +329,12 @@ const cases: {
   ], { printer: smallPrinter }), expectedParts: 4 },
 ];
 
-const wasm = await initManifold();
+// Node has no bundler asset URL, so hand the kernel its bytes directly. The
+// path is resolved from the working directory rather than `import.meta.url`
+// because this script runs bundled out of `node_modules/.cache/`.
+const wasm = await initKernel(
+  readFileSync(resolve(process.cwd(), 'src/wasm/gridfinity_wasm_bg.wasm')),
+);
 let failed = false;
 for (const fixture of cases) {
   try {

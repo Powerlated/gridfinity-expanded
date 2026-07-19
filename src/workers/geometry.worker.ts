@@ -1,16 +1,16 @@
 /// <reference lib="webworker" />
-import wasmUrl from 'manifold-3d/manifold.wasm?url';
-import { generateGeometry } from '../lib/geometry/gridfinity';
-import { initManifold } from '../lib/geometry/manifold';
+// Vite resolves this to the hashed, base-path-aware asset URL for the binary.
+import wasmUrl from '../wasm/gridfinity_wasm_bg.wasm?url';
+import { generateGeometry, initKernel } from '../lib/geometry/kernel';
 import type { GenerateGeometryRequest, GenerateGeometryResponse } from '../lib/types';
 
-const manifoldReady = initManifold(() => wasmUrl);
+const kernelReady = initKernel(wasmUrl);
 
 self.onmessage = async (event: MessageEvent<GenerateGeometryRequest>) => {
   const { bins: parameters, revision } = event.data;
   try {
-    const wasm = await manifoldReady;
-    const bins = generateGeometry(wasm, parameters);
+    const kernel = await kernelReady;
+    const bins = generateGeometry(kernel, parameters);
     const response: GenerateGeometryResponse = { ok: true, revision, bins };
     const transfer = bins.flatMap((bin) =>
       bin.pieces.map((piece) => piece.triangles.buffer as ArrayBuffer));

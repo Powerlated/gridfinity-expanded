@@ -25,3 +25,6 @@ dist-ssr
 .vite/*
 playwright-report/
 test-results/
+
+# Rust geometry kernel, compiled by `npm run build:wasm` (see scripts/build-wasm.mjs)
+src/wasm/

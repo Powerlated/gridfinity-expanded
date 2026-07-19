@@ -10,9 +10,4 @@ export default defineConfig({
   worker: {
     format: 'es',
   },
-  // manifold-3d ships an Emscripten WASM loader; let it load the .wasm itself
-  // rather than having esbuild pre-bundle (and break) it during dev.
-  optimizeDeps: {
-    exclude: ['manifold-3d'],
-  },
 });
