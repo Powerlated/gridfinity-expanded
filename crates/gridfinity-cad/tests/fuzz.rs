@@ -430,6 +430,32 @@ fn env_u64(key: &str, default: u64) -> u64 {
 ///
 /// Asserts clean but is `#[ignore]`d until those are dealt with; promote it to
 /// a gate by dropping the attribute once the report comes back empty.
+///
+/// # The dominant open defect (~half the remaining failures)
+///
+/// `validate: edge N used fwd=2 bwd=1`, reachable with **two** inner walls, one
+/// full height and one partial — it does not shrink to a single wall. Diagnosed
+/// as far as this:
+///
+/// One point on the cavity boundary gets computed twice by two different
+/// routes, and the results differ in the last few bits — e.g. `(40.55,
+/// 57.819447)` from the flat wall-subtraction path and `(40.549995, 57.81945)`
+/// from the banded (partial-height) path. That is 3 nm apart, far inside the
+/// weld distance, but the two straddle a `weld_key` grid line (`578194.47`
+/// rounds to `578194`, `578194.5` to `578195`), so `Builder` interns them as
+/// **two vertices** and the faces either side never pair.
+///
+/// Rescuing this in `Builder::vertex` — scanning neighbouring weld cells for a
+/// vertex within tolerance — was tried and **reverted**: it moved the fuzzer by
+/// one case (36 -> 35) and broke
+/// `crossing_inner_wall_splits_compartment_watertight`, because merging
+/// genuinely-distinct near vertices makes the tessellation leak. Loosening the
+/// weld is treating the symptom.
+///
+/// The fix belongs at the source: the flat and banded paths must *share* their
+/// cut points rather than each solving for them, which is what
+/// `presplit_regions` exists for. Today `plan_piece` presplits within a path but
+/// not across the two.
 #[test]
 #[ignore = "known-failing: 6 open defects at the default seed"]
 fn fuzz_inner_walls() {
