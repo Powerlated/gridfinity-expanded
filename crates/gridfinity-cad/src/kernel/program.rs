@@ -146,9 +146,9 @@ pub enum Op {
     Cap { z: f32, up: bool, outer: DirLoop, holes: Vec<DirLoop> },
     /// A 2.5D slab stack (see [`slab`]).
     Slabs { stack: Vec<(slab::Op, Slab)>, opts: SlabOpts },
-    /// Rolling-ball blends, each edge named by `(seg, z, radius)` and resolved
-    /// against the builder when the op runs.
-    Blend { edges: Vec<(Seg, f32, f32)> },
+    /// Rolling-ball blends (fillets), each edge named by `(seg, z, radius)`
+    /// and resolved against the builder when the op runs.
+    Fillet { edges: Vec<(Seg, f32, f32)> },
     /// An operation the model supplies itself, for geometry with no kernel
     /// primitive (Gridfinity's bridge-underside stitching, say).
     ///
@@ -174,7 +174,7 @@ impl Op {
             Op::Wall { .. } => "wall",
             Op::Cap { .. } => "cap",
             Op::Slabs { .. } => "slabs",
-            Op::Blend { .. } => "blend",
+            Op::Fillet { .. } => "fillet",
             Op::Custom(_) => "custom",
         }
     }
@@ -339,7 +339,7 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                 slab::emit_slabs(&mut b, stack, opts)?;
             }
             Op::Custom(f) => f(&mut b)?,
-            Op::Blend { edges } => {
+            Op::Fillet { edges } => {
                 for &(ref s, z, r) in edges {
                     blends.push((seg_edge(&mut b, s, z).0, r));
                 }
@@ -460,7 +460,7 @@ mod tests {
         p.push("bottom", Op::Cap { z: 0.0, up: false, outer: (r.clone(), false), holes: vec![] });
         let plain = run_all(&p).expect("unblended").faces.len();
 
-        p.push("rim fillet", Op::Blend { edges: r.iter().map(|&s| (s, 5.0, 1.0)).collect() });
+        p.push("rim fillet", Op::Fillet { edges: r.iter().map(|&s| (s, 5.0, 1.0)).collect() });
         let s = run_all(&p).expect("blend run");
         s.validate().expect("blended box is manifold");
         assert!(s.faces.len() > plain, "blend added faces");

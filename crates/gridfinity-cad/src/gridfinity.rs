@@ -1669,7 +1669,7 @@ fn plan_piece(
 
     // -- 8) Floor fillet ---------------------------------------------------
     if !blend_edges.is_empty() {
-        prog.push(format!("{tag}: floor fillet"), POp::Blend { edges: blend_edges });
+        prog.push(format!("{tag}: floor fillet"), POp::Fillet { edges: blend_edges });
     }
 }
 
