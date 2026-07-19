@@ -16,6 +16,7 @@ pub mod audit;
 pub mod chamfer;
 pub mod fillet;
 pub mod geom;
+pub mod isect;
 pub mod math;
 pub mod mesh;
 pub mod program;

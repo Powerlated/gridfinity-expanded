@@ -201,6 +201,84 @@ impl Surface {
     /// Exact sign of `(∂p/∂u × ∂p/∂v) · normal`: whether the `(u, v)`
     /// parameterization is right-handed about the outward normal. Constant per
     /// variant, derived in closed form from `point`/`normal`.
+    /// Exact signed distance from `p` to this surface — negative on the inside
+    /// of the closed ones, and the plane's own signed offset. Every case is
+    /// closed form, not an iterative projection.
+    ///
+    /// This is the surface's implicit equation, normalised so `|∇f| = 1`. The
+    /// intersection code in [`crate::kernel::isect`] uses it two ways: as the
+    /// residual to test a candidate point against, and (with [`Self::gradient`])
+    /// as one row of the Newton system that walks a curve neither surface can
+    /// parameterise.
+    pub fn signed_distance(&self, p: Vec3) -> f32 {
+        match *self {
+            Surface::Plane { origin, normal, .. } => (p - origin).dot(normal),
+            Surface::Cylinder { base, axis, radius, .. } => {
+                let d = p - base;
+                (d - axis * d.dot(axis)).length() - radius
+            }
+            Surface::Sphere { center, radius, .. } => (p - center).length() - radius,
+            Surface::Cone { apex, axis, half_angle, .. } => {
+                // Measured in the axial half-plane through `p`: rotating the
+                // (along, perp) pair by the half angle turns the cone into the
+                // line "perp = 0", so the residual is the rotated perp.
+                //
+                // `|along|`, not `along`: a `Cone` is the full double cone, and
+                // the kernel builds frusta on the lower nappe as readily as the
+                // upper one (`v < 0`, see the type's own docs). Using the signed
+                // value would describe only the +axis half and report every
+                // point of a lower-nappe frustum as off-surface.
+                let d = p - apex;
+                let along = d.dot(axis);
+                let perp = (d - axis * along).length();
+                perp * half_angle.cos() - along.abs() * half_angle.sin()
+            }
+            Surface::Torus { center, axis, major_r, minor_r, .. } => {
+                let d = p - center;
+                let along = d.dot(axis);
+                let perp = (d - axis * along).length();
+                ((perp - major_r).powi(2) + along * along).sqrt() - minor_r
+            }
+        }
+    }
+
+    /// Unit gradient of [`Self::signed_distance`] at `p`: the outward normal of
+    /// the level set through `p`. Defined away from the degenerate axis of each
+    /// radial surface (and the cone apex), where it falls back to the axis.
+    pub fn gradient(&self, p: Vec3) -> Vec3 {
+        match *self {
+            Surface::Plane { normal, .. } => normal,
+            Surface::Cylinder { base, axis, .. } => {
+                let d = p - base;
+                (d - axis * d.dot(axis)).normalize_or(axis)
+            }
+            Surface::Sphere { center, .. } => (p - center).normalize_or(Vec3::Z),
+            Surface::Cone { apex, axis, half_angle, .. } => {
+                let d = p - apex;
+                let along = d.dot(axis);
+                let radial = (d - axis * along).normalize_or(Vec3::ZERO);
+                if radial == Vec3::ZERO {
+                    return axis;
+                }
+                // Outward normal: tilt the radial direction away from the axis
+                // by the half angle, toward whichever nappe `p` sits on.
+                let side = if along < 0.0 { -1.0 } else { 1.0 };
+                (radial * half_angle.cos() - axis * side * half_angle.sin()).normalize()
+            }
+            Surface::Torus { center, axis, major_r, .. } => {
+                let d = p - center;
+                let along = d.dot(axis);
+                let radial = (d - axis * along).normalize_or(Vec3::ZERO);
+                if radial == Vec3::ZERO {
+                    return axis;
+                }
+                // Vector from the tube's spine circle to `p`.
+                let spine = center + radial * major_r;
+                (p - spine).normalize_or(radial)
+            }
+        }
+    }
+
     pub fn uv_orientation(&self) -> f32 {
         match *self {
             Surface::Plane { .. }
