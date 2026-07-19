@@ -33,7 +33,7 @@ use crate::layout::{
 use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
 use crate::kernel::region2d::{chain_loops, region_difference, split_regions};
-use crate::kernel::program::{Op as POp, Program, run_all};
+use crate::kernel::program::{DirLoop as POpDirLoop, Op as POp, PlaneRef as PPlaneRef, Program, run_all};
 use crate::kernel::slab::{Op as SlabOp, Slab, SlabOpts, emit_slabs, plan_bands};
 use crate::kernel::sketch::{Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop};
 use crate::kernel::topo::{Builder, EdgeId, Loop, Solid, VertexId};
@@ -1625,46 +1625,59 @@ fn plan_piece(
         );
     }
     {
+        // Rim faces: group top walls + island tops (outters) with negative
+        // top walls + rim holes (holes) by 2D containment, then emit one
+        // PlanarFace per outer. Used to be a single Op::Custom because the
+        // containment check happened at emission time after the builder was
+        // available; point_in_segs is pure 2D geometry, so the grouping
+        // moves to plan time and the result is N PlanarFace ops.
         let (tw, it, rh) = (top_walls.clone(), island_tops.clone(), rim_holes.clone());
-        prog.push(
-            format!("{tag}: rim faces"),
-            POp::Custom(Box::new(move |b| {
-                let mut cap_outers: Vec<(f32, Vec<Seg>, Loop, Vec<Loop>)> = Vec::new();
-                let mut cap_holes: Vec<(Vec2, Loop)> = Vec::new();
-                for segs in &tw {
-                    let a = loop_area(segs);
-                    let lp = loop_of(&ring(b, segs, total_h), true);
-                    if a > 0.0 {
-                        cap_outers.push((a, segs.clone(), lp, Vec::new()));
-                    } else {
-                        cap_holes.push((segs[0].start(), lp));
-                    }
+        let mut outers: Vec<(Vec<Seg>, Vec<Vec<Seg>>)> = Vec::new();
+        for segs in &tw {
+            if loop_area(segs) > 0.0 {
+                outers.push((segs.clone(), Vec::new()));
+            }
+        }
+        for segs in &it {
+            outers.push((segs.clone(), Vec::new()));
+        }
+        let holes: Vec<Vec<Seg>> = tw
+            .iter()
+            .filter(|s| loop_area(s) < 0.0)
+            .cloned()
+            .chain(rh.iter().cloned())
+            .collect();
+        for hole in &holes {
+            let pt = hole[0].start();
+            let mut best: Option<usize> = None;
+            for (i, (outer, _)) in outers.iter().enumerate() {
+                let a = loop_area(outer).abs();
+                if point_in_segs(pt, outer)
+                    && best.is_none_or(|bi| a < loop_area(&outers[bi].0).abs())
+                {
+                    best = Some(i);
                 }
-                for segs in &it {
-                    let a = loop_area(segs).abs();
-                    let lp = loop_of(&ring(b, segs, total_h), true);
-                    cap_outers.push((a, segs.clone(), lp, Vec::new()));
-                }
-                for segs in &rh {
-                    let lp = loop_of(&ring(b, segs, total_h), true);
-                    cap_holes.push((segs[0].start(), lp));
-                }
-                for (pt, lp) in cap_holes {
-                    let mut best: Option<usize> = None;
-                    for (i, (a, segs, _, _)) in cap_outers.iter().enumerate() {
-                        if point_in_segs(pt, segs) && best.is_none_or(|bi| *a < cap_outers[bi].0) {
-                            best = Some(i);
-                        }
-                    }
-                    let bi = best.ok_or("total_h hole without a containing face")?;
-                    cap_outers[bi].3.push(lp);
-                }
-                for (_, _, outer, holes) in cap_outers {
-                    planar(b, total_h, true, outer, holes);
-                }
-                Ok(())
-            })),
-        );
+            }
+            let bi = best.expect("total_h hole without a containing face");
+            outers[bi].1.push(hole.clone());
+        }
+        for (i, (outer, holes)) in outers.into_iter().enumerate() {
+            let label = if it.is_empty() && tw.len() == 1 {
+                format!("{tag}: rim face")
+            } else {
+                format!("{tag}: rim face {i}")
+            };
+            let hole_loops: Vec<POpDirLoop> =
+                holes.into_iter().map(|h| (h, true)).collect();
+            prog.push(
+                label,
+                POp::PlanarFace {
+                    plane: PPlaneRef::Z { z: total_h, up: true },
+                    outer: (outer, true),
+                    holes: hole_loops,
+                },
+            );
+        }
     }
 
     // -- 8) Floor fillet ---------------------------------------------------
