@@ -230,6 +230,20 @@ culled draw that restores GL state. Back-face culling relies on the engine's out
 the `meshes_have_outward_consistent_winding` test). `main.rs` binds `Params` to widgets, regenerates
 (build → tessellate → upload VBO) on change, and exports STL via `rfd` + `Mesh::to_stl_binary`.
 
+**Invalid geometry must never crash the app.** `main.rs` builds **one logical bin at a time**
+(`gridfinity::build_piece` per `Params::bins` entry, not one `build` over the layout), so a bin the
+model cannot produce is isolated to itself. Each build goes through `catch`, which converts an
+`Err` *and* an unwind into a message — the model layer still panics on some degenerate parameter
+combinations (e.g. `height_units: 1` with `wall_thickness: 0.4`), and an unwind out of `regenerate`
+would take the window with it. `catch` also swaps in a silent panic hook for the duration, since the
+message is shown in the UI and a slider dragged through a bad range would otherwise print a
+backtrace per frame. A failed bin gets **placeholder geometry** (one plain rounded box per cell, at
+the real footprint and height — featureless, so it can't be mistaken for a real build), and every
+vertex carries a `bad` flag as a 7th float (`MESH_STRIDE`; the kernel's `render_buffer` still emits
+6, and the GUI appends the flag). The fragment shader gives flagged vertices a pulsing red
+rim-lit glow, and `paint_error_banner` names the bin and prints why. Export refuses while any bin is
+failing rather than panicking on the way out.
+
 `debugger.rs` is the construction debugger (right panel, toggled from the params panel). It calls
 `gridfinity::program(&p)` to get the model's op list, caches per-prefix face counts for display,
 and rebuilds the solid via `program::run(&prog, |i| enabled[i])` whenever the user steps or

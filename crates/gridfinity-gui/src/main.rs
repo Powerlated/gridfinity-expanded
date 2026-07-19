@@ -16,6 +16,10 @@ use editor::{BIN_COLORS, Editor, Tool};
 use gridfinity_cad::gridfinity::{self, BinSlope, LogicalBin, Mode, Params, SlopeDir};
 use gridfinity_cad::layout::GridFootprint;
 use gridfinity_cad::printers::{DEFAULT_PRINTER, PRINTER_PROFILES, PrinterProfile, check_bed_fit, compute_auto_split_lines};
+use gridfinity_cad::kernel::build::extrude;
+use gridfinity_cad::kernel::math::Vec3;
+use gridfinity_cad::kernel::sketch::Sketch;
+use gridfinity_cad::kernel::topo::Solid;
 use gridfinity_cad::tessellate;
 use std::sync::{Arc, Mutex};
 use viewport::{Camera, Renderer};
@@ -23,6 +27,135 @@ use viewport::{Camera, Renderer};
 /// Curve resolution (segments per 90° arc) for the live preview vs. export.
 const PREVIEW_RES: usize = 5;
 const EXPORT_RES: usize = 48;
+
+/// Floats per shaded vertex: the kernel's `[pos(3), normal(3)]` plus a
+/// "this bin failed to build" flag the GUI appends itself.
+pub const MESH_STRIDE: usize = 7;
+
+/// A logical bin the model refused to build, and why.
+struct BinError {
+    /// Index into `Params::bins`.
+    bin: usize,
+    msg: String,
+}
+
+/// Tessellation → shaded vertex buffer, with every vertex tagged `bad`.
+fn flagged(tess: &gridfinity_cad::Tessellation, bad: bool) -> Vec<f32> {
+    let src = tess.render_buffer();
+    let flag = if bad { 1.0 } else { 0.0 };
+    let mut out = Vec::with_capacity(src.len() / 6 * MESH_STRIDE);
+    for v in src.chunks_exact(6) {
+        out.extend_from_slice(v);
+        out.push(flag);
+    }
+    out
+}
+
+fn vert_bounds(verts: &[f32]) -> (Vec3, Vec3) {
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for v in verts.chunks_exact(MESH_STRIDE) {
+        let p = Vec3::new(v[0], v[1], v[2]);
+        min = min.min(p);
+        max = max.max(p);
+    }
+    if min.x > max.x { (Vec3::ZERO, Vec3::ZERO) } else { (min, max) }
+}
+
+/// Build one logical bin, converting both a returned error and a panic into a
+/// message.
+///
+/// The panic arm is not belt-and-braces. `run_all` reports what it can as an
+/// `Err`, but the model layer upstream of it still indexes and asserts its way
+/// through geometry that a bad parameter combination can make degenerate, and
+/// in a GUI an unwind out of `regenerate` takes the whole window with it. The
+/// build is pure — it borrows `Params` and returns a fresh `Solid`, touching no
+/// shared state — so catching the unwind here cannot leave anything torn.
+fn build_bin(p: &Params, bin: &LogicalBin) -> Result<Solid, String> {
+    catch(|| gridfinity::build_piece(p, &bin.cells, &bin.cells, bin.slope))
+}
+
+/// Stand-in geometry for a bin that would not build: one plain box per cell, at
+/// the bin's real footprint and height. It is deliberately featureless — no
+/// pegs, no cavity — so it cannot be mistaken for a successful build, while
+/// still showing *where* the bad bin is and how big it is.
+fn placeholder(p: &Params, bin: &LogicalBin) -> Vec<f32> {
+    let h = (p.height_units as f32 * gridfinity::HEIGHT_PER_UNIT).max(1.0);
+    let side = gridfinity::GRID_PITCH - 2.0 * gridfinity::HALF_TOL;
+    let mut out = Vec::new();
+    for c in &bin.cells {
+        let cx = c.x as f32 * gridfinity::GRID_PITCH + gridfinity::GRID_PITCH / 2.0;
+        let cy = c.y as f32 * gridfinity::GRID_PITCH + gridfinity::GRID_PITCH / 2.0;
+        let sk = Sketch::rounded_rect(cx, cy, side, side, gridfinity::OUTER_R);
+        out.extend(flagged(&tessellate(&extrude(&sk, 0.0, h), PREVIEW_RES), true));
+    }
+    out
+}
+
+/// Run a fallible build, turning a panic into the same `Err(String)` a clean
+/// failure would produce. See [`build_bin`] for why the panic arm is needed.
+fn catch<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    // Silence the default hook for the duration of the build. Its output is
+    // redundant — the message is caught below and shown in the viewport — and a
+    // slider dragged through a bad parameter range would otherwise spew a
+    // backtrace per frame. The swap is global, but only the UI thread builds,
+    // and the window it covers is exactly this call.
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    std::panic::set_hook(prev);
+    match caught {
+        Ok(r) => r,
+        Err(e) => {
+            let what = e
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| e.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panicked".to_string());
+            Err(format!("panicked: {what}"))
+        }
+    }
+}
+
+/// The whole layout as one solid, without the panic.
+fn try_whole(p: &Params) -> Result<Solid, String> {
+    catch(|| gridfinity::try_build(p))
+}
+
+/// Build the whole scene bin by bin, so a bin the model cannot build is
+/// isolated: the others still render normally and it gets placeholder geometry
+/// flagged for the shader's red glow.
+fn build_scene(p: &Params) -> (Vec<f32>, Vec<BinError>) {
+    let mut verts = Vec::new();
+    let mut errors = Vec::new();
+    if p.mode != Mode::Bin {
+        // The baseplate is one solid over every cell — there is no per-bin
+        // split to isolate, so it succeeds or fails whole.
+        match try_whole(p) {
+            Ok(s) => verts = flagged(&tessellate(&s, PREVIEW_RES), false),
+            Err(msg) => errors.push(BinError { bin: 0, msg }),
+        }
+        if !errors.is_empty() {
+            for bin in &p.bins {
+                verts.extend(placeholder(p, bin));
+            }
+        }
+        return (verts, errors);
+    }
+    for (i, bin) in p.bins.iter().enumerate() {
+        if bin.cells.is_empty() {
+            continue;
+        }
+        match build_bin(p, bin) {
+            Ok(solid) => verts.extend(flagged(&tessellate(&solid, PREVIEW_RES), false)),
+            Err(msg) => {
+                errors.push(BinError { bin: i, msg });
+                verts.extend(placeholder(p, bin));
+            }
+        }
+    }
+    (verts, errors)
+}
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -56,6 +189,8 @@ struct App {
     program_dirty: bool,
     tri_count: usize,
     status: String,
+    /// Bins the model refused to build this regenerate; empty when all is well.
+    errors: Vec<BinError>,
 }
 
 impl App {
@@ -75,6 +210,7 @@ impl App {
             program_dirty: true,
             tri_count: 0,
             status: String::new(),
+            errors: Vec::new(),
         };
         app.regenerate(true);
         app
@@ -82,27 +218,30 @@ impl App {
 
     /// Rebuild the solid, tessellate, and upload; optionally reframe the camera.
     /// When the debugger is active, the solid is built from its enabled subset
-    /// of the model's program; otherwise the full `gridfinity::build` is used.
+    /// of the model's program; otherwise every logical bin is built on its own
+    /// so one bin that fails cannot take the preview down with it.
     fn regenerate(&mut self, reframe: bool) {
         if self.program_dirty {
             self.debugger.refresh(&self.params);
             self.program_dirty = false;
         }
-        let solid_opt = self.debugger.build_solid();
-        let solid = match solid_opt {
-            Some(s) => s,
-            None => gridfinity::build(&self.params),
+        // The debugger runs an arbitrary op subset, which is *expected* to be
+        // non-manifold, so it reports its own status and nothing it produces is
+        // flagged. Only the normal preview path builds per bin and can fail.
+        let dbg_solid = self.debugger.build_solid();
+        let (verts, errors) = match &dbg_solid {
+            Some(s) => (flagged(&tessellate(s, PREVIEW_RES), false), Vec::new()),
+            None => build_scene(&self.params),
         };
-        let tess = tessellate(&solid, PREVIEW_RES);
-        let (min, max) = tess.bounds();
+        self.errors = errors;
+        let (min, max) = vert_bounds(&verts);
         self.camera.target = (min + max) * 0.5;
         if reframe {
             self.camera.frame(min, max);
         }
-        self.tri_count = tess.tris.len();
+        self.tri_count = verts.len() / (3 * MESH_STRIDE);
 
-        // Build the debugger's wireframe here, while `solid` is still alive —
-        // it is dropped at the end of this function.
+        // The debugger's wireframe needs the B-rep itself, not the mesh.
         let mut wf = wireframe::Wireframe::default();
         if self.debugger.is_shown() {
             // Sketches first: labels are thinned in insertion order, and there
@@ -111,24 +250,38 @@ impl App {
             for (profile, plane) in self.debugger.sketch_planes() {
                 wf.add_sketch(profile, plane, PREVIEW_RES, wireframe::SKETCH_BLACK);
             }
-            wf.add_brep_edges(&solid, PREVIEW_RES, wireframe::EDGE_ORANGE);
+            if let Some(s) = &dbg_solid {
+                wf.add_brep_edges(s, PREVIEW_RES, wireframe::EDGE_ORANGE);
+            }
         }
         self.labels = wf.labels;
 
         let mut r = self.renderer.lock().unwrap();
-        r.upload(&self.gl, &tess.render_buffer());
+        r.upload(&self.gl, &verts);
         r.upload_lines(&self.gl, &wf.lines);
         drop(r);
         self.dirty = false;
     }
 
     fn export_stl(&mut self) {
+        // A model that will not build has nothing to write. Refusing here is
+        // what stops the export from being the one path that still crashes.
+        if !self.errors.is_empty() {
+            self.status = "Cannot export: fix the failed bin first".into();
+            return;
+        }
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name("gridfinity-bin.stl")
             .add_filter("STL", &["stl"])
             .save_file()
         {
-            let solid = gridfinity::build(&self.params);
+            let solid = match try_whole(&self.params) {
+                Ok(s) => s,
+                Err(msg) => {
+                    self.status = format!("Export failed: {msg}");
+                    return;
+                }
+            };
             let mesh = tessellate(&solid, EXPORT_RES).to_mesh();
             match std::fs::write(&path, mesh.to_stl_binary()) {
                 Ok(()) => self.status = format!("Exported {} ({} triangles)", path.display(), mesh.tri_count()),
@@ -139,8 +292,18 @@ impl App {
 
     /// Split-aware export: one STL per printable piece, into a folder.
     fn export_pieces(&mut self) {
+        if !self.errors.is_empty() {
+            self.status = "Cannot export: fix the failed bin first".into();
+            return;
+        }
         let Some(dir) = rfd::FileDialog::new().pick_folder() else { return };
-        let pieces = gridfinity::build_pieces(&self.params);
+        let pieces = match catch(|| gridfinity::try_build_pieces(&self.params)) {
+            Ok(p) => p,
+            Err(msg) => {
+                self.status = format!("Export failed: {msg}");
+                return;
+            }
+        };
         let mut n = 0usize;
         for piece in &pieces {
             let mesh = tessellate(&piece.solid, EXPORT_RES).to_mesh();
@@ -403,8 +566,53 @@ impl App {
 
         let cam = self.camera;
         let renderer = self.renderer.clone();
-        ui.painter().add(viewport::callback(rect, renderer, cam));
+        // The failed-bin glow pulses, so while anything is flagged the viewport
+        // has to keep animating; otherwise egui only repaints on input.
+        let time = ui.input(|i| i.time) as f32;
+        if !self.errors.is_empty() {
+            ui.ctx().request_repaint();
+        }
+        ui.painter().add(viewport::callback(rect, renderer, cam, time));
         self.paint_labels(ui, rect);
+        self.paint_error_banner(ui, rect);
+    }
+
+    /// Report failed bins over the viewport: what broke, and which bin the red
+    /// glow belongs to. Anchored bottom-left so it never covers the model.
+    fn paint_error_banner(&self, ui: &mut egui::Ui, rect: egui::Rect) {
+        if self.errors.is_empty() {
+            return;
+        }
+        let red = egui::Color32::from_rgb(255, 90, 70);
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect.shrink(12.0))
+                .layout(egui::Layout::bottom_up(egui::Align::LEFT)),
+        );
+        egui::Frame::popup(ui.style())
+            .fill(egui::Color32::from_rgba_unmultiplied(40, 6, 8, 235))
+            .stroke(egui::Stroke::new(1.0, red))
+            .show(&mut child, |ui| {
+                ui.set_max_width(rect.width() * 0.6);
+                for e in &self.errors {
+                    let who = if self.params.mode == Mode::Bin {
+                        format!("Bin {}", e.bin + 1)
+                    } else {
+                        "Baseplate".to_string()
+                    };
+                    ui.label(
+                        egui::RichText::new(format!("{who} could not be built"))
+                            .color(red)
+                            .strong(),
+                    );
+                    ui.label(egui::RichText::new(&e.msg).color(egui::Color32::from_rgb(255, 190, 180)));
+                }
+                ui.label(
+                    egui::RichText::new("Shown as a plain block; the rest of the layout is unaffected.")
+                        .small()
+                        .color(egui::Color32::from_rgb(200, 150, 145)),
+                );
+            });
     }
 
     /// Paint the overlay's type tags as 2D text tracking their 3D anchors.
@@ -443,5 +651,87 @@ impl App {
             );
             painter.text(p, egui::Align2::CENTER_CENTER, label.text, font.clone(), color);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gridfinity_cad::layout::GridCell;
+
+    /// A parameter set the model cannot build. `wall_thickness` this small at
+    /// one height unit leaves the cavity degenerate, and the model panics
+    /// rather than returning an `Err` — which is exactly the case the preview
+    /// has to survive.
+    fn broken() -> Params {
+        Params { height_units: 1, wall_thickness: 0.4, floor_fillet: 0.0,
+                 cavity_corner_radius: 0.0, ..Params::default() }
+    }
+
+    fn flags(verts: &[f32]) -> (usize, usize) {
+        let mut good = 0;
+        let mut bad = 0;
+        for v in verts.chunks_exact(MESH_STRIDE) {
+            if v[6] > 0.5 { bad += 1 } else { good += 1 }
+        }
+        (good, bad)
+    }
+
+    /// The whole point: invalid geometry must not take the process down.
+    #[test]
+    fn a_bin_that_cannot_be_built_is_reported_not_fatal() {
+        let (verts, errors) = build_scene(&broken());
+        assert_eq!(errors.len(), 1, "the one bad bin should be reported once");
+        assert_eq!(errors[0].bin, 0);
+        assert!(!errors[0].msg.is_empty(), "the failure needs a message to show");
+        let (good, bad) = flags(&verts);
+        assert!(bad > 0, "the failed bin needs placeholder geometry to glow");
+        assert_eq!(good, 0, "nothing else built, so nothing should be unflagged");
+    }
+
+    /// A good layout stays completely unflagged — the glow must not bleed into
+    /// the normal case.
+    #[test]
+    fn a_valid_layout_reports_nothing_and_flags_nothing() {
+        let (verts, errors) = build_scene(&Params::default());
+        assert!(errors.is_empty(), "default bin should build: {:?}", errors[0].msg);
+        let (good, bad) = flags(&verts);
+        assert!(good > 0);
+        assert_eq!(bad, 0, "a healthy bin must not be flagged");
+    }
+
+    /// One bad bin must not cost the others their geometry — that is what
+    /// building per bin buys, versus one program over the whole layout.
+    #[test]
+    fn a_failed_bin_does_not_take_its_neighbours_with_it() {
+        let mut p = broken();
+        p.bins = vec![
+            LogicalBin { cells: vec![GridCell { x: 0, y: 0 }], ..Default::default() },
+            LogicalBin { cells: vec![GridCell { x: 4, y: 0 }], ..Default::default() },
+        ];
+        let (verts, errors) = build_scene(&p);
+        assert_eq!(errors.len(), 2, "both bins share the bad parameters");
+        assert_eq!(errors.iter().map(|e| e.bin).collect::<Vec<_>>(), vec![0, 1]);
+
+        // Now make only the second bin's parameters workable.
+        let mut ok = Params::default();
+        ok.bins = p.bins.clone();
+        let (ok_verts, ok_errors) = build_scene(&ok);
+        assert!(ok_errors.is_empty());
+        assert!(ok_verts.len() > verts.len(), "real geometry beats placeholders");
+    }
+
+    /// The placeholder has to land where the bin is, or the glow points at the
+    /// wrong part of the layout.
+    #[test]
+    fn the_placeholder_sits_on_the_failed_bin_footprint() {
+        let mut p = broken();
+        p.bins = vec![LogicalBin { cells: vec![GridCell { x: 2, y: 1 }], ..Default::default() }];
+        let (verts, _) = build_scene(&p);
+        let (min, max) = vert_bounds(&verts);
+        let pitch = gridfinity::GRID_PITCH;
+        assert!(min.x > 2.0 * pitch - 1.0 && max.x < 3.0 * pitch + 1.0, "x {min:?}..{max:?}");
+        assert!(min.y > 1.0 * pitch - 1.0 && max.y < 2.0 * pitch + 1.0, "y {min:?}..{max:?}");
+        assert!((max.z - gridfinity::HEIGHT_PER_UNIT).abs() < 1e-3, "one height unit tall");
     }
 }

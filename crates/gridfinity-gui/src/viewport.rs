@@ -121,27 +121,52 @@ unsafe fn link(gl: &glow::Context, vs_src: &str, fs_src: &str) -> glow::Program 
 impl Renderer {
     pub fn new(gl: &glow::Context) -> Renderer {
         unsafe {
+            // `a_bad` flags a bin the model could not build. It is constant over
+            // a triangle (the whole bin is flagged or none of it is), so the
+            // interpolator never sees an in-between value.
             let vs_src = r#"
                 layout (location = 0) in vec3 a_pos;
                 layout (location = 1) in vec3 a_normal;
+                layout (location = 2) in float a_bad;
                 uniform mat4 u_mvp;
                 out vec3 v_normal;
+                out vec3 v_wpos;
+                out float v_bad;
                 void main() {
                     v_normal = a_normal;
+                    v_wpos = a_pos;
+                    v_bad = a_bad;
                     gl_Position = u_mvp * vec4(a_pos, 1.0);
                 }
             "#;
             let fs_src = r#"
                 precision mediump float;
                 in vec3 v_normal;
+                in vec3 v_wpos;
+                in float v_bad;
                 out vec4 frag;
                 uniform vec3 u_light;
+                uniform vec3 u_eye;
+                uniform float u_time;
                 void main() {
                     vec3 n = normalize(v_normal);
                     float d = max(dot(n, normalize(u_light)), 0.0);
-                    vec3 base = vec3(0.30, 0.55, 0.85);
-                    vec3 color = base * (0.28 + 0.72 * d);
-                    frag = vec4(color, 1.0);
+                    if (v_bad > 0.5) {
+                        // Rim term peaks where the surface turns away from the
+                        // eye, so the failed bin reads as lit from inside
+                        // rather than merely painted red — it stays legible
+                        // against the blue even when it is the only thing on
+                        // screen. The pulse is what makes it read as an alarm.
+                        vec3 v = normalize(u_eye - v_wpos);
+                        float rim = pow(1.0 - max(dot(n, v), 0.0), 2.5);
+                        float pulse = 0.70 + 0.30 * sin(u_time * 3.2);
+                        vec3 color = vec3(0.40, 0.02, 0.03) * (0.35 + 0.65 * d)
+                                   + vec3(1.00, 0.12, 0.06) * rim * pulse;
+                        frag = vec4(color, 1.0);
+                    } else {
+                        vec3 base = vec3(0.30, 0.55, 0.85);
+                        frag = vec4(base * (0.28 + 0.72 * d), 1.0);
+                    }
                 }
             "#;
 
@@ -223,18 +248,22 @@ impl Renderer {
     }
 
     /// Upload an interleaved `[pos(3), normal(3)]` vertex buffer.
+    /// Upload the shaded mesh: interleaved `[pos(3), normal(3), bad(1)]`. The
+    /// trailing flag is added by the caller, not by the kernel's
+    /// `render_buffer` — see [`crate::MESH_STRIDE`].
     pub fn upload(&mut self, gl: &glow::Context, verts: &[f32]) {
         unsafe {
             gl.bind_vertex_array(Some(self.vao));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytemuck::cast_slice(verts), glow::DYNAMIC_DRAW);
-            let stride = 6 * std::mem::size_of::<f32>() as i32;
-            gl.enable_vertex_attrib_array(0);
-            gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, stride, 0);
-            gl.enable_vertex_attrib_array(1);
-            gl.vertex_attrib_pointer_f32(1, 3, glow::FLOAT, false, stride, 3 * std::mem::size_of::<f32>() as i32);
+            let f = std::mem::size_of::<f32>() as i32;
+            let stride = crate::MESH_STRIDE as i32 * f;
+            for (loc, size, offset) in [(0, 3, 0), (1, 3, 3), (2, 1, 6)] {
+                gl.enable_vertex_attrib_array(loc);
+                gl.vertex_attrib_pointer_f32(loc, size, glow::FLOAT, false, stride, offset * f);
+            }
             gl.bind_vertex_array(None);
-            self.vertex_count = (verts.len() / 6) as i32;
+            self.vertex_count = (verts.len() / crate::MESH_STRIDE) as i32;
         }
     }
 
@@ -257,7 +286,15 @@ impl Renderer {
         }
     }
 
-    pub fn paint(&self, gl: &glow::Context, cam: &Camera, aspect: f32, viewport_px: (f32, f32)) {
+    /// `time` drives the failed-bin pulse; pass elapsed seconds.
+    pub fn paint(
+        &self,
+        gl: &glow::Context,
+        cam: &Camera,
+        aspect: f32,
+        viewport_px: (f32, f32),
+        time: f32,
+    ) {
         if self.vertex_count == 0 {
             return;
         }
@@ -283,6 +320,11 @@ impl Renderer {
             gl.uniform_matrix_4_f32_slice(loc.as_ref(), false, &mvp.to_cols_array());
             let loc = gl.get_uniform_location(self.program, "u_light");
             gl.uniform_3_f32(loc.as_ref(), light.x, light.y, light.z);
+            let eye = cam.eye();
+            let loc = gl.get_uniform_location(self.program, "u_eye");
+            gl.uniform_3_f32(loc.as_ref(), eye.x, eye.y, eye.z);
+            let loc = gl.get_uniform_location(self.program, "u_time");
+            gl.uniform_1_f32(loc.as_ref(), time);
 
             gl.bind_vertex_array(Some(self.vao));
             gl.draw_arrays(glow::TRIANGLES, 0, self.vertex_count);
@@ -349,6 +391,7 @@ pub fn callback(
     rect: egui::Rect,
     renderer: Arc<std::sync::Mutex<Renderer>>,
     cam_snapshot: Camera,
+    time: f32,
 ) -> egui::PaintCallback {
     let cb = egui_glow::CallbackFn::new(move |info, painter| {
         let aspect = rect.width() / rect.height().max(1.0);
@@ -356,7 +399,7 @@ pub fn callback(
         // framebuffer's own units, so a HiDPI display must not halve it.
         let vp = info.viewport_in_pixels();
         let viewport_px = (vp.width_px as f32, vp.height_px as f32);
-        renderer.lock().unwrap().paint(painter.gl(), &cam_snapshot, aspect, viewport_px);
+        renderer.lock().unwrap().paint(painter.gl(), &cam_snapshot, aspect, viewport_px, time);
     });
     egui::PaintCallback { rect, callback: Arc::new(cb) }
 }
