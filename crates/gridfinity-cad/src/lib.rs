@@ -861,11 +861,14 @@ mod tests {
         assert!((r - br).abs() < 1e-3, "island blend {r} should match the wall's {br}");
     }
 
-    /// The clearance test's other side: a wall whose blend footprint would reach
-    /// past the cavity boundary stays sharp, and therefore unfilleted. Rounding
-    /// it would enable a blend that eats floor the boundary's own blend has
-    /// already taken, leaving the floor face with a hole loop crossing its outer
-    /// loop. Unfilleted is the correct answer here, not a shortfall.
+    /// The clearance test's other side, and the point of blending each chain
+    /// separately: a wall whose blend footprint would reach past the cavity
+    /// boundary gets no blend of its own — its floor would overlap the one the
+    /// boundary has already taken — but the **compartment keeps its own**.
+    ///
+    /// That split is the whole gain. While one radius covered both chains, this
+    /// wall cost the compartment all four of its corner blends; now it costs
+    /// only its own.
     #[test]
     fn divider_too_close_to_the_wall_stays_sharp_and_sound() {
         let p = gridfinity::Params {
@@ -879,7 +882,9 @@ mod tests {
         assert!(crate::audit(&solid).is_ok(), "B-rep must be sound:
 {}", crate::audit(&solid));
         let (on_wall, _) = blends_near(&solid, (6.0, 42.0), (78.0, 42.0), 6.0);
-        assert_eq!(on_wall, 0, "a wall this close to the boundary must stay sharp");
+        assert_eq!(on_wall, 0, "a wall this close to the boundary gets no blend");
+        let (total, _) = blends_near(&solid, (41.75, 41.75), (41.75, 41.75), 1e4);
+        assert_eq!(total, 4, "the compartment must keep its own four corner blends");
     }
 
     /// A divider that crosses the cavity boundary notches the loop, and the

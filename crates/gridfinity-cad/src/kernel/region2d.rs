@@ -475,3 +475,202 @@ mod tests {
         assert!((area(&d) - expect).abs() < 1e-2, "bore area {} vs {expect}", area(&d));
     }
 }
+
+/// Does `ang` (any branch) fall inside the sweep `a0 -> a1`?
+fn arc_covers(a0: f32, a1: f32, ang: f32) -> bool {
+    let (lo, hi) = (a0.min(a1), a0.max(a1));
+    let two_pi = std::f32::consts::TAU;
+    // Walk `ang` into [lo, lo + 2pi) and compare.
+    let k = ((lo - ang) / two_pi).ceil();
+    ang + k * two_pi <= hi + 1e-6
+}
+
+/// Exact distance from a point to one segment.
+pub fn point_seg_distance(p: Vec2, seg: &Seg) -> f32 {
+    match *seg {
+        Seg::Line { a, b } => {
+            let d = b - a;
+            let l2 = d.dot(d);
+            if l2 < 1e-12 {
+                return (p - a).length();
+            }
+            let t = ((p - a).dot(d) / l2).clamp(0.0, 1.0);
+            (p - (a + d * t)).length()
+        }
+        Seg::Arc { a, b, center, radius, a0, a1 } => {
+            let v = p - center;
+            if v.length() > 1e-9 && arc_covers(a0, a1, f32::atan2(v.y, v.x)) {
+                // Foot of the radial projection is on the arc.
+                (v.length() - radius).abs()
+            } else {
+                (p - a).length().min((p - b).length())
+            }
+        }
+    }
+}
+
+/// Points on `seg` that can realise a closest approach to another segment
+/// without being an endpoint: for an arc, the two points radially aligned with
+/// `toward` (a line normal, or the other arc's centre direction).
+fn extremal_points(seg: &Seg, toward: Vec2) -> Vec<Vec2> {
+    match *seg {
+        Seg::Line { .. } => Vec::new(),
+        Seg::Arc { center, radius, a0, a1, .. } => {
+            if toward.length() < 1e-9 {
+                return Vec::new();
+            }
+            let u = toward.normalize();
+            [u, -u]
+                .iter()
+                .map(|&d| center + d * radius)
+                .filter(|q| {
+                    let v = *q - center;
+                    arc_covers(a0, a1, f32::atan2(v.y, v.x))
+                })
+                .collect()
+        }
+    }
+}
+
+/// Exact minimum distance between two segments. Zero when they cross.
+pub fn seg_seg_distance(p: &Seg, q: &Seg) -> f32 {
+    if !seg_seg_points(p, q).is_empty() {
+        return 0.0;
+    }
+    // Endpoints of each against the other. For a non-crossing pair whose
+    // closest approach is interior to both, the extremal points below supply
+    // the missing candidate; every candidate is a genuine point on its curve,
+    // so taking the minimum can only tighten toward the true distance.
+    let mut best = f32::INFINITY;
+    for (x, y) in [(p, q), (q, p)] {
+        for e in [x.start(), x.end()] {
+            best = best.min(point_seg_distance(e, y));
+        }
+    }
+    let toward = |s: &Seg, other: &Seg| -> Vec2 {
+        match (*s, *other) {
+            // Closest approach of a circle to a line is along the line normal.
+            (Seg::Arc { .. }, Seg::Line { a, b }) => {
+                let d = b - a;
+                Vec2::new(-d.y, d.x)
+            }
+            // ...and of two circles, along the line joining their centres.
+            (Seg::Arc { center: c0, .. }, Seg::Arc { center: c1, .. }) => c1 - c0,
+            _ => Vec2::ZERO,
+        }
+    };
+    for (x, y) in [(p, q), (q, p)] {
+        for e in extremal_points(x, toward(x, y)) {
+            best = best.min(point_seg_distance(e, y));
+        }
+    }
+    best
+}
+
+/// Exact minimum distance between two closed loops, measured between their
+/// *boundaries* — a loop entirely inside another still reports the gap to it,
+/// not zero.
+pub fn min_loop_distance(a: &[Seg], b: &[Seg]) -> f32 {
+    let mut best = f32::INFINITY;
+    for p in a {
+        for q in b {
+            best = best.min(seg_seg_distance(p, q));
+            if best == 0.0 {
+                return 0.0;
+            }
+        }
+    }
+    best
+}
+
+#[cfg(test)]
+mod distance_tests {
+    use super::*;
+    use crate::kernel::sketch::Sketch;
+    use std::f32::consts::PI;
+
+    fn line(ax: f32, ay: f32, bx: f32, by: f32) -> Seg {
+        Seg::Line { a: Vec2::new(ax, ay), b: Vec2::new(bx, by) }
+    }
+
+    #[test]
+    fn parallel_lines_measure_their_gap() {
+        let d = seg_seg_distance(&line(0.0, 0.0, 10.0, 0.0), &line(0.0, 3.0, 10.0, 3.0));
+        assert!((d - 3.0).abs() < 1e-5, "{d}");
+    }
+
+    #[test]
+    fn crossing_segments_are_zero() {
+        let d = seg_seg_distance(&line(0.0, 0.0, 10.0, 0.0), &line(5.0, -1.0, 5.0, 1.0));
+        assert_eq!(d, 0.0);
+    }
+
+    /// Offset segments must measure end-to-end, not perpendicular.
+    #[test]
+    fn disjoint_collinear_segments_measure_the_gap() {
+        let d = seg_seg_distance(&line(0.0, 0.0, 4.0, 0.0), &line(7.0, 0.0, 10.0, 0.0));
+        assert!((d - 3.0).abs() < 1e-5, "{d}");
+    }
+
+    /// The interior-to-interior case: the closest point on the arc is not an
+    /// endpoint, so it is only found via the extremal candidates.
+    #[test]
+    fn line_to_arc_uses_the_radial_closest_point() {
+        // Upper half circle, radius 2 at the origin; the line sits above it.
+        let arc = Seg::Arc {
+            a: Vec2::new(2.0, 0.0),
+            b: Vec2::new(-2.0, 0.0),
+            center: Vec2::ZERO,
+            radius: 2.0,
+            a0: 0.0,
+            a1: PI,
+        };
+        let d = seg_seg_distance(&line(-5.0, 5.0, 5.0, 5.0), &arc);
+        assert!((d - 3.0).abs() < 1e-5, "want 5 - 2 = 3, got {d}");
+    }
+
+    /// Two circles' closest approach is along their centre line, again interior
+    /// to both arcs.
+    #[test]
+    fn arc_to_arc_uses_the_centre_line() {
+        let right = Seg::Arc {
+            a: Vec2::new(0.0, 1.0), b: Vec2::new(0.0, -1.0),
+            center: Vec2::ZERO, radius: 1.0, a0: PI / 2.0, a1: -PI / 2.0,
+        };
+        // Left half of the unit circle at (10, 0): pi/2 -> 3pi/2 through pi,
+        // so its leftmost point (9, 0) is on the arc.
+        let left = Seg::Arc {
+            a: Vec2::new(10.0, 1.0), b: Vec2::new(10.0, -1.0),
+            center: Vec2::new(10.0, 0.0), radius: 1.0, a0: PI / 2.0, a1: 1.5 * PI,
+        };
+        let d = seg_seg_distance(&right, &left);
+        assert!((d - 8.0).abs() < 1e-4, "want 10 - 1 - 1 = 8, got {d}");
+    }
+
+    /// A loop strictly inside another reports the gap between boundaries, not
+    /// zero — this is exactly how the island clearance test uses it.
+    #[test]
+    fn nested_loops_report_the_boundary_gap() {
+        let outer = Sketch::rectangle(0.0, 0.0, 20.0, 20.0).loops[0].clone();
+        let inner = Sketch::rectangle(0.0, 0.0, 10.0, 10.0).loops[0].clone();
+        let d = min_loop_distance(&inner, &outer);
+        assert!((d - 5.0).abs() < 1e-5, "want 5, got {d}");
+    }
+
+    #[test]
+    fn overlapping_loops_are_zero() {
+        let a = Sketch::rectangle(0.0, 0.0, 20.0, 20.0).loops[0].clone();
+        let b = Sketch::rectangle(15.0, 0.0, 20.0, 20.0).loops[0].clone();
+        assert_eq!(min_loop_distance(&a, &b), 0.0);
+    }
+
+    /// A rounded rect inside a plain one: the closest approach is corner arc to
+    /// straight side, which only the radial candidate finds.
+    #[test]
+    fn rounded_island_in_a_square_measures_from_the_arc() {
+        let outer = Sketch::rectangle(0.0, 0.0, 30.0, 30.0).loops[0].clone();
+        let island = Sketch::rounded_rect(0.0, 0.0, 10.0, 10.0, 2.0).loops[0].clone();
+        let d = min_loop_distance(&island, &outer);
+        assert!((d - 10.0).abs() < 1e-5, "want 15 - 5 = 10, got {d}");
+    }
+}

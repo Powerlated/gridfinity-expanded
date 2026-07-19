@@ -33,7 +33,7 @@ use crate::layout::{
 };
 use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
-use crate::kernel::region2d::{chain_loops, region_difference, split_regions};
+use crate::kernel::region2d::{chain_loops, min_loop_distance, region_difference, split_regions};
 use crate::kernel::program::{
     DirLoop as POpDirLoop, HoleProfile as PHoleProfile, Op as POp, PlaneRef as PPlaneRef, Program,
     run_all,
@@ -994,6 +994,11 @@ fn chain_fragments(mut frags: Vec<Vec<Seg>>) -> Vec<Vec<Seg>> {
 struct Island {
     segs: Vec<Seg>,
     top: Option<f32>,
+    /// This island's own floor-blend radius, clamped to what *its* corners can
+    /// take. Independent of the cavity loop's: an island is a separate closed
+    /// chain of floor-wall edges, so `blend_edges` rolls it as its own blend
+    /// and a sharp corner here says nothing about the compartment boundary.
+    fr: f32,
 }
 
 /// One boundary-contact partial-height inner wall's pieces on a cavity loop.
@@ -1122,30 +1127,25 @@ fn inner_wall_quad(w: &InnerWall, r: f32) -> Option<Vec<Seg>> {
 /// sweep has to clear a boundary that has already retreated by `r`. Testing
 /// against `outer` grown inward by `r` is the same thing as testing the island
 /// grown by `2r` against `outer`, and only one of those needs an offset.
+/// Is there room for an island's floor blend and the compartment boundary's to
+/// run out side by side?
+///
+/// Both are concave floor-wall edges, so each consumes its own radius of floor
+/// measured from its own boundary — the island's outward, the compartment's
+/// inward. They fit exactly when the gap between the two loops is at least the
+/// sum. `min_loop_distance` answers that in closed form, so this needs no
+/// offset construction and no sampling.
+fn island_clears(island: &[Seg], outer: &[Seg], needed: f32) -> bool {
+    needed <= 0.0 || min_loop_distance(island, outer) >= needed
+}
+
 fn inner_wall_quad_in(w: &InnerWall, r: f32, outer: &[Seg]) -> Option<Vec<Seg>> {
     let sharp = inner_wall_quad(w, 0.0)?;
     if r < 0.02 {
         return Some(sharp);
     }
-    let (a, b) = (Vec2::new(w.x1, w.y1), Vec2::new(w.x2, w.y2));
-    let d = b - a;
-    let len = d.length();
-    if len < 0.1 {
-        return Some(sharp);
-    }
-    let u = d / len;
-    let g = 2.0 * r;
-    let grown = InnerWall {
-        x1: a.x - u.x * g,
-        y1: a.y - u.y * g,
-        x2: b.x + u.x * g,
-        y2: b.y + u.y * g,
-        width: w.width.max(0.4) + 2.0 * g,
-        height: w.height,
-    };
-    let Some(footprint) = inner_wall_quad(&grown, g) else { return Some(sharp) };
-    let clears = region_difference(&[footprint], &[outer.to_vec()]).is_empty();
-    if clears { inner_wall_quad(w, r) } else { Some(sharp) }
+    let floats_free = sharp.iter().all(|s| point_in_segs(s.start(), outer));
+    if floats_free { inner_wall_quad(w, r) } else { Some(sharp) }
 }
 
 // ── Peg authoring ────────────────────────────────────────────────────────────
@@ -1422,7 +1422,7 @@ fn plan_piece(
         };
         let islands: Vec<Island> = holes_of(ol)
             .iter()
-            .map(|il| Island { segs: shape_cavity_loop(il, rc, fr), top: None })
+            .map(|il| Island { segs: shape_cavity_loop(il, rc, fr), top: None, fr: 0.0 })
             .collect();
         // Free-form full-height inner walls: subtract each footprint quad
         // from this loop's region (outer + island holes) — a free-standing
@@ -1466,7 +1466,7 @@ fn plan_piece(
                     }
                 }
                 if let Some(bi) = best {
-                    outs[bi].1.push(Island { segs: reverse_loop(&h), top: None });
+                    outs[bi].1.push(Island { segs: reverse_loop(&h), top: None, fr: 0.0 });
                 }
             }
             for (o, isls) in outs {
@@ -1514,7 +1514,7 @@ fn plan_piece(
                     // Free-floating: round the corners so the floor blend's
                     // tangent chain can continue around the tower.
                     let rounded = inner_wall_quad(w, fr).expect("non-degenerate (filtered above)");
-                    eisl.push(Island { segs: rounded, top: Some(t) });
+                    eisl.push(Island { segs: rounded, top: Some(t), fr: 0.0 });
                     continue 'walls;
                 }
                 if slope.is_some() {
@@ -1576,11 +1576,34 @@ fn plan_piece(
                 *loop_fr = 0.0;
             }
         };
-        for (cl, islands, banded) in entries {
+        for (cl, mut islands, banded) in entries {
+            // The compartment boundary and each island are *separate* closed
+            // chains of floor-wall edges, so each is clamped against its own
+            // corners and blended at its own radius. Collapsing them to one
+            // radius used to mean a single sharp island corner silently dropped
+            // the compartment's blend as well — and a free-floating divider
+            // could never be filleted at all without the boundary paying for it.
             let mut loop_fr = fr;
             clamp(&cl.segs, true, &mut loop_fr);
+            // The compartment's own blend runs out `loop_fr` inward from its
+            // boundary, so it needs that much clear of every island before the
+            // islands get a say.
             for isl in &islands {
-                clamp(&isl.segs, false, &mut loop_fr);
+                if !island_clears(&isl.segs, &cl.segs, loop_fr) {
+                    loop_fr = 0.0;
+                }
+            }
+            for isl in &mut islands {
+                let mut island_fr = fr;
+                clamp(&isl.segs, false, &mut island_fr);
+                // The island's blend eats `island_fr` outward and the
+                // compartment's eats `loop_fr` inward; overlapping leaves no
+                // floor for either to run out on. Give up the island's — the
+                // compartment boundary is the more visible edge.
+                if !island_clears(&isl.segs, &cl.segs, island_fr + loop_fr) {
+                    island_fr = 0.0;
+                }
+                isl.fr = island_fr;
             }
             // Banded loops always carry sharp notch corners in outline_a.
             if cl.touched() || banded.is_some() {
@@ -2166,9 +2189,8 @@ fn plan_cavity_flat(
             Slab::new(vec![isl.segs.clone()], floor_z, isl.top.unwrap_or(total_h)),
         ));
     }
-    let filleting = loop_fr > 0.01;
     let mut blends: Vec<(Seg, f32, f32)> = Vec::new();
-    if filleting {
+    if loop_fr > 0.01 {
         blends.extend(shape.iter().map(|s| (*s, floor_z, loop_fr)));
     }
     let mut tops = Vec::new();
@@ -2177,8 +2199,9 @@ fn plan_cavity_flat(
         // high its tower rises — partial-height ones still meet the floor and
         // need the blend there just as much. (The top check below gates only
         // rim assembly: a tower below the rim does not contribute a hole.)
-        if filleting {
-            blends.extend(isl.segs.iter().map(|s| (*s, floor_z, loop_fr)));
+        // The island's own radius, not the compartment's: separate chains.
+        if isl.fr > 0.01 {
+            blends.extend(isl.segs.iter().map(|s| (*s, floor_z, isl.fr)));
         }
         if isl.top.is_none() {
             // The stack emits an island as a CW hole of the void, so the rim
