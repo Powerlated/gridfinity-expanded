@@ -8,7 +8,7 @@ use std::f32::consts::PI;
 
 /// One boundary segment. `a`/`b` are the endpoints in traversal order; for an
 /// `Arc`, `a0`/`a1` are the (unwrapped) angles at `a`/`b` about `center`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Seg {
     Line {
         a: Vec2,

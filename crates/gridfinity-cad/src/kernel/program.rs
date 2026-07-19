@@ -10,6 +10,11 @@
 //!
 //! Planning stays in the model layer: it decides *what* to build and emits the
 //! program. The kernel only executes.
+//!
+//! Datums ([`Op::Sketch`], [`Op::Plane`]) register named symbols but emit no
+//! geometry — downstream feature ops look them up by name through
+//! [`Program::sketch`] / [`Program::plane`]. This is the Solidworks/Onshape
+//! "named sketch" idiom: profiles are authored once and referenced many times.
 
 use crate::kernel::build::{loop_of, ring, seg_edge, wall_between};
 use crate::kernel::fillet::blend_edges;
@@ -18,12 +23,21 @@ use crate::kernel::math::{Vec3, vec3_of};
 use crate::kernel::sketch::Seg;
 use crate::kernel::slab::{self, Slab, SlabOpts};
 use crate::kernel::topo::{Builder, EdgeId, Solid};
+use std::collections::HashMap;
 
 /// A cap loop plus the direction to traverse it (`true` = as authored).
 pub type DirLoop = (Vec<Seg>, bool);
 
 /// One modelling operation.
 pub enum Op {
+    /// Register a named 2D profile for downstream ops to reference. Emits no
+    /// geometry. The same profile can drive an `Extrude`, a `Loft` profile,
+    /// and a `PlanarFace` outer without being re-cloned at each call site.
+    Sketch { name: String, profile: Vec<Seg> },
+    /// Register a named plane (datum) for downstream ops to reference. Emits
+    /// no geometry. `origin`/`normal` define an arbitrary plane in 3D; a
+    /// horizontal plane at `z` is `origin = (0,0,z), normal = (0,0,1)`.
+    Plane { name: String, origin: Vec3, normal: Vec3 },
     /// Side faces between two profiles at two heights. Equal profiles give a
     /// prism band; differing ones give a loft band, with cones wherever an
     /// arc's radius changes — the one thing slabs cannot express.
@@ -49,6 +63,8 @@ impl Op {
     /// Short kind name, for the debugger's list.
     pub fn kind(&self) -> &'static str {
         match self {
+            Op::Sketch { .. } => "sketch",
+            Op::Plane { .. } => "plane",
             Op::Wall { .. } => "wall",
             Op::Cap { .. } => "cap",
             Op::Slabs { .. } => "slabs",
@@ -66,10 +82,27 @@ pub struct Step {
 #[derive(Default)]
 pub struct Program {
     pub steps: Vec<Step>,
+    /// Named sketch profiles, registered by `Op::Sketch`. Indexed at `push`
+    /// time so a downstream op can look up by name without re-running.
+    sketches: HashMap<String, Vec<Seg>>,
+    /// Named datum planes, registered by `Op::Plane`.
+    planes: HashMap<String, (Vec3, Vec3)>,
 }
 
 impl Program {
     pub fn push(&mut self, label: impl Into<String>, op: Op) {
+        // Datum ops register their symbols at push time, so lookups work even
+        // when later feature ops are masked off in the debugger (a datum
+        // itself never needs to "run").
+        match &op {
+            Op::Sketch { name, profile } => {
+                self.sketches.insert(name.clone(), profile.clone());
+            }
+            Op::Plane { name, origin, normal } => {
+                self.planes.insert(name.clone(), (*origin, *normal));
+            }
+            _ => {}
+        }
         self.steps.push(Step { label: label.into(), op });
     }
     pub fn len(&self) -> usize {
@@ -77,6 +110,17 @@ impl Program {
     }
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
+    }
+
+    /// Look up a named sketch profile. Returns `None` if no `Op::Sketch`
+    /// registered `name`.
+    pub fn sketch(&self, name: &str) -> Option<&[Seg]> {
+        self.sketches.get(name).map(|v| v.as_slice())
+    }
+
+    /// Look up a named datum plane as `(origin, normal)`.
+    pub fn plane(&self, name: &str) -> Option<(Vec3, Vec3)> {
+        self.planes.get(name).copied()
     }
 }
 
@@ -100,6 +144,10 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
             continue;
         }
         match &st.op {
+            Op::Sketch { .. } | Op::Plane { .. } => {
+                // Datums only — symbols were registered at push time; nothing
+                // to emit. Kept explicit so the match stays exhaustive.
+            }
             Op::Wall { lower, upper, z0, z1, outward } => {
                 let lo = ring(&mut b, lower, *z0);
                 let hi = ring(&mut b, upper, *z1);
@@ -204,5 +252,59 @@ mod tests {
         let s = run_all(&p).expect("blend run");
         s.validate().expect("blended box is manifold");
         assert!(s.faces.len() > plain, "blend added faces");
+    }
+
+    // ── Phase 0: datums ────────────────────────────────────────────────────
+
+    #[test]
+    fn sketch_registers_name_and_is_lookupable() {
+        let mut p = Program::default();
+        let r = rect(0.0, 0.0, 10.0, 20.0);
+        p.push("outline", Op::Sketch { name: "outline".into(), profile: r.clone() });
+        assert_eq!(p.sketch("outline").unwrap(), r.as_slice(), "sketch lookup must return the profile");
+        assert!(p.sketch("missing").is_none(), "unknown name returns None");
+    }
+
+    #[test]
+    fn plane_registers_name_and_is_lookupable() {
+        let mut p = Program::default();
+        let (origin, normal) = (Vec3::new(0.0, 0.0, 8.2), Vec3::new(0.0, 0.0, 1.0));
+        p.push(
+            "floor datum",
+            Op::Plane { name: "floor".into(), origin, normal },
+        );
+        let got = p.plane("floor").expect("plane lookup");
+        assert_eq!(got.0, origin);
+        assert_eq!(got.1, normal);
+    }
+
+    #[test]
+    fn datum_ops_emit_no_geometry() {
+        // A program of only Sketch + Plane should produce an empty solid, and
+        // every prefix (including all-datums-off and all-datums-on) must run.
+        let r = rect(0.0, 0.0, 10.0, 20.0);
+        let mut p = Program::default();
+        p.push("s", Op::Sketch { name: "s".into(), profile: r });
+        p.push("p", Op::Plane { name: "p".into(), origin: Vec3::ZERO, normal: Vec3::Z });
+        for n in 0..=p.len() {
+            let s = run(&p, |i| i < n).expect("prefix");
+            assert_eq!(s.faces.len(), 0, "datums emit nothing (prefix {n})");
+        }
+    }
+
+    #[test]
+    fn datum_lookup_survives_masked_downstream_op() {
+        // The sketch must be lookupable even when the feature op that uses it
+        // is masked off — symbols register at push time, not run time.
+        let r = rect(0.0, 0.0, 10.0, 20.0);
+        let mut p = Program::default();
+        p.push("outline", Op::Sketch { name: "outline".into(), profile: r.clone() });
+        p.push(
+            "walls",
+            Op::Wall { lower: r.clone(), upper: r, z0: 0.0, z1: 5.0, outward: true },
+        );
+        // Skip the Wall op entirely; the sketch symbol must still resolve.
+        let _ = run(&p, |i| i != 1).expect("masked run");
+        assert_eq!(p.sketch("outline").unwrap().len(), 4, "sketch symbol survives masked downstream op");
     }
 }
