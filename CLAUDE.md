@@ -100,8 +100,13 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   angles stay wrap-free.
 - **`topo.rs`** — the B-rep: `Vertex`/`Edge`/`Loop`/`Face`/`Solid`. **Not** half-edge with
   next/prev pointers — loops are explicit ordered `(EdgeId, forward)` lists, edges are shared.
-  `Builder` interns vertices and edges (edge key = sorted endpoints **+ welded midpoint**, so a
-  circle's two semicircle arcs don't collapse into one edge). `Solid::validate()` enforces the
+  Storage is **flat CSR, not nested `Vec`s**: the `Solid` holds one `loop_edges` arena plus a
+  `loops` offset table, and a `Face` is `{ surface, sense, loop0, n_loops }` naming a contiguous
+  loop range (outer first). `Loop` survives only as a *transient* input to `Builder::face`; read
+  loops off the solid via `outer_edges`/`face_loops`/`inner_loops`/`n_inners`. Cloning a `Solid`
+  (which `blend_edges` does repeatedly) is therefore a few flat `memcpy`s. `Builder` interns
+  vertices and edges (edge key = sorted endpoints **+ welded midpoint**, so a circle's two
+  semicircle arcs don't collapse into one edge) and flattens each face's loops into the arena. `Solid::validate()` enforces the
   manifold invariant: **every edge used exactly twice, once in each direction** — assert it in
   tests after any construction change. `Solid::validate()` is the cheap topology check;
   [`audit`](gridfinity_cad::audit) is the heavy *geometric* soundness checker that also confirms
@@ -275,12 +280,27 @@ failing rather than panicking on the way out.
 **`kernel/perf.rs`** is the instrumentation. A fixed `Metric` set (region booleans, the seg/seg
 solve, builder interning, blending, tessellation, slabs) backed by global relaxed atomics, plus a
 `CountingAlloc<A>` the *binary* installs as `#[global_allocator]` (a library must not choose the
-allocator for its dependents). **Off by default** — every entry point starts with one relaxed load,
-so an uninstrumented build pays a predictable branch and nothing else. `count()` for leaves too hot
-to time (`point_in_segs` runs millions of times; two `Instant::now()` calls would cost more than the
-function), `scope()` for everything else. **Timings nest** — `split_regions` includes the
-`seg_seg_points` beneath it — so the column does not sum to the wall time. `cargo test -p
-gridfinity-cad perf_report -- --ignored --nocapture` prints the same table from the terminal.
+allocator for its dependents; the GUI installs it, and `lib.rs` installs it `cfg(test)` so
+`perf_report` reads churn headlessly). **Off by default** — every entry point starts with one
+relaxed load, so an uninstrumented build pays a predictable branch and nothing else. `count()` for
+leaves too hot to time (`point_in_segs` runs millions of times; two `Instant::now()` calls would
+cost more than the function), `scope()` for everything else. **Timings nest** — `split_regions`
+includes the `seg_seg_points` beneath it — so the column does not sum to the wall time.
+**Allocations attribute to the innermost open scope** (an allocation-free fixed-depth `Copy` scope
+stack in a thread-local `Cell` — never a `Vec`, so pushing a scope can't re-enter the allocator);
+that attribution is *exclusive*, unlike the nesting time column, and the shortfall against the
+global total is unscoped construction churn. `perf_report` reports the **2nd** rebuild (the
+slider-drag case). `cargo test -p gridfinity-cad perf_report -- --ignored --nocapture` prints the
+table from the terminal.
+
+That instrumentation drove a churn-first data-oriented pass: a `Solid` is now flat CSR arenas
+(`loop_edges` + `loops` offsets, a compact `Face { loop0, n_loops }`), not per-`Face`/per-`Loop`
+`Vec`s, so cloning it is a few `memcpy`s; `Solid::edge_faces` returns a two-pass CSR (`EdgeFaces`,
+`ef[e]` slices) instead of a `Vec` per edge; and `fillet`/`chamfer`'s `rebuild_loop` takes that
+`edge_faces` as a borrow rather than recomputing it once per face. Together those cut a default
+rebuild's allocation churn ~77% (blend_edges ~92%). The residual top churn source is `earcutr`
+inside `tess.rs` — a third-party, at-the-tessellation-boundary allocation that is deliberately not
+chased.
 
 `debugger.rs` is the construction debugger (right panel, toggled from the params panel). It calls
 `gridfinity::program(&p)` to get the model's op list, caches per-prefix face counts for display,
