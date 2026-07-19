@@ -858,7 +858,10 @@ mod tests {
         let (base, br) = blends_near(&plain, (41.75, 41.75), (41.75, 41.75), 1e4);
         assert_eq!(base, 4, "plain bin should have 4 corner blends, got {base}");
         assert_eq!(total, base + 4, "island blends must add to the compartment's");
-        assert!((r - br).abs() < 1e-3, "island blend {r} should match the wall's {br}");
+        // Deliberately *not* asserted equal: the two chains are clamped
+        // independently now, so the compartment's radius reflects its own
+        // corner arcs and the island's reflects its own.
+        assert!(br > 0.1, "compartment blend radius collapsed to {br}");
     }
 
     /// The clearance test's other side, and the point of blending each chain
@@ -887,14 +890,72 @@ mod tests {
         assert_eq!(total, 4, "the compartment must keep its own four corner blends");
     }
 
-    /// A divider that crosses the cavity boundary notches the loop, and the
-    /// notch corners are kept sharp so the boolean's cut points line up exactly
-    /// with the cavity's own split points (see `inner_wall_quad_in`). Sharp
-    /// corners drop the loop's blend, so a crossing divider is currently not
-    /// filleted anywhere — including the compartment's outer corners, which
-    /// have done nothing wrong.
+    /// A divider that reaches the compartment boundary without splitting it
+    /// notches the cavity loop, and the region boolean leaves sharp corners
+    /// where the wall's sides meet the boundary. Those corners are rounded
+    /// afterwards, so the loop stays tangent-continuous and keeps its floor
+    /// blend — before, a single one of them dropped the blend for the whole
+    /// compartment.
+    ///
+    /// Rounding has to happen after the cut, not before: rounding the wall
+    /// first moves the intersection points off where the cavity's own split
+    /// routines put them, and the notch mouth stops welding.
     #[test]
-    #[ignore = "crossing dividers keep sharp notch corners, which drops the whole loop's floor blend"]
+    fn notching_divider_keeps_its_floor_fillet() {
+        let p = gridfinity::Params {
+            inner_walls: vec![gridfinity::InnerWall {
+                x1: 90.0, y1: 30.0, x2: 40.0, y2: 50.0, width: 3.0, height: None,
+            }],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&p);
+        solid.validate().expect("notching divider topology valid");
+        assert!(crate::audit(&solid).is_ok(), "B-rep must be sound:
+{}", crate::audit(&solid));
+        assert_watertight(&tessellate(&solid, 6).to_mesh());
+        let (n, r) = blends_near(&solid, (41.75, 41.75), (41.75, 41.75), 1e4);
+        assert!(n > 0, "a notching divider must not cost the compartment its fillet");
+        assert!(r > 0.1, "blend radius collapsed to {r}");
+    }
+
+    /// The degenerate-torus guard. A blend rolling inside a corner arc produces
+    /// a torus of major radius `arc_radius - blend_radius`; letting that reach
+    /// zero makes a ring thinner than the tessellator samples, and the mesh
+    /// leaks around the corner. Every blend torus in a stock bin must be a real
+    /// one.
+    #[test]
+    fn blend_tori_never_degenerate_to_a_ring() {
+        for walls in [
+            vec![],
+            vec![gridfinity::InnerWall { x1: 90.0, y1: 30.0, x2: 40.0, y2: 50.0, width: 3.0, height: None }],
+            vec![gridfinity::InnerWall { x1: 22.0, y1: 30.0, x2: 62.0, y2: 55.0, width: 2.4, height: None }],
+        ] {
+            let p = gridfinity::Params { inner_walls: walls, ..gridfinity::Params::default() };
+            let solid = gridfinity::build(&p);
+            for f in &solid.faces {
+                if let geom::Surface::Torus { major_r, minor_r, .. } = f.surface {
+                    assert!(major_r > 0.05, "degenerate blend torus: major {major_r} minor {minor_r}");
+                }
+            }
+        }
+    }
+
+    /// A divider that *splits* the compartment in two is the one wall shape
+    /// still left unfilleted.
+    ///
+    /// The sharp-corner problem is solved: `round_sharp_corners` rounds what
+    /// the region boolean leaves behind, and a divider that merely notches the
+    /// compartment is filleted and watertight. Splitting it is what fails, and
+    /// the failure has moved into `blend_edges` — it rebuilds the solid and
+    /// reports "loop not closed" around the rounded junction where the divider
+    /// meets the outer wall. The loops themselves are sound: the same geometry
+    /// builds clean and leak-free at `floor_fillet = 0`.
+    ///
+    /// So this waits on the blender, not on the model. Until then those loops
+    /// are left sharp deliberately, which reverts them to the old unfilleted
+    /// result rather than failing the build.
+    #[test]
+    #[ignore = "blend_edges cannot close the corner where a compartment-splitting divider meets the wall"]
     fn freeform_crossing_divider_is_filleted() {
         let p = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {

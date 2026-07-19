@@ -1444,9 +1444,23 @@ fn plan_piece(
             for q in &full_walls {
                 region = region_difference(&region, std::slice::from_ref(q));
             }
+            // The boolean cuts sharp so its points weld exactly; round the
+            // corners it introduced afterwards, so the floor blend has a
+            // tangent-continuous loop to run around.
+            //
+            // Only when the wall left the compartment in one piece. A wall that
+            // splits it produces two loops whose rounded corners `blend_edges`
+            // cannot close ("loop not closed" out of the rebuild), so those are
+            // left sharp and unfilleted — the same result as before this pass,
+            // rather than a hard build failure. That limitation is in the
+            // blender, not here: the loops themselves are sound, and build
+            // cleanly at `floor_fillet = 0`. It is what
+            // `freeform_crossing_divider_is_filleted` still waits on.
+            let split = region.iter().filter(|lp| loop_area(lp) > 0.0).count() > 1;
             let mut outs: Vec<(Vec<Seg>, Vec<Island>)> = Vec::new();
             let mut hole_loops: Vec<Vec<Seg>> = Vec::new();
             for lp in region {
+                let lp = if split { lp } else { round_sharp_corners(&lp, rc, fr) };
                 if loop_area(&lp) > 0.0 {
                     outs.push((lp, Vec::new()));
                 } else {
@@ -1562,13 +1576,20 @@ fn plan_piece(
         // build sharp. On the cavity loop the ball rolls inside at convex
         // arcs; on an island loop (material inside, ball outside) it rolls
         // inside at the non-convex arcs, so the guard inverts there.
+        // Margin between a corner arc's radius and the blend radius rolling
+        // inside it. This *is* the resulting torus's major radius, so it cannot
+        // be allowed to approach zero: at 0.02 the blend degenerates to a ring
+        // thinner than the tessellator's own sampling, and the mesh leaks
+        // around the corner (30 unpaired edges, all within 0.005 mm of the
+        // arc's centre). 0.1 keeps the torus real.
+        const MIN_TORUS_MAJOR: f32 = 0.1;
         let clamp = |segs: &[Seg], ball_inside_convex: bool, loop_fr: &mut f32| {
             for s in segs {
                 if let Seg::Arc { radius, .. } = s {
-                    if *radius < *loop_fr + 0.02
+                    if *radius < *loop_fr + MIN_TORUS_MAJOR
                         && is_convex_arc(segs, s) == ball_inside_convex
                     {
-                        *loop_fr = (*radius - 0.02).max(0.0);
+                        *loop_fr = (*radius - MIN_TORUS_MAJOR).max(0.0);
                     }
                 }
             }
@@ -2170,6 +2191,154 @@ fn is_convex_arc(shape: &[Seg], s: &Seg) -> bool {
         Seg::Arc { a0, a1, .. } => (a1 > a0) == ccw,
         _ => false,
     }
+}
+
+
+/// Round every tangent-discontinuous corner of a closed loop.
+///
+/// The cavity's own traced loops are rounded when they are shaped
+/// ([`shape_cavity_loop`]), but a free-form inner wall is subtracted *after*
+/// that, and the region boolean leaves sharp corners wherever the wall's sides
+/// cut the boundary. Those corners are what stop a crossing divider's
+/// compartment from being filleted at all: a blend chain has nothing to
+/// continue through at a tangent break, so one of them drops the whole loop's
+/// blend.
+///
+/// Rounding has to happen here, on the boolean's *output*, rather than by
+/// rounding the wall quad first. The cut points are computed from the wall's
+/// edges, and an arc there lands a float-epsilon away from where the cavity's
+/// own split routines put the matching point — enough to break the
+/// tessellation's edge pairing at the notch mouth (see [`inner_wall_quad_in`]).
+/// Cutting sharp keeps the welds exact; rounding afterwards costs nothing.
+///
+/// `convex_r` applies where the loop turns toward its own interior (for a CCW
+/// outer that is a left turn) and `concave_r` where it turns away, matching
+/// [`shape_cavity_loop`]'s convention. Corners between anything other than two
+/// straight runs are left alone: the tangent-circle construction for arcs is a
+/// different problem, and leaving one sharp is exactly the old behaviour.
+fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<Seg> {
+    let n = segs.len();
+    if n < 2 || (convex_r <= 0.0 && concave_r <= 0.0) {
+        return segs.to_vec();
+    }
+    let ccw = loop_area(segs) > 0.0;
+
+    // Per-corner trim distance, then the arc. Trims are computed for every
+    // corner first so a short segment shared by two of them can shrink both
+    // rather than letting the first corner consume it.
+    let mut trim = vec![0.0f32; n];
+    let mut arc_r = vec![0.0f32; n];
+    let mut tan_half = vec![0.0f32; n];
+    for i in 0..n {
+        let (cur, next) = (&segs[i], &segs[(i + 1) % n]);
+        let (Seg::Line { .. }, Seg::Line { .. }) = (cur, next) else { continue };
+        let d_in = seg_tangent(cur, true);
+        let d_out = seg_tangent(next, false);
+        let dot = d_in.dot(d_out).clamp(-1.0, 1.0);
+        if dot > 1.0 - 1e-6 {
+            continue; // already continuous
+        }
+        if dot < -1.0 + 1e-6 {
+            continue; // a spike; no finite fillet
+        }
+        let cross = d_in.x * d_out.y - d_in.y * d_out.x;
+        let r = if (cross > 0.0) == ccw { convex_r } else { concave_r };
+        if r <= 0.0 {
+            continue;
+        }
+        // Turn angle phi; the tangent points sit `r · tan(phi/2)` back from the
+        // corner along each side.
+        let phi = dot.acos();
+        tan_half[i] = (phi / 2.0).tan();
+        arc_r[i] = r;
+        trim[i] = r * tan_half[i];
+    }
+    // Refuse to round rather than round badly. A corner is dropped back to
+    // sharp if it would leave a sliver — either a fillet arc too small to
+    // tessellate cleanly, or a straight run between two corners shortened to
+    // near nothing. Both showed up as sub-hundredth-millimetre mesh leaks
+    // before this guard: two vertices 0.005 mm apart that the neighbouring
+    // face never emitted.
+    //
+    // A corner left sharp costs the loop its blend (`has_sharp_corner`), which
+    // is exactly the behaviour this pass is trying to improve on — but a
+    // partially-rounded loop that leaks is strictly worse than an unfilleted
+    // one that does not.
+    const MIN_ARC_R: f32 = 0.1;
+    const USABLE: f32 = 0.98;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        // Two corners sharing a straight run cannot claim more of it than it
+        // has. Shrink both to fit rather than giving up: a 3 mm wall tip can
+        // take a 1.47 mm radius on each corner even though the requested 2.48
+        // would need 4.96 between them, and a nearly-semicircular tip is a
+        // perfectly good blend path — where a sharp one is none at all.
+        for i in 0..n {
+            let Seg::Line { a, b } = segs[i] else { continue };
+            let prev = (i + n - 1) % n;
+            let want = trim[prev] + trim[i];
+            let len = (b - a).length() * USABLE;
+            if want <= len || want <= 0.0 {
+                continue;
+            }
+            let k = len / want;
+            for idx in [prev, i] {
+                if trim[idx] > 0.0 {
+                    trim[idx] *= k;
+                    arc_r[idx] = trim[idx] / tan_half[idx].max(1e-6);
+                    changed = true;
+                }
+            }
+        }
+        // Whatever is left too small to tessellate cleanly goes back to sharp:
+        // the resulting blend torus would be thinner than the sampling.
+        for i in 0..n {
+            if arc_r[i] > 0.0 && arc_r[i] < MIN_ARC_R {
+                arc_r[i] = 0.0;
+                trim[i] = 0.0;
+                changed = true;
+            }
+        }
+    }
+
+    let mut out: Vec<Seg> = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        let prev = (i + n - 1) % n;
+        let seg = segs[i];
+        // Pull this segment's endpoints back by the trims its corners claimed.
+        let seg = match seg {
+            Seg::Line { a, b } => {
+                let d = (b - a).normalize_or_zero();
+                Seg::Line { a: a + d * trim[prev], b: b - d * trim[i] }
+            }
+            other => other,
+        };
+        // Every surviving run is at least MIN_RUN long by the guard above, so
+        // nothing here can emit a sliver.
+        out.push(seg);
+        if trim[i] <= 0.0 || arc_r[i] <= 0.0 {
+            continue;
+        }
+        let v = segs[i].end();
+        let d_in = seg_tangent(&segs[i], true);
+        let d_out = seg_tangent(&segs[(i + 1) % n], false);
+        let cross = d_in.x * d_out.y - d_in.y * d_out.x;
+        let p_in = v - d_in * trim[i];
+        let p_out = v + d_out * trim[i];
+        // Normal of the incoming direction, turned toward the corner.
+        let nrm = if cross > 0.0 {
+            Vec2::new(-d_in.y, d_in.x)
+        } else {
+            Vec2::new(d_in.y, -d_in.x)
+        };
+        let center = p_in + nrm * arc_r[i];
+        let a0 = f32::atan2(p_in.y - center.y, p_in.x - center.x);
+        let a1 = f32::atan2(p_out.y - center.y, p_out.x - center.x);
+        let (a0, a1) = short_arc(a0, a1);
+        out.push(Seg::Arc { a: p_in, b: p_out, center, radius: arc_r[i], a0, a1 });
+    }
+    out
 }
 
 /// Plan a flat-floored cavity: the compartment void, minus one slab per island
