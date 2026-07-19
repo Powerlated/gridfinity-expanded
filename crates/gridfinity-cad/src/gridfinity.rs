@@ -35,6 +35,7 @@ use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
 use crate::kernel::build::{seg_edge, wall_seg};
 use crate::kernel::segdiff::{chain_loops, split_region_by_quad, subtract_convex_quad};
+use crate::kernel::slab::{Op, Slab, SlabOpts, emit_slabs};
 use crate::kernel::sketch::{Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop};
 use crate::kernel::topo::{Builder, EdgeId, Loop, Solid, VertexId};
 use std::collections::{HashMap, HashSet};
@@ -1744,28 +1745,33 @@ fn build_cavity_flat(
     floor_z: f32,
     total_h: f32,
 ) -> (Vec<EdgeId>, Vec<(Vec<Seg>, RingEdges)>) {
-    let r_lo = ring(b, shape, floor_z);
-    let r_hi = ring(b, shape, total_h);
-    wall_between(b, shape, shape, &r_lo, &r_hi, floor_z, total_h, false);
-
-    let mut fwe: Vec<EdgeId> = r_lo.edges.iter().map(|&(e, _)| e).collect();
-    let mut tops: Vec<(Vec<Seg>, RingEdges)> = Vec::new();
-    let mut floor_holes: Vec<Loop> = Vec::new();
+    // The cavity is a void: the compartment profile, minus each island tower
+    // over its own height. Partial-height islands need no separate capping
+    // code — the band machinery caps them where their slab ends. The rim is
+    // declared open because step 7 supplies that face.
+    let mut ops = vec![(Op::Union, Slab::new(vec![shape.to_vec()], floor_z, total_h))];
     for isl in islands {
-        let t = isl.top.unwrap_or(total_h);
-        let i_lo = ring(b, &isl.segs, floor_z);
-        let i_hi = ring(b, &isl.segs, t);
-        wall_between(b, &isl.segs, &isl.segs, &i_lo, &i_hi, floor_z, t, true);
-        if isl.top.is_some() {
-            // Partial-height inner wall: cap it right here, below the rim.
-            planar(b, t, true, loop_of(&i_hi, true), Vec::new());
-        } else {
-            tops.push((isl.segs.clone(), i_hi));
-            fwe.extend(i_lo.edges.iter().map(|&(e, _)| e));
-        }
-        floor_holes.push(loop_of(&i_lo, false));
+        ops.push((
+            Op::Difference,
+            Slab::new(vec![isl.segs.clone()], floor_z, isl.top.unwrap_or(total_h)),
+        ));
     }
-    planar(b, floor_z, true, loop_of(&r_lo, false), floor_holes);
+    emit_slabs(b, &ops, &SlabOpts { cavity: true, open_at: vec![total_h] })
+        .expect("flat cavity slab stack");
+
+    // Re-derive what callers need. `seg_edge`/`ring` are interned, so these
+    // are the very edges the stack just emitted.
+    let mut fwe: Vec<EdgeId> = shape.iter().map(|s| seg_edge(b, s, floor_z).0).collect();
+    let mut tops: Vec<(Vec<Seg>, RingEdges)> = Vec::new();
+    for isl in islands {
+        if isl.top.is_none() {
+            fwe.extend(isl.segs.iter().map(|s| seg_edge(b, s, floor_z).0));
+            // The stack emitted this island as a CW *hole* of the void, so
+            // hand step 7 a ring wound that way — `loop_of(.., true)` there
+            // must oppose the wall top the stack just built.
+            tops.push((isl.segs.clone(), ring(b, &reverse_loop(&isl.segs), total_h)));
+        }
+    }
     (fwe, tops)
 }
 

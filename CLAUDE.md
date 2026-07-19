@@ -126,6 +126,33 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   across boundary samples the neighbouring face emits individually are fanned back through the
   dropped points (only through vertices earcut didn't use — inserting used ones would duplicate
   triangles).
+- **`segdiff.rs`** — exact 2D boolean algebra on seg-loop regions (outers CCW, holes CW):
+  `region_union`/`region_difference`/`region_intersection`. All four Line/Arc intersection pairs
+  are closed form (line/line by determinant, line/circle by the quadratic, circle/circle by the
+  radical line); cut points are computed once and shared verbatim so selected pieces chain exactly.
+  `presplit_regions` gives several booleans over the same inputs one common segmentation — required
+  whenever their results must weld to each other. `subtract_convex_quad`/`split_region_by_quad` are
+  the older region-minus-convex-quad special case the inner-wall band path still uses.
+- **`slab.rs`** — the **restricted boolean**: `build_slabs(&[(Op, Slab)])`, where a `Slab` is a 2D
+  region swept over a z-range. z endpoints cut the stack into bands, each band's cross-section is
+  the 2D boolean of the slabs covering it, and the solid is assembled band by band — walls per band
+  (bands are delimited by *all* breakpoints, so nothing changes inside one and verticals need no
+  splitting), plus caps at each interface from `below − above` (facing up) and `above − below`
+  (facing down), treating outside the stack as empty. **Loop directions are never reoriented**: the
+  boolean emits every run material-on-the-left, which is exactly what both the wall and the cap
+  need, and a loop can be a cap's hole *and* the outer of the band wall above it (a shoulder under
+  a tower) — reversing it for one role breaks the other. Both operands being z-prisms keeps every
+  intersection curve vertical or horizontal, which is what keeps this inside the analytic curve set
+  (a general cylinder/cylinder boolean would need a quartic). Cones/spheres/tori are not
+  expressible: a chamfered peg stays a `loft`, a rolling blend stays `fillet`.
+  `emit_slabs` writes into an existing `Builder` so a stack can share edges with hand-built
+  geometry; `SlabOpts::cavity` emits the stack as a void (material outside), and `open_at` skips
+  the cap at an interface the caller closes itself. **Gotcha:** `wall_seg`'s `outward` flips only
+  the surface normal, never the loop direction, so a cavity's walls traverse exactly like a solid's
+  — `slab::emit_cap` therefore keeps solid-mode winding and flips only `Builder::face`'s `sense`.
+  Using `build::cap` there instead would flip winding too and break the wall/cap pairing.
+  `build_cavity_flat` is the first model consumer: the compartment void minus one slab per island
+  tower, which gets partial-height islands capped by the band machinery for free.
 - **`rectregion.rs`** — rectilinear region engine: unions/differences of axis-aligned rects
   resolved on a compressed coordinate grid, traced material-on-the-left (outer CCW, holes CW), then
   per-corner arc rounding with clamping (`trace_rects`, `shape_loop`). The cavity planner and

@@ -18,6 +18,7 @@ pub mod math;
 pub mod mesh;
 pub mod rectregion;
 pub mod segdiff;
+pub mod slab;
 pub mod sketch;
 pub mod tess;
 pub mod topo;
