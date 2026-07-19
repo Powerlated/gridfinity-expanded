@@ -33,8 +33,11 @@ use crate::layout::{
 use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
 use crate::kernel::region2d::{chain_loops, region_difference, split_regions};
-use crate::kernel::program::{DirLoop as POpDirLoop, Op as POp, PlaneRef as PPlaneRef, Program, run_all};
-use crate::kernel::slab::{Op as SlabOp, Slab, SlabOpts, emit_slabs, plan_bands};
+use crate::kernel::program::{
+    DirLoop as POpDirLoop, HoleProfile as PHoleProfile, Op as POp, PlaneRef as PPlaneRef, Program,
+    run_all,
+};
+use crate::kernel::slab::{Op as SlabOp, Slab, SlabOpts, plan_bands};
 use crate::kernel::sketch::{Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop};
 use crate::kernel::topo::{Builder, EdgeId, Loop, Solid, VertexId};
 use std::collections::{HashMap, HashSet};
@@ -1025,50 +1028,6 @@ fn split_peg_profile(
     out
 }
 
-/// Magnet/screw pockets for one cell, drilled up from z = 0. Returns pocket rim
-/// rings (holes in the peg's bottom cap).
-fn cell_fasteners(b: &mut Builder, p: &Params, c: GridCell) -> Vec<Vec<Seg>> {
-    let mut out = Vec::new();
-    if !p.magnet_holes && !p.screw_holes {
-        return out;
-    }
-    let ccx = (c.x as f32 + 0.5) * GRID_PITCH;
-    let ccy = (c.y as f32 + 0.5) * GRID_PITCH;
-    for (dx, dy) in [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
-        let hx = ccx + dx * FASTENER_INSET;
-        let hy = ccy + dy * FASTENER_INSET;
-        out.push(match (p.magnet_holes, p.screw_holes) {
-            (true, true) => drill(
-                b,
-                hx,
-                hy,
-                &[(MAGNET_RADIUS, MAGNET_DEPTH), (SCREW_RADIUS, SCREW_DEPTH)],
-            ),
-            (true, false) => drill(b, hx, hy, &[(MAGNET_RADIUS, MAGNET_DEPTH)]),
-            (false, true) => drill(b, hx, hy, &[(SCREW_RADIUS, SCREW_DEPTH)]),
-            (false, false) => unreachable!(),
-        });
-    }
-    out
-}
-
-/// A pocket drilled up from the peg underside: one concentric bore per step,
-/// each `(radius, depth)`. Every step is a slab, so a plain blind hole and a
-/// magnet/screw counterbore are the same code — the band machinery raises the
-/// shoulder where one bore ends and the next continues. The mouth at z = 0 is
-/// declared open because the peg's bottom cap covers it, and the returned ring
-/// is that mouth, for the caller to use as a hole of the cap.
-fn drill(b: &mut Builder, x: f32, y: f32, steps: &[(f32, f32)]) -> Vec<Seg> {
-    let profile = |r: f32| ccw_segs(&Sketch::circle(x, y, r));
-    let ops: Vec<(SlabOp, Slab)> = steps
-        .iter()
-        .map(|&(r, depth)| (SlabOp::Union, Slab::new(vec![profile(r)], 0.0, depth)))
-        .collect();
-    emit_slabs(b, &ops, &SlabOpts { cavity: true, open_at: vec![0.0] })
-        .expect("fastener pocket slab stack");
-    profile(steps[0].0)
-}
-
 // ── Cavity plan (port of the reference `planCavity`) ─────────────────────────
 
 const STRIP_OUT: f32 = 1.0; // harmless outward slop past the pitch line
@@ -1539,26 +1498,91 @@ fn plan_piece(
         if openish { sector_segs.clone() } else { full_hi_rings.clone() };
 
     // -- 3) Pegs ----------------------------------------------------------
-    {
-        let (profs, params) = (peg_profiles.clone(), p.clone());
+    // Each cell contributes: a Loft (the 3-band chamfered peg), one Hole per
+    // fastener (4 per cell), and a PlanarFace for the bottom cap with the
+    // fastener mouths as holes. Used to be a single Custom; the Loft/Hole/
+    // PlanarFace trio is the CAD-idiomatic decomposition.
+    //
+    // Sketches are registered per-cell so each peg's profiles live in the
+    // Program's symbol table. The Op::Loft references them by name; the
+    // Op::Hole positions are computed per corner; the Op::PlanarFace mouth
+    // circles are derived from the HoleProfile's mouth_radius().
+    let fastener_profile: Option<PHoleProfile> = match (p.magnet_holes, p.screw_holes) {
+        (true, true) => Some(PHoleProfile::Counterbore {
+            bore_r: SCREW_RADIUS,
+            bore_d: SCREW_DEPTH,
+            head_r: MAGNET_RADIUS,
+            head_d: MAGNET_DEPTH,
+        }),
+        (true, false) => Some(PHoleProfile::Plain { radius: MAGNET_RADIUS, depth: MAGNET_DEPTH }),
+        (false, true) => Some(PHoleProfile::Plain { radius: SCREW_RADIUS, depth: SCREW_DEPTH }),
+        (false, false) => None,
+    };
+    for (ci, (c, s_bot, s_mid, s_top)) in peg_profiles.iter().enumerate() {
+        let bot_name = format!("{tag}: peg {ci} bot");
+        let mid_name = format!("{tag}: peg {ci} mid");
+        let top_name = format!("{tag}: peg {ci} top");
         prog.push(
-            format!("{tag}: base pegs ({} cells)", profs.len()),
-            POp::Custom(Box::new(move |b| {
-                for (c, s_bot, s_mid, s_top) in &profs {
-                    let r0 = ring(b, s_bot, 0.0);
-                    let r1 = ring(b, s_mid, PEG_Z1);
-                    let r2 = ring(b, s_mid, PEG_Z2);
-                    let r3 = ring(b, s_top, PEG_HEIGHT);
-                    wall_between(b, s_bot, s_mid, &r0, &r1, 0.0, PEG_Z1, true);
-                    wall_between(b, s_mid, s_mid, &r1, &r2, PEG_Z1, PEG_Z2, true);
-                    wall_between(b, s_mid, s_top, &r2, &r3, PEG_Z2, PEG_HEIGHT, true);
-                    let pockets = cell_fasteners(b, &params, *c);
-                    let pocket_loops: Vec<Loop> =
-                        pockets.iter().map(|h| loop_of(&ring(b, h, 0.0), false)).collect();
-                    planar(b, 0.0, false, loop_of(&r0, false), pocket_loops);
-                }
-                Ok(())
-            })),
+            format!("register {bot_name}"),
+            POp::Sketch { name: bot_name.clone(), profile: s_bot.clone() },
+        );
+        prog.push(
+            format!("register {mid_name}"),
+            POp::Sketch { name: mid_name.clone(), profile: s_mid.clone() },
+        );
+        prog.push(
+            format!("register {top_name}"),
+            POp::Sketch { name: top_name.clone(), profile: s_top.clone() },
+        );
+        prog.push(
+            format!("{tag}: peg {ci} loft"),
+            POp::Loft {
+                profiles: vec![
+                    (bot_name.clone(), 0.0),
+                    (mid_name.clone(), PEG_Z1),
+                    (mid_name.clone(), PEG_Z2),
+                    (top_name.clone(), PEG_HEIGHT),
+                ],
+                outward: true,
+            },
+        );
+        // Fasteners at the four inset corners.
+        let ccx = (c.x as f32 + 0.5) * GRID_PITCH;
+        let ccy = (c.y as f32 + 0.5) * GRID_PITCH;
+        if let Some(profile) = &fastener_profile {
+            for (dx, dy) in [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+                let hx = ccx + dx * FASTENER_INSET;
+                let hy = ccy + dy * FASTENER_INSET;
+                prog.push(
+                    format!("{tag}: peg {ci} fastener ({hx:.0},{hy:.0})"),
+                    POp::Hole {
+                        at: Vec2::new(hx, hy),
+                        from_z: 0.0,
+                        profile: profile.clone(),
+                    },
+                );
+            }
+        }
+        // Bottom cap with fastener mouths as holes. Each Hole left the mouth
+        // open at z=0; the PlanarFace closes it with the mouth as a hole-of-
+        // face, welding with the cavity wall by interning.
+        let mut cap_holes: Vec<POpDirLoop> = Vec::new();
+        if let Some(profile) = &fastener_profile {
+            let mouth_r = profile.mouth_radius();
+            for (dx, dy) in [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+                let hx = ccx + dx * FASTENER_INSET;
+                let hy = ccy + dy * FASTENER_INSET;
+                let mouth = Sketch::circle(hx, hy, mouth_r).loops.remove(0);
+                cap_holes.push((mouth, false));
+            }
+        }
+        prog.push(
+            format!("{tag}: peg {ci} bottom cap"),
+            POp::PlanarFace {
+                plane: PPlaneRef::Z { z: 0.0, up: false },
+                outer: (s_bot.clone(), false),
+                holes: cap_holes,
+            },
         );
     }
 
