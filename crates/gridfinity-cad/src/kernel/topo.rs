@@ -100,7 +100,7 @@ pub struct Face {
 /// Two-level CSR for the loops: a face names a contiguous range of loop ids;
 /// each loop id indexes `loops` (offsets into the flat `loop_edges`). Cloning a
 /// `Solid` is therefore five flat `Vec` `memcpy`s with **zero per-loop
-/// allocation** — which is what makes `fillet::blend_edges`' repeated clones
+/// allocation** — which is what makes `fillet::fillet_edges`' repeated clones
 /// cheap.
 #[derive(Clone, Debug)]
 pub struct Solid {
@@ -210,7 +210,7 @@ impl Solid {
     ///
     /// Returned as a flat CSR ([`EdgeFaces`]) rather than `Vec<Vec<usize>>`: a
     /// solid with E edges used to cost E tiny `Vec` allocations here, and
-    /// `blend_edges`/`chamfer` call this repeatedly — the single biggest churn
+    /// `fillet_edges`/`chamfer` call this repeatedly — the single biggest churn
     /// source after the earcut floor. Now it is five flat `Vec`s regardless of E.
     /// Indexing (`ef[e]`) yields the face-id slice, so callers are unchanged.
     pub fn edge_faces(&self) -> EdgeFaces {
@@ -289,7 +289,7 @@ impl Builder {
         Builder { loops: vec![0], ..Builder::default() }
     }
 
-    /// A builder pre-sized for a known output. `blend_edges`/`chamfer` rebuild a
+    /// A builder pre-sized for a known output. `fillet_edges`/`chamfer` rebuild a
     /// whole solid through a fresh builder; sizing the arenas and the two intern
     /// maps up front removes the incremental table rehash and arena regrowth that
     /// otherwise dominates the rebuild's allocation churn.

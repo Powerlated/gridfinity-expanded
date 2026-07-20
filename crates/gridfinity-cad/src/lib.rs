@@ -750,7 +750,7 @@ mod tests {
 
     #[test]
     fn fillet_cylinder_top_is_watertight() {
-        use crate::kernel::fillet::blend_edges;
+        use crate::kernel::fillet::fillet_edges;
         // Cylinder radius 10, height 5. Filleting the top circle (between the
         // top plane face and the cylinder side face) yields a torus blend.
         let s = Sketch::circle(0.0, 0.0, 10.0);
@@ -769,7 +769,7 @@ mod tests {
             .collect();
         assert_eq!(top_edges.len(), 2, "cylinder top should have 2 arc edges");
         let blends: Vec<_> = top_edges.iter().map(|&e| (e, 2.0_f32)).collect();
-        let blended = blend_edges(&solid, &blends).expect("cylinder top fillet");
+        let blended = fillet_edges(&solid, &blends).expect("cylinder top fillet");
         blended.validate().expect("blended topology valid");
         let mesh = tessellate(&blended, 8).to_mesh();
         assert_watertight(&mesh);
@@ -1086,7 +1086,7 @@ rebuild #2 {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().i
     /// The sharp-corner problem is solved: `round_sharp_corners` rounds what
     /// the region boolean leaves behind, and a divider that merely notches the
     /// compartment is filleted and watertight. Splitting it is what fails, and
-    /// the failure has moved into `blend_edges` — it rebuilds the solid and
+    /// the failure has moved into `fillet_edges` — it rebuilds the solid and
     /// reports "loop not closed" around the rounded junction where the divider
     /// meets the outer wall. The loops themselves are sound: the same geometry
     /// builds clean and leak-free at `floor_fillet = 0`.

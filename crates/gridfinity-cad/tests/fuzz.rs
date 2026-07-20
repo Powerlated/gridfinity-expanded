@@ -423,7 +423,7 @@ fn env_u64(key: &str, default: u64) -> u64 {
 /// notching / crossing divider fillet work lives.
 ///
 /// **Baseline at the default seed: 36/150 cases fail, 6 distinct defects.**
-/// Was 89/150 and 10 before `blend_best_effort` (which converted every "blender
+/// Was 89/150 and 10 before `fillet_best_effort` (which converted every "blender
 /// refused the chain" class into a partial fillet), then 52 before
 /// `region_difference` learned to classify coincident boundary runs (which
 /// restored the missing cap on a partial-height wall's top).

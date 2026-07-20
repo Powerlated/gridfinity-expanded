@@ -22,7 +22,7 @@
 //!   corners rounded by `cavity_corner_radius` and concave corners rounded by
 //!   the fillet radius so the floor-wall blend chain stays tangent-continuous.
 //! - The **floor fillet** is a true rolling-ball blend
-//!   ([`fillet::blend_edges`](crate::kernel::fillet::blend_edges)) over each cavity
+//!   ([`fillet::fillet_edges`](crate::kernel::fillet::fillet_edges)) over each cavity
 //!   loop's floor-wall edges.
 
 use crate::kernel::build::{loop_of, ring, wall_between};
@@ -996,7 +996,7 @@ struct Island {
     top: Option<f32>,
     /// This island's own floor-blend radius, clamped to what *its* corners can
     /// take. Independent of the cavity loop's: an island is a separate closed
-    /// chain of floor-wall edges, so `blend_edges` rolls it as its own blend
+    /// chain of floor-wall edges, so `fillet_edges` rolls it as its own blend
     /// and a sharp corner here says nothing about the compartment boundary.
     fr: f32,
 }
@@ -1451,7 +1451,7 @@ fn plan_piece(
             // This applies to every loop the wall leaves, including the two a
             // compartment-splitting wall produces. Some of those corners the
             // blender still cannot close, but that no longer costs the loop its
-            // fillet: `blend_best_effort` drops the offending run and keeps the
+            // fillet: `fillet_best_effort` drops the offending run and keeps the
             // rest (`freeform_crossing_divider_is_filleted`).
             let mut outs: Vec<(Vec<Seg>, Vec<Island>)> = Vec::new();
             let mut hole_loops: Vec<Vec<Seg>> = Vec::new();
@@ -1669,7 +1669,7 @@ fn plan_piece(
     // Cavity stage: plan every loop, collecting both the ops to emit and the
     // geometry the rim assembly needs, without building anything yet.
     let mut cav_ops: Vec<(String, POp)> = Vec::new();
-    let mut blend_edges: Vec<(Seg, f32, f32)> = Vec::new();
+    let mut fillet_edges: Vec<(Seg, f32, f32)> = Vec::new();
     let mut rim_holes: Vec<Vec<Seg>> = Vec::new();
     let mut island_tops: Vec<Vec<Seg>> = Vec::new();
     let mut touched: Vec<CavityLoop> = Vec::new();
@@ -1717,7 +1717,7 @@ fn plan_piece(
                 plan_cavity_banded(&bd, &island_shapes, floor_z, total_h);
             island_tops.extend(tops);
             rim_holes.extend(rim);
-            blend_edges.extend(blends);
+            fillet_edges.extend(blends);
             cav_ops.push((format!("cavity {ci}: banded slab stack"), POp::Slabs { stack, opts }));
             continue;
         }
@@ -1808,7 +1808,7 @@ fn plan_piece(
                 let (stack, opts, tops, blends) =
                     plan_cavity_flat(&cl.segs, &island_shapes, floor_z, total_h, loop_fr);
                 island_tops.extend(tops);
-                blend_edges.extend(blends);
+                fillet_edges.extend(blends);
                 cav_ops.push((format!("cavity {ci}: slab stack"), POp::Slabs { stack, opts }));
             }
         }
@@ -2046,8 +2046,8 @@ fn plan_piece(
     }
 
     // -- 8) Floor fillet ---------------------------------------------------
-    if !blend_edges.is_empty() {
-        prog.push(format!("{tag}: floor fillet"), POp::Fillet { edges: blend_edges });
+    if !fillet_edges.is_empty() {
+        prog.push(format!("{tag}: floor fillet"), POp::Fillet { edges: fillet_edges });
     }
 }
 

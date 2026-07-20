@@ -1,6 +1,6 @@
 //! Rolling-ball edge blending: a true B-rep fillet operator.
 //!
-//! `blend_edges` consumes a `Solid` and a list of `(EdgeId, radius)` blends and
+//! `fillet_edges` consumes a `Solid` and a list of `(EdgeId, radius)` blends and
 //! returns a new `Solid` in which each blended edge is replaced by a smooth
 //! blend face — an analytic `Cylinder` for a plane/plane edge, a `Torus` for a
 //! plane/cylinder coaxial edge — while the two adjacent faces are trimmed back
@@ -46,7 +46,7 @@ struct CurvEdge {
 }
 
 #[derive(Clone)]
-struct Blend {
+struct Fillet {
     ta: CurvEdge, // tangent on face a, p0→p1
     tb: CurvEdge, // tangent on face b, p0→p1
     ca0: CurvEdge, // connect arc at p0, ta_p0→tb_p0
@@ -62,10 +62,10 @@ struct Blend {
     fwd_a: bool,
 }
 
-/// Blend as many of `blends` as this blender can actually close, instead of
+/// Fillet as many of `blends` as this blender can actually close, instead of
 /// refusing the lot.
 ///
-/// [`blend_edges`] is all-or-nothing: one corner it cannot resolve loses the
+/// [`fillet_edges`] is all-or-nothing: one corner it cannot resolve loses the
 /// fillet on every edge in the call, and the model layer's only recourse is to
 /// give up on that region entirely. There are real configurations — a divider
 /// crossing a compartment, a runout onto a non-planar face — where that costs a
@@ -88,13 +88,13 @@ struct Blend {
 /// not shared by exactly two faces means `solid` was already non-manifold,
 /// which no amount of dropping blends can fix. Degrading there would swap a
 /// loud error for a silently unsound part, so that case still propagates
-/// exactly as [`blend_edges`] reports it. Everything the blender merely cannot
+/// exactly as [`fillet_edges`] reports it. Everything the blender merely cannot
 /// *close* degrades instead.
 ///
-/// Cost is one `blend_edges` attempt per chain when things go well, and up to
+/// Cost is one `fillet_edges` attempt per chain when things go well, and up to
 /// `2^MAX_SPLIT` more per failing chain. Nothing is attempted at all when the
 /// whole set succeeds first time, which is the common path.
-pub fn blend_best_effort(
+pub fn fillet_best_effort(
     solid: &Solid,
     blends: &[(EdgeId, f32)],
 ) -> Result<(Solid, Vec<EdgeId>), String> {
@@ -116,7 +116,7 @@ pub fn blend_best_effort(
             return Err(format!("blend: edge {e} has {} faces (want 2)", edge_faces[e].len()));
         }
     }
-    if let Ok(s) = blend_edges_with(solid, blends, &edge_faces) {
+    if let Ok(s) = fillet_edges_with(solid, blends, &edge_faces) {
         return Ok((s, Vec::new()));
     }
 
@@ -132,7 +132,7 @@ pub fn blend_best_effort(
         .filter(|e| !kept.iter().any(|&(k, _)| k == *e))
         .collect();
 
-    match blend_edges_with(solid, &kept, &edge_faces) {
+    match fillet_edges_with(solid, &kept, &edge_faces) {
         Ok(s) => Ok((s, dropped)),
         // Only reachable if a set that blended during probing stops doing so,
         // which would be a blender inconsistency; fall back to no fillet at all
@@ -156,7 +156,7 @@ fn salvage(
     }
     let mut trial = base.to_vec();
     trial.extend_from_slice(run);
-    if blend_edges_with(solid, &trial, ef).is_ok() {
+    if fillet_edges_with(solid, &trial, ef).is_ok() {
         return run.to_vec();
     }
     if depth == 0 || run.len() < 2 {
@@ -213,21 +213,21 @@ fn chains(solid: &Solid, blends: &[(EdgeId, f32)]) -> Vec<Vec<(EdgeId, f32)>> {
     groups.into_iter().map(|(_, v)| v).collect()
 }
 
-/// Blend a set of edges of `solid` by the given radii.
-pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, String> {
+/// Fillet a set of edges of `solid` by the given radii.
+pub fn fillet_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, String> {
     let edge_faces = solid.edge_faces();
-    blend_edges_with(solid, blends, &edge_faces)
+    fillet_edges_with(solid, blends, &edge_faces)
 }
 
-/// [`blend_edges`] with a caller-supplied `edge_faces`. `edge_faces` depends only
-/// on `solid`, so `blend_best_effort` computes it once and reuses it across every
+/// [`fillet_edges`] with a caller-supplied `edge_faces`. `edge_faces` depends only
+/// on `solid`, so `fillet_best_effort` computes it once and reuses it across every
 /// probe rather than rebuilding five whole-solid `Vec`s per attempt.
-fn blend_edges_with(
+fn fillet_edges_with(
     solid: &Solid,
     blends: &[(EdgeId, f32)],
     edge_faces: &crate::kernel::topo::EdgeFaces,
 ) -> Result<Solid, String> {
-    let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::BlendEdges);
+    let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::FilletEdges);
     let mut want: HashMap<EdgeId, f32> = HashMap::with_capacity(blends.len());
     want.extend(blends.iter().copied());
 
@@ -271,7 +271,7 @@ fn blend_edges_with(
         if f.sense { n } else { -n }
     };
 
-    let mut bm: HashMap<EdgeId, Blend> = HashMap::with_capacity(want.len());
+    let mut bm: HashMap<EdgeId, Fillet> = HashMap::with_capacity(want.len());
     let mut runouts: HashMap<usize, Runout> = HashMap::new();
     let mut want_sorted: Vec<EdgeId> = want.keys().copied().collect();
     want_sorted.sort_unstable();
@@ -607,7 +607,7 @@ fn build_cyl_blend(
     tb_p1: Vec3,
     r: f32,
     fwd_a: bool,
-) -> Result<Blend, String> {
+) -> Result<Fillet, String> {
     let dir = match ed.curve {
         Curve::Line { dir, .. } => dir,
         _ => return Err("cyl blend: edge not a line".into()),
@@ -626,7 +626,7 @@ fn build_cyl_blend(
     // normal `ma`, which is sign-flipped on convex edges).
     let sense = surface.normal(surface.project(ta_p0)).dot(na0) > 0.0;
 
-    Ok(Blend { ta, tb, ca0, ca1, ta_p0, ta_p1, tb_p0, tb_p1, surface, sense, fwd_a })
+    Ok(Fillet { ta, tb, ca0, ca1, ta_p0, ta_p1, tb_p0, tb_p1, surface, sense, fwd_a })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -642,7 +642,7 @@ fn build_torus_blend(
     r: f32,
     cyl: (Vec3, Vec3, f32),
     fwd_a: bool,
-) -> Result<Blend, String> {
+) -> Result<Fillet, String> {
     let (cyl_base, cyl_axis, _cyl_radius) = cyl;
     let (edge_center, edge_axis, edge_radius, edge_ref_dir) = match ed.curve {
         Curve::Circle { center, axis, radius, ref_dir } => (center, axis, radius, ref_dir),
@@ -694,7 +694,7 @@ fn build_torus_blend(
     // Sense: blend outward at the ta tangent equals face a's outward normal.
     let sense = surface.normal(surface.project(ta_p0)).dot(na0) > 0.0;
 
-    Ok(Blend { ta, tb, ca0, ca1, ta_p0, ta_p1, tb_p0, tb_p1, surface, sense, fwd_a })
+    Ok(Fillet { ta, tb, ca0, ca1, ta_p0, ta_p1, tb_p0, tb_p1, surface, sense, fwd_a })
 }
 
 /// Quarter-circle connect arc about `center`, axis `axis`, from `from_pt` to
@@ -737,7 +737,7 @@ struct Emitted {
 #[allow(clippy::too_many_arguments)]
 fn rebuild_loop(
     solid: &Solid,
-    bm: &HashMap<EdgeId, Blend>,
+    bm: &HashMap<EdgeId, Fillet>,
     vinfo: &HashMap<usize, (Vec3, Vec3)>,
     runouts: &HashMap<usize, Runout>,
     want: &HashMap<EdgeId, f32>,
@@ -876,11 +876,11 @@ mod tests {
         (a - b).length() < 1e-4
     }
 
-    /// A box whose top rim blends cleanly. `blend_best_effort` must be
-    /// *transparent* on the happy path: same result as `blend_edges`, nothing
+    /// A box whose top rim blends cleanly. `fillet_best_effort` must be
+    /// *transparent* on the happy path: same result as `fillet_edges`, nothing
     /// reported dropped, and no extra probing.
     #[test]
-    fn best_effort_matches_blend_edges_when_nothing_fails() {
+    fn best_effort_matches_fillet_edges_when_nothing_fails() {
         use crate::kernel::build::extrude;
         use crate::kernel::sketch::Sketch;
 
@@ -897,8 +897,8 @@ mod tests {
             .collect();
         assert!(!top.is_empty(), "expected a top rim to blend");
 
-        let direct = blend_edges(&solid, &top).expect("rim blends");
-        let (best, dropped) = blend_best_effort(&solid, &top).expect("sound input");
+        let direct = fillet_edges(&solid, &top).expect("rim blends");
+        let (best, dropped) = fillet_best_effort(&solid, &top).expect("sound input");
         assert!(dropped.is_empty(), "nothing should be dropped, got {dropped:?}");
         assert_eq!(best.faces.len(), direct.faces.len());
         best.validate().expect("best-effort result is manifold");
@@ -914,7 +914,7 @@ mod tests {
         use crate::kernel::sketch::Sketch;
 
         let solid = extrude(&Sketch::rectangle(0.0, 0.0, 10.0, 10.0), 0.0, 5.0);
-        let err = blend_best_effort(&solid, &[(solid.edges.len() + 7, 1.0)])
+        let err = fillet_best_effort(&solid, &[(solid.edges.len() + 7, 1.0)])
             .expect_err("out-of-range edge must be reported");
         assert!(err.contains("out of range"), "unexpected error: {err}");
     }

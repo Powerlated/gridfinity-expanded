@@ -290,7 +290,7 @@ pub fn run_all(prog: &Program) -> Result<Solid, String> {
 /// Execute the enabled subset.
 ///
 /// Blends are collected as they are reached but applied once at the end,
-/// because `blend_edges` consumes and rebuilds the whole solid. A partial
+/// because `fillet_edges` consumes and rebuilds the whole solid. A partial
 /// subset generally is **not** manifold, so this does not validate — callers
 /// wanting a finished part should run everything and validate themselves.
 pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, String> {
@@ -430,8 +430,8 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
     if !blends.is_empty() {
         // Best-effort: a corner the blender cannot close costs that corner its
         // fillet, not the whole part its floor fillet. See
-        // [`blend_best_effort`](crate::kernel::fillet::blend_best_effort).
-        solid = fillet::blend_best_effort(&solid, &blends)?.0;
+        // [`fillet_best_effort`](crate::kernel::fillet::fillet_best_effort).
+        solid = fillet::fillet_best_effort(&solid, &blends)?.0;
     }
     if !chamfers.is_empty() {
         solid = chamfer_edges(&solid, &chamfers)?;
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn blend_resolves_edges_by_geometry_not_id() {
         // The blend names its edges by (seg, z), never by edge id, so it does
-        // not care what ran before it. Rounded corners because `blend_edges`
+        // not care what ran before it. Rounded corners because `fillet_edges`
         // needs a tangent-continuous chain — a sharp box corner would want the
         // unimplemented spherical corner patch.
         let r = Sketch::rounded_rect(0.0, 0.0, 20.0, 20.0, 4.0).loops.remove(0);

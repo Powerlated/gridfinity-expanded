@@ -39,7 +39,7 @@ use std::collections::HashMap;
 
 /// One chamfer between two planar faces: a flat `Plane` through four offset
 /// points. `ta`/`tb` are the offset *lines* on faces a/b; `ca0`/`ca1` are the
-/// straight connect lines at the chain corners. Compare [`fillet::Blend`],
+/// straight connect lines at the chain corners. Compare [`fillet::Fillet`],
 /// where these are circles/arcs and the surface is a Cylinder/Torus.
 #[derive(Clone)]
 struct Chamfer {

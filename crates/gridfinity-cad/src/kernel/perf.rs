@@ -40,7 +40,7 @@ pub enum Metric {
     /// Face construction.
     BuilderFace,
     /// Rolling-ball blending, including its solid rebuild.
-    BlendEdges,
+    FilletEdges,
     /// Analytic faces to triangles.
     Tessellate,
     /// Slab stack resolution.
@@ -60,7 +60,7 @@ impl Metric {
         Metric::BuilderVertex,
         Metric::BuilderArc,
         Metric::BuilderFace,
-        Metric::BlendEdges,
+        Metric::FilletEdges,
         Metric::Tessellate,
         Metric::BuildSlabs,
         Metric::EmitSlabs,
@@ -76,7 +76,7 @@ impl Metric {
             Metric::BuilderVertex => "topo::Builder::vertex",
             Metric::BuilderArc => "topo::Builder::arc",
             Metric::BuilderFace => "topo::Builder::face",
-            Metric::BlendEdges => "fillet::blend_edges",
+            Metric::FilletEdges => "fillet::fillet_edges",
             Metric::Tessellate => "tess::tessellate",
             Metric::BuildSlabs => "slab::build_slabs",
             Metric::EmitSlabs => "slab::emit_slabs",

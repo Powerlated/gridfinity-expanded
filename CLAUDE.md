@@ -104,7 +104,7 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   `loops` offset table, and a `Face` is `{ surface, sense, loop0, n_loops }` naming a contiguous
   loop range (outer first). `Loop` survives only as a *transient* input to `Builder::face`; read
   loops off the solid via `outer_edges`/`face_loops`/`inner_loops`/`n_inners`. Cloning a `Solid`
-  (which `blend_edges` does repeatedly) is therefore a few flat `memcpy`s. `Builder` interns
+  (which `fillet_edges` does repeatedly) is therefore a few flat `memcpy`s. `Builder` interns
   vertices and edges (edge key = sorted endpoints **+ welded midpoint**, so a circle's two
   semicircle arcs don't collapse into one edge) and flattens each face's loops into the arena. `Solid::validate()` enforces the
   manifold invariant: **every edge used exactly twice, once in each direction** — assert it in
@@ -123,7 +123,7 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   turns arcs whose radius changes with height into `Cone` faces; a straight segment on a loft
   becomes a *slanted* `Plane` (its normal is computed from the actual 3D quad, not assumed
   vertical).
-- **`fillet.rs`** — `blend_edges(&solid, &[(EdgeId, r)])`: true rolling-ball edge blending as a
+- **`fillet.rs`** — `fillet_edges(&solid, &[(EdgeId, r)])`: true rolling-ball edge blending as a
   B-rep operator. Plane/plane edges become `Cylinder` blends, plane/coaxial-cylinder circle edges
   become `Torus` blends; adjacent faces are trimmed back to the exact tangent curves and quarter-
   circle connect arcs join neighbouring blends. A vertex with **two** blended edges continues the
@@ -137,7 +137,7 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   solid is rebuilt through a fresh `Builder` and `validate()`d. Gotcha: when re-emitting an arc
   reversed, the angle range must be swapped too — `Builder::arc` trusts that its first vertex sits
   at the first angle.
-  `blend_edges` is all-or-nothing, so `blend_best_effort` wraps it for callers that would rather
+  `fillet_edges` is all-or-nothing, so `fillet_best_effort` wraps it for callers that would rather
   have an ugly fillet than none: it groups the edges into connected chains, adds them one at a
   time while the result still blends, and bisects a failing chain (depth 3) to salvage contiguous
   runs — a dropped run just leaves runouts, which are ordinary geometry. It returns the edges left
@@ -160,7 +160,7 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   `Program` carries geometry (profiles, heights, `(seg, z)` blend selections) — never builder
   handles — so `run(prog, |i| bool)` can execute *any subset*: prefixes step through the
   construction, arbitrary masks toggle individual ops off. Blends collect during the run and apply
-  once at the end (`blend_edges` consumes and rebuilds the whole solid). A partial subset is
+  once at the end (`fillet_edges` consumes and rebuilds the whole solid). A partial subset is
   generally not manifold, by design — that's what makes the debugger useful. `Op::Custom` is the
   escape hatch for geometry with no kernel primitive (Gridfinity's bridge-underside stitching): it
   must re-derive every handle when it runs, which is cheap because `ring`/`seg_edge` intern.
@@ -233,7 +233,7 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   becomes a stepped counterbore.
 
 The compartment cavities are built **sharp**; the concave floor fillet is applied afterwards as a
-true `blend_edges` rolling-ball blend over each compartment's floor-wall edge loop (skipped when
+true `fillet_edges` rolling-ball blend over each compartment's floor-wall edge loop (skipped when
 the clamped radius is 0 or the floor is sloped).
 
 The model is exposed both imperatively (`build(&p)`) and as a kernel **`Program`**
@@ -298,7 +298,7 @@ That instrumentation drove a churn-first data-oriented pass: a `Solid` is now fl
 `Vec`s, so cloning it is a few `memcpy`s; `Solid::edge_faces` returns a two-pass CSR (`EdgeFaces`,
 `ef[e]` slices) instead of a `Vec` per edge; and `fillet`/`chamfer`'s `rebuild_loop` takes that
 `edge_faces` as a borrow rather than recomputing it once per face. Together those cut a default
-rebuild's allocation churn ~77% (blend_edges ~92%). The residual top churn source is `earcutr`
+rebuild's allocation churn ~77% (fillet_edges ~92%). The residual top churn source is `earcutr`
 inside `tess.rs` — a third-party, at-the-tessellation-boundary allocation that is deliberately not
 chased.
 
