@@ -5,6 +5,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod badapple;
 mod debugger;
 mod editor;
 mod viewport;
@@ -199,6 +200,31 @@ struct App {
     status: String,
     /// Bins the model refused to build this regenerate; empty when all is well.
     errors: Vec<BinError>,
+    /// The Bad Apple stress-test player; `None` unless the demo is running.
+    badapple: Option<BadApple>,
+}
+
+/// Live "Bad Apple!!" playback: which frame we are on, when playback started,
+/// and a smoothed measure of how fast the kernel is turning frames into
+/// triangles.
+struct BadApple {
+    /// Builds frames off the UI thread.
+    worker: badapple::Worker,
+    /// Frame currently uploaded to the GPU (`usize::MAX` until the first).
+    frame: usize,
+    /// Frame currently being built by the worker, if any.
+    requested: Option<usize>,
+    /// `ui.input().time` at which frame 0 should have been shown.
+    epoch: f64,
+    /// Loop back to the start at the end instead of stopping.
+    looping: bool,
+    /// Exponentially-smoothed generation rate, triangles per second of kernel
+    /// wall time (build only, excluding upload and paint).
+    tri_rate: f64,
+    /// Triangles in the frame currently shown.
+    tris: usize,
+    /// Build wall time of the frame currently shown, seconds.
+    build_secs: f64,
 }
 
 impl App {
@@ -219,6 +245,7 @@ impl App {
             tri_count: 0,
             status: String::new(),
             errors: Vec::new(),
+            badapple: None,
         };
         app.regenerate(true);
         app
@@ -269,6 +296,79 @@ impl App {
         r.upload_lines(&self.gl, &wf.lines);
         drop(r);
         self.dirty = false;
+    }
+
+    /// Start the Bad Apple demo: frame the camera on the plate once and reset
+    /// the clock so playback begins at frame 0.
+    fn badapple_start(&mut self, time: f64) {
+        let (min, max) = badapple::bounds();
+        self.camera.frame(Vec3::from_array(min), Vec3::from_array(max));
+        // A gentle three-quarter view reads better than dead-on.
+        self.camera.yaw = 1.05;
+        self.camera.pitch = 0.35;
+        self.badapple = Some(BadApple {
+            worker: badapple::Worker::spawn(),
+            frame: usize::MAX, // force the first build
+            requested: None,
+            epoch: time,
+            looping: true,
+            tri_rate: 0.0,
+            tris: 0,
+            build_secs: 0.0,
+        });
+        self.errors.clear();
+        self.labels.clear(); // no debugger tags floating over the demo
+    }
+
+    /// Advance the demo. The worker builds off-thread: we upload whatever frame
+    /// it has finished, then queue the frame the wall clock is now on (dropping
+    /// any it was too slow to reach). Returns `true` while playback continues.
+    fn badapple_tick(&mut self, time: f64) -> bool {
+        if self.badapple.is_none() {
+            return false;
+        }
+        let n = badapple::frame_count();
+
+        // End-of-clip: loop or stop.
+        {
+            let ba = self.badapple.as_mut().unwrap();
+            let elapsed = (time - ba.epoch).max(0.0);
+            if (elapsed * badapple::FPS) as usize >= n {
+                if ba.looping {
+                    ba.epoch = time;
+                } else {
+                    self.badapple = None;
+                    self.dirty = true; // fall back to the normal model next frame
+                    return false;
+                }
+            }
+        }
+
+        // Upload the most recent finished frame, if the worker produced one.
+        if let Some(r) = self.badapple.as_ref().unwrap().worker.try_recv() {
+            let ba = self.badapple.as_mut().unwrap();
+            ba.requested = None;
+            ba.frame = r.frame;
+            ba.tris = r.tris;
+            ba.build_secs = r.build_secs;
+            let inst = if r.build_secs > 0.0 { r.tris as f64 / r.build_secs } else { 0.0 };
+            // EMA so the readout is legible instead of flickering frame to frame.
+            ba.tri_rate = if ba.tri_rate == 0.0 { inst } else { 0.85 * ba.tri_rate + 0.15 * inst };
+            self.tri_count = r.tris;
+            let mut rr = self.renderer.lock().unwrap();
+            rr.upload(&self.gl, &r.verts);
+            rr.upload_lines(&self.gl, &[]);
+        }
+
+        // Queue the current target frame if the worker is idle and it's new.
+        let ba = self.badapple.as_mut().unwrap();
+        let elapsed = (time - ba.epoch).max(0.0);
+        let target = ((elapsed * badapple::FPS) as usize).min(n - 1);
+        if ba.requested.is_none() && target != ba.frame {
+            ba.worker.request(target);
+            ba.requested = Some(target);
+        }
+        true
     }
 
     fn export_stl(&mut self) {
@@ -356,7 +456,13 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ui, |ui| self.viewport(ui));
 
-        if self.dirty || dbg_changed {
+        // The demo owns the geometry while it runs: drive it from the wall
+        // clock, keep repainting, and skip the normal model rebuild entirely.
+        if self.badapple.is_some() {
+            let time = ui.input(|i| i.time);
+            self.badapple_tick(time);
+            ui.ctx().request_repaint();
+        } else if self.dirty || dbg_changed {
             self.dirty = true;
             self.regenerate(false);
         }
@@ -372,10 +478,47 @@ impl eframe::App for App {
 impl App {
     fn params_panel(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
-        let p = &mut self.params;
 
         ui.heading("Gridfinity");
         ui.add_space(4.0);
+
+        // ── Bad Apple!! kernel stress test ────────────────────────────────
+        ui.horizontal(|ui| {
+            let playing = self.badapple.is_some();
+            let label = if playing { "■ Stop Bad Apple" } else { "▶ Bad Apple!!" };
+            if ui.button(label).clicked() {
+                if playing {
+                    self.badapple = None;
+                    self.dirty = true;
+                } else {
+                    let time = ui.input(|i| i.time);
+                    self.badapple_start(time);
+                }
+            }
+        });
+        if let Some(ba) = &self.badapple {
+            let n = badapple::frame_count();
+            ui.label(format!("frame {}/{}  ·  {} tris", ba.frame + 1, n, ba.tris));
+            ui.label(
+                egui::RichText::new(format!("{:.2} M triangles/sec", ba.tri_rate / 1e6))
+                    .strong()
+                    .color(egui::Color32::from_rgb(120, 220, 140)),
+            );
+            ui.label(
+                egui::RichText::new(format!(
+                    "kernel build: {:.2} ms/frame",
+                    ba.build_secs * 1e3
+                ))
+                .small()
+                .weak(),
+            );
+            ui.separator();
+            // The rest of the panel drives the model, which is paused; the
+            // player owns the viewport until it is stopped.
+            return;
+        }
+
+        let p = &mut self.params;
 
         // ── Debugger toggle ───────────────────────────────────────────────
         ui.horizontal(|ui| {
