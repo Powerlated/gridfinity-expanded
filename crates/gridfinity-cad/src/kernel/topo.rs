@@ -149,6 +149,11 @@ impl Solid {
         self.loop_slice(self.faces[fid].loop0)
     }
 
+    /// Total directed-edge entries across all loops (for sizing a rebuild).
+    pub fn loop_edges_len(&self) -> usize {
+        self.loop_edges.len()
+    }
+
     /// Number of hole loops of face `fid`.
     pub fn n_inners(&self, fid: usize) -> usize {
         self.faces[fid].n_loops as usize - 1
@@ -284,6 +289,24 @@ impl Builder {
         Builder { loops: vec![0], ..Builder::default() }
     }
 
+    /// A builder pre-sized for a known output. `blend_edges`/`chamfer` rebuild a
+    /// whole solid through a fresh builder; sizing the arenas and the two intern
+    /// maps up front removes the incremental table rehash and arena regrowth that
+    /// otherwise dominates the rebuild's allocation churn.
+    pub fn with_capacity(nv: usize, ne: usize, nloops: usize, nloop_edges: usize, nfaces: usize) -> Builder {
+        let mut loops = Vec::with_capacity(nloops + 1);
+        loops.push(0);
+        Builder {
+            verts: Vec::with_capacity(nv),
+            vert_index: HashMap::with_capacity(nv),
+            edges: Vec::with_capacity(ne),
+            edge_index: HashMap::with_capacity(ne),
+            loop_edges: Vec::with_capacity(nloop_edges),
+            loops,
+            faces: Vec::with_capacity(nfaces),
+        }
+    }
+
     /// Append a loop's directed edges to the flat arena, returning its loop id.
     fn intern_loop(&mut self, edges: &[(EdgeId, bool)]) -> u32 {
         let lid = self.loops.len() as u32 - 1;
@@ -388,12 +411,25 @@ impl Builder {
     }
 
     pub fn face(&mut self, surface: Surface, sense: bool, outer: Loop, inners: Vec<Loop>) -> usize {
+        let inner_slices: Vec<&[(EdgeId, bool)]> = inners.iter().map(|l| l.edges.as_slice()).collect();
+        self.face_from(surface, sense, &outer.edges, &inner_slices)
+    }
+
+    /// Like [`Builder::face`] but takes borrowed directed-edge slices instead of
+    /// owned `Loop`s, so a caller that already holds the edge lists in reusable
+    /// scratch buffers (the fillet/chamfer rebuild) needn't allocate a `Loop`
+    /// per loop. The loops are interned contiguously, outer first.
+    pub fn face_from(
+        &mut self,
+        surface: Surface,
+        sense: bool,
+        outer: &[(EdgeId, bool)],
+        inners: &[&[(EdgeId, bool)]],
+    ) -> usize {
         crate::kernel::perf::count(crate::kernel::perf::Metric::BuilderFace);
-        // Flatten the transient loops into the arena; they are interned
-        // contiguously (outer first) so the face names a single loop range.
-        let loop0 = self.intern_loop(&outer.edges);
-        for inn in &inners {
-            self.intern_loop(&inn.edges);
+        let loop0 = self.intern_loop(outer);
+        for inn in inners {
+            self.intern_loop(inn);
         }
         let id = self.faces.len();
         self.faces.push(Face {

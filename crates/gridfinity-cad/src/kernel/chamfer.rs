@@ -259,16 +259,38 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
     }
 
     // Rebuild the solid through a fresh builder, mirroring fillet's
-    // rebuild_loop but simpler (no runout splice).
-    let mut b = Builder::new();
+    // rebuild_loop but simpler (no runout splice). Pre-sized for the source
+    // solid plus the chamfer geometry so the arenas and intern maps don't
+    // regrow, with one reused loop-edge scratch instead of a Loop per loop.
+    let nc = cm.len();
+    let mut b = Builder::with_capacity(
+        solid.verts.len() + 4 * nc,
+        solid.edges.len() + 4 * nc,
+        solid.faces.len() + nc,
+        solid.loop_edges_len() + 4 * nc,
+        solid.faces.len() + nc,
+    );
+    let mut loop_scratch: Vec<(EdgeId, bool)> = Vec::new();
+    let mut inner_ranges: Vec<usize> = Vec::new();
     for fi in 0..solid.faces.len() {
-        let outer = rebuild_loop(solid, &cm, &vinfo, &want, fi, solid.outer_edges(fi), &edge_faces, &mut b)?;
-        let mut inners = Vec::with_capacity(solid.n_inners(fi));
+        loop_scratch.clear();
+        inner_ranges.clear();
+        rebuild_loop(solid, &cm, &vinfo, &want, fi, solid.outer_edges(fi), &edge_faces, &mut b, &mut loop_scratch)?;
+        let outer_len = loop_scratch.len();
         for lp in solid.inner_loops(fi) {
-            inners.push(rebuild_loop(solid, &cm, &vinfo, &want, fi, lp, &edge_faces, &mut b)?);
+            let before = loop_scratch.len();
+            rebuild_loop(solid, &cm, &vinfo, &want, fi, lp, &edge_faces, &mut b, &mut loop_scratch)?;
+            inner_ranges.push(loop_scratch.len() - before);
+        }
+        let outer = &loop_scratch[..outer_len];
+        let mut inners: Vec<&[(EdgeId, bool)]> = Vec::with_capacity(inner_ranges.len());
+        let mut off = outer_len;
+        for &len in &inner_ranges {
+            inners.push(&loop_scratch[off..off + len]);
+            off += len;
         }
         let (surface, sense) = (solid.faces[fi].surface, solid.faces[fi].sense);
-        b.face(surface, sense, outer, inners);
+        b.face_from(surface, sense, outer, &inners);
     }
 
     // Emit one chamfer face per chamfered edge.
@@ -374,8 +396,9 @@ fn rebuild_loop(
     lp: &[(EdgeId, bool)],
     ef: &crate::kernel::topo::EdgeFaces,
     b: &mut Builder,
-) -> Result<Loop, String> {
-    let mut out: Vec<(EdgeId, bool)> = Vec::with_capacity(lp.len());
+    out: &mut Vec<(EdgeId, bool)>,
+) -> Result<(), String> {
+    out.reserve(lp.len());
     for &(e, fwd) in lp {
         let ed = solid.edges[e];
         if want.contains_key(&e) {
@@ -411,7 +434,7 @@ fn rebuild_loop(
             out.push(eid);
         }
     }
-    Ok(Loop::new(out))
+    Ok(())
 }
 
 /// Move a vertex that is a chamfer chain corner to the corner position on

@@ -116,13 +116,13 @@ pub fn blend_best_effort(
             return Err(format!("blend: edge {e} has {} faces (want 2)", edge_faces[e].len()));
         }
     }
-    if let Ok(s) = blend_edges(solid, blends) {
+    if let Ok(s) = blend_edges_with(solid, blends, &edge_faces) {
         return Ok((s, Vec::new()));
     }
 
     let mut kept: Vec<(EdgeId, f32)> = Vec::new();
     for chain in chains(solid, blends) {
-        let salvaged = salvage(solid, &kept, &chain, MAX_SPLIT);
+        let salvaged = salvage(solid, &edge_faces, &kept, &chain, MAX_SPLIT);
         kept.extend(salvaged);
     }
 
@@ -132,7 +132,7 @@ pub fn blend_best_effort(
         .filter(|e| !kept.iter().any(|&(k, _)| k == *e))
         .collect();
 
-    match blend_edges(solid, &kept) {
+    match blend_edges_with(solid, &kept, &edge_faces) {
         Ok(s) => Ok((s, dropped)),
         // Only reachable if a set that blended during probing stops doing so,
         // which would be a blender inconsistency; fall back to no fillet at all
@@ -146,6 +146,7 @@ pub fn blend_best_effort(
 /// *contiguous* run of the chain, whose ends become runouts.
 fn salvage(
     solid: &Solid,
+    ef: &crate::kernel::topo::EdgeFaces,
     base: &[(EdgeId, f32)],
     run: &[(EdgeId, f32)],
     depth: u32,
@@ -155,17 +156,17 @@ fn salvage(
     }
     let mut trial = base.to_vec();
     trial.extend_from_slice(run);
-    if blend_edges(solid, &trial).is_ok() {
+    if blend_edges_with(solid, &trial, ef).is_ok() {
         return run.to_vec();
     }
     if depth == 0 || run.len() < 2 {
         return Vec::new();
     }
     let mid = run.len() / 2;
-    let head = salvage(solid, base, &run[..mid], depth - 1);
+    let head = salvage(solid, ef, base, &run[..mid], depth - 1);
     let mut base2 = base.to_vec();
     base2.extend_from_slice(&head);
-    let tail = salvage(solid, &base2, &run[mid..], depth - 1);
+    let tail = salvage(solid, ef, &base2, &run[mid..], depth - 1);
     let mut out = head;
     out.extend(tail);
     out
@@ -214,9 +215,21 @@ fn chains(solid: &Solid, blends: &[(EdgeId, f32)]) -> Vec<Vec<(EdgeId, f32)>> {
 
 /// Blend a set of edges of `solid` by the given radii.
 pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, String> {
-    let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::BlendEdges);
-    let want: HashMap<EdgeId, f32> = blends.iter().copied().collect();
     let edge_faces = solid.edge_faces();
+    blend_edges_with(solid, blends, &edge_faces)
+}
+
+/// [`blend_edges`] with a caller-supplied `edge_faces`. `edge_faces` depends only
+/// on `solid`, so `blend_best_effort` computes it once and reuses it across every
+/// probe rather than rebuilding five whole-solid `Vec`s per attempt.
+fn blend_edges_with(
+    solid: &Solid,
+    blends: &[(EdgeId, f32)],
+    edge_faces: &crate::kernel::topo::EdgeFaces,
+) -> Result<Solid, String> {
+    let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::BlendEdges);
+    let mut want: HashMap<EdgeId, f32> = HashMap::with_capacity(blends.len());
+    want.extend(blends.iter().copied());
 
     for &e in want.keys() {
         if e >= solid.edges.len() {
@@ -258,7 +271,7 @@ pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, Str
         if f.sense { n } else { -n }
     };
 
-    let mut bm: HashMap<EdgeId, Blend> = HashMap::new();
+    let mut bm: HashMap<EdgeId, Blend> = HashMap::with_capacity(want.len());
     let mut runouts: HashMap<usize, Runout> = HashMap::new();
     let mut want_sorted: Vec<EdgeId> = want.keys().copied().collect();
     want_sorted.sort_unstable();
@@ -360,23 +373,53 @@ pub fn blend_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, Str
     }
 
     // Per consumed vertex: (point on face-a side, point on face-b side).
-    let mut vinfo: HashMap<usize, (Vec3, Vec3)> = HashMap::new();
+    let mut vinfo: HashMap<usize, (Vec3, Vec3)> = HashMap::with_capacity(bm.len() * 2);
     for (e, bld) in &bm {
         let ed = solid.edges[*e];
         vinfo.insert(ed.v0, (bld.ta_p0, bld.tb_p0));
         vinfo.insert(ed.v1, (bld.ta_p1, bld.tb_p1));
     }
 
-    let mut b = Builder::new();
+    // Pre-size for the source solid plus the blend geometry (each blend adds
+    // ~4 verts, ~4 edges, ~4 loop entries and 1 face). Interned dedup keeps the
+    // real counts at or under these bounds, so the arenas and both intern maps
+    // never rehash/regrow during the rebuild.
+    let nb = bm.len();
+    let mut b = Builder::with_capacity(
+        solid.verts.len() + 4 * nb,
+        solid.edges.len() + 4 * nb,
+        solid.faces.len() + nb,
+        solid.loop_edges_len() + 4 * nb,
+        solid.faces.len() + nb,
+    );
+
+    // Reused across every rebuilt loop: the ordered edge list and the working
+    // `Emitted` list, cleared per loop instead of allocated per loop.
+    let mut loop_scratch: Vec<(EdgeId, bool)> = Vec::new();
+    let mut items_scratch: Vec<Emitted> = Vec::new();
+    let mut inner_ranges: Vec<usize> = Vec::new(); // lengths of each inner loop in loop_scratch
 
     for fi in 0..solid.faces.len() {
-        let outer = rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, solid.outer_edges(fi), &edge_faces, &mut b)?;
-        let mut inners = Vec::with_capacity(solid.n_inners(fi));
+        // Outer loop first, into its own contiguous run of `loop_scratch`.
+        loop_scratch.clear();
+        inner_ranges.clear();
+        rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, solid.outer_edges(fi), edge_faces, &mut b, &mut items_scratch, &mut loop_scratch)?;
+        let outer_len = loop_scratch.len();
         for lp in solid.inner_loops(fi) {
-            inners.push(rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, lp, &edge_faces, &mut b)?);
+            let before = loop_scratch.len();
+            rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, lp, edge_faces, &mut b, &mut items_scratch, &mut loop_scratch)?;
+            inner_ranges.push(loop_scratch.len() - before);
+        }
+        let outer = &loop_scratch[..outer_len];
+        // Slice the concatenated inner runs back out for `face_from`.
+        let mut inners: Vec<&[(EdgeId, bool)]> = Vec::with_capacity(inner_ranges.len());
+        let mut off = outer_len;
+        for &len in &inner_ranges {
+            inners.push(&loop_scratch[off..off + len]);
+            off += len;
         }
         let (surface, sense) = (solid.faces[fi].surface, solid.faces[fi].sense);
-        b.face(surface, sense, outer, inners);
+        b.face_from(surface, sense, outer, &inners);
     }
 
     let mut blend_keys: Vec<EdgeId> = bm.keys().copied().collect();
@@ -702,7 +745,9 @@ fn rebuild_loop(
     lp: &[(EdgeId, bool)],
     ef: &crate::kernel::topo::EdgeFaces,
     b: &mut Builder,
-) -> Result<Loop, String> {
+    items: &mut Vec<Emitted>,
+    out: &mut Vec<(EdgeId, bool)>,
+) -> Result<(), String> {
     let face_surface = solid.faces[fi].surface;
     // On the runout face the corner vertex splits in two: the edge it shares
     // with face a ends at the extended face-a tangent, the one it shares with
@@ -722,7 +767,8 @@ fn rebuild_loop(
         }
     };
 
-    let mut items: Vec<Emitted> = Vec::with_capacity(lp.len());
+    items.clear();
+    items.reserve(lp.len());
     for &(e, fwd) in lp {
         let ed = solid.edges[e];
         let end_v = if fwd { ed.v1 } else { ed.v0 };
@@ -760,9 +806,11 @@ fn rebuild_loop(
         }
     }
 
-    // Splice the trim arc into the gap the split corner opened.
+    // Splice the trim arc into the gap the split corner opened. Appends this
+    // loop's entries onto `out` (which may already hold earlier loops of the
+    // same face — an inner run is sliced back out by the caller).
     let n = items.len();
-    let mut out = Vec::with_capacity(n + 2);
+    out.reserve(n + 2);
     for i in 0..n {
         out.push(items[i].edge);
         let next_start = items[(i + 1) % n].start;
@@ -772,7 +820,7 @@ fn rebuild_loop(
             }
         }
     }
-    Ok(Loop::new(out))
+    Ok(())
 }
 
 fn move_vertex(vinfo: &HashMap<usize, (Vec3, Vec3)>, v: usize, fallback: Vec3, surface: Surface) -> Vec3 {
