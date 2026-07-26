@@ -609,6 +609,84 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn build_profile() {
+        use gridfinity_cad::kernel::perf;
+        let n = frame_count();
+        let p = cell_params();
+        let step = 37;
+
+        let mut comps = 0usize;
+        let mut cells_total = 0usize;
+        let mut hist = [0usize; 6];
+        for frame in (0..n).step_by(step) {
+            let f = &FRAMES[frame * FRAME_BYTES..(frame + 1) * FRAME_BYTES];
+            for c in components(f) {
+                comps += 1;
+                cells_total += c.len();
+                let b = match c.len() {
+                    1 => 0,
+                    2..=4 => 1,
+                    5..=16 => 2,
+                    17..=64 => 3,
+                    65..=256 => 4,
+                    _ => 5,
+                };
+                hist[b] += 1;
+            }
+        }
+        let frames = n.div_ceil(step);
+        println!(
+            "
+{frames} frames: {comps} components ({:.1}/frame), {cells_total} cells ({:.1}/frame, {:.1}/component)",
+            comps as f64 / frames as f64,
+            cells_total as f64 / frames as f64,
+            cells_total as f64 / comps as f64
+        );
+        println!(
+            "component sizes: 1 cell {} | 2-4 {} | 5-16 {} | 17-64 {} | 65-256 {} | 257+ {}",
+            hist[0], hist[1], hist[2], hist[3], hist[4], hist[5]
+        );
+
+        for frame in (0..n).step_by(step * 5) {
+            let f = &FRAMES[frame * FRAME_BYTES..(frame + 1) * FRAME_BYTES];
+            for cells in components(f) {
+                let _ = gridfinity::build_piece(&p, &cells, &cells, None);
+            }
+        }
+
+        perf::set_enabled(true);
+        perf::reset();
+        let t = Instant::now();
+        for frame in (0..n).step_by(step) {
+            let f = &FRAMES[frame * FRAME_BYTES..(frame + 1) * FRAME_BYTES];
+            for cells in components(f) {
+                let _ = gridfinity::build_piece(&p, &cells, &cells, None);
+            }
+        }
+        let wall = t.elapsed();
+        perf::set_enabled(false);
+
+        println!("
+build only: {:?} total, {:.2} ms/frame
+", wall, wall.as_secs_f64() * 1e3 / frames as f64);
+        println!("{:<34} {:>10} {:>10} {:>12}", "metric", "time", "calls", "allocs");
+        let mut rows = perf::snapshot();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.nanos));
+        for r in &rows {
+            println!(
+                "{:<34} {:>10} {:>10} {:>12}",
+                r.name,
+                format!("{:?}", std::time::Duration::from_nanos(r.nanos)),
+                r.calls,
+                r.alloc_calls
+            );
+        }
+        let a = perf::allocs();
+        println!("total allocs {} · churn {} kB", a.count, a.bytes / 1000);
+    }
+
+    #[test]
+    #[ignore]
     fn phase_split() {
         let n = frame_count();
         let p = cell_params();
