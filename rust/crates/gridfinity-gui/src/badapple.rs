@@ -210,6 +210,23 @@ mod tests {
             }
         }
         let solid = gridfinity::build_piece(&p, &best, &best, None).unwrap();
+        {
+            let mut pp = p.clone();
+            pp.bins = vec![gridfinity_cad::gridfinity::LogicalBin {
+                cells: best.clone(),
+                ..Default::default()
+            }];
+            let t = Instant::now();
+            let prog = gridfinity::program(&pp);
+            let plan_ms = t.elapsed().as_secs_f64() * 1e3;
+            let t = Instant::now();
+            let s = gridfinity_cad::kernel::program::run_all(&prog).unwrap();
+            println!(
+                "plan {plan_ms:.1} ms, run {:.1} ms ({} faces)",
+                t.elapsed().as_secs_f64() * 1e3,
+                s.faces.len()
+            );
+        }
         println!(
             "biggest blob: {} cells, {} faces, {} edges, {} verts",
             best.len(),

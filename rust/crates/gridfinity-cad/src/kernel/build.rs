@@ -99,10 +99,14 @@ pub fn wall_between(
     outward: bool,
 ) {
     let n = segs_lo.len();
+    // Each vertical is shared by two side faces, so carry it forward rather
+    // than re-interning it: a peg loft's bands are half the kernel's edge
+    // lookups.
+    let first_v = b.line(lo.verts[0], hi.verts[0]);
+    let mut va = first_v;
     for k in 0..n {
         let k1 = (k + 1) % n;
-        let va = b.line(lo.verts[k], hi.verts[k]);
-        let vb = b.line(lo.verts[k1], hi.verts[k1]);
+        let vb = if k1 == 0 { first_v } else { b.line(lo.verts[k1], hi.verts[k1]) };
         let (be, bd) = lo.edges[k];
         let (te, td) = hi.edges[k];
         let surface = match segs_lo[k] {
@@ -129,6 +133,7 @@ pub fn wall_between(
         };
         let lp = [(be, bd), (vb.0, vb.1), (te, !td), (va.0, !va.1)];
         b.face_from(surface, sense, &lp, &[]);
+        va = vb;
     }
 }
 
