@@ -1,8 +1,4 @@
-﻿//! `gridfinity-cad`: a minimalistic analytic-surface B-rep CAD kernel and a
-//! parametric Gridfinity model built on it.
-//!
-//! Pipeline: [`sketch`] â†’ [`build`] features â†’ [`topo`] B-rep solid â†’
-//! `boolean`/`fillet` â†’ [`tess`] â†’ [`mesh`] â†’ STL.
+﻿
 
 pub mod kernel;
 
@@ -17,11 +13,6 @@ pub use kernel::mesh::Mesh;
 pub use kernel::tess::{Tessellation, tessellate};
 pub use kernel::topo::Solid;
 
-// Install the allocation counter in the unit-test binary so `perf_report` can
-// read the churn scorecard headlessly. The GUI binary installs its own; a
-// library must not choose the allocator for its dependents, so this is
-// `cfg(test)` only. It is off unless `perf::set_enabled(true)`, so ordinary
-// tests pay only a relaxed load per allocation.
 #[cfg(test)]
 #[global_allocator]
 static TEST_ALLOC: kernel::perf::CountingAlloc<std::alloc::System> =
@@ -37,8 +28,6 @@ mod tests {
     use crate::kernel::sketch::Sketch;
     use std::collections::HashMap;
 
-    /// Every directed edge of the indexed mesh must be matched by its reverse â€”
-    /// the watertight / 2-manifold invariant.
     fn assert_watertight(mesh: &Mesh) {
         let mut dir: HashMap<(u32, u32), i32> = HashMap::new();
         for t in mesh.indices.chunks_exact(3) {
@@ -66,10 +55,6 @@ mod tests {
         coords.iter().map(|&(x, y)| GridCell { x, y }).collect()
     }
 
-    /// The model is a kernel program: every prefix of it runs, and running all
-    /// of it reproduces `build`. This is what the geometry debugger steps
-    /// through, so a stage that secretly depended on an earlier stage's edge
-    /// ids would surface here as a prefix that fails to run.
     #[test]
     fn model_is_a_runnable_program() {
         use crate::kernel::program;
@@ -85,9 +70,6 @@ mod tests {
         assert_eq!(whole.faces.len(), gridfinity::build(&p).faces.len());
     }
 
-    /// The sloped cavity is emitted as ops (SlopedWall + PlanarFace), not a
-    /// Custom closure, so the debugger can step it like everything else: every
-    /// prefix must run and the whole program must reproduce `build`.
     #[test]
     fn sloped_model_is_a_runnable_program() {
         use crate::kernel::program;
@@ -134,7 +116,6 @@ mod tests {
 
     #[test]
     fn foot_loft_is_valid_and_watertight() {
-        // Chamfered peg-ish foot: three stacked rounded-rect rings.
         let r0 = Sketch::rounded_rect(0.0, 0.0, 35.6, 35.6, 0.8);
         let r1 = Sketch::rounded_rect(0.0, 0.0, 37.2, 37.2, 1.5);
         let r2 = Sketch::rounded_rect(0.0, 0.0, 41.5, 41.5, 3.75);
@@ -169,7 +150,6 @@ mod tests {
         assert_watertight(&mesh);
         let (min, max) = mesh.bounds();
         let size = max - min;
-        // 2Ã—2 grid â†’ 2Â·42 âˆ’ 0.5 = 83.5 mm (0.25 clearance/side); 7 + 3Â·7 = 28 tall.
         assert!((size.x - 83.5).abs() < 1e-2, "x {}", size.x);
         assert!((size.y - 83.5).abs() < 1e-2, "y {}", size.y);
         assert!((size.z - 28.0).abs() < 1e-2, "z {}", size.z);
@@ -177,8 +157,6 @@ mod tests {
 
     #[test]
     fn single_cell_bin_is_watertight() {
-        // 1Ã—1: the peg top coincides with the outer wall everywhere (no bridge
-        // faces at all) â€” the tightest shell case.
         let p = gridfinity::Params::rect(1, 1);
         let solid = gridfinity::build(&p);
         solid.validate().expect("1x1 topology valid");
@@ -203,7 +181,6 @@ mod tests {
 
     #[test]
     fn two_logical_bins_are_watertight() {
-        // Adjacent logical bins: each gets full outer walls facing the other.
         let p = gridfinity::Params {
             bins: vec![
                 LogicalBin { cells: cells(&[(0, 0)]), ..Default::default() },
@@ -216,15 +193,12 @@ mod tests {
         let mesh = tessellate(&solid, 6).to_mesh();
         assert_watertight(&mesh);
         let (min, max) = mesh.bounds();
-        // Layout spans 3 cells: last bin ends at 3Â·42 âˆ’ 0.25.
         assert!((max.x - 125.75).abs() < 1e-2, "max.x {}", max.x);
         assert!(min.x < 0.5, "min.x {}", min.x);
     }
 
     #[test]
     fn partial_divider_finger_is_watertight() {
-        // A divider on only one of the two rows: the cavity keeps a wall finger
-        // (the reference's partial-divider behaviour, not a full split line).
         let p = gridfinity::Params {
             divider_edges: vec![GridEdge { x: 1, y: 0, orientation: Orientation::V }],
             ..gridfinity::Params::rect(2, 2)
@@ -233,7 +207,6 @@ mod tests {
         solid.validate().expect("finger topology valid");
         let mesh = tessellate(&solid, 6).to_mesh();
         assert_watertight(&mesh);
-        // One connected cavity (finger does not split it): rim face has 1 hole.
         let full = gridfinity::Params {
             divider_edges: vec![
                 GridEdge { x: 1, y: 0, orientation: Orientation::V },
@@ -295,9 +268,6 @@ mod tests {
 
     #[test]
     fn meshes_have_outward_consistent_winding() {
-        // Positive signed volume â‡’ every facet wound outward (CCW seen from
-        // outside) â‡’ the STL normals are outward and the GL preview back-face
-        // cull shows the outside, not an inside-out shell.
         for p in [
             gridfinity::Params::default(),
             gridfinity::Params {
@@ -333,7 +303,6 @@ mod tests {
 
     #[test]
     fn divider_edges_split_bin_is_watertight() {
-        // 3Ã—1 bin with a full divider after column 1 (one V edge at x=1).
         let divider = vec![GridEdge { x: 1, y: 0, orientation: Orientation::V }];
         let p = gridfinity::Params {
             divider_edges: divider,
@@ -343,8 +312,6 @@ mod tests {
         solid.validate().expect("divider bin topology valid");
         let mesh = tessellate(&solid, 6).to_mesh();
         assert_watertight(&mesh);
-        // Two compartments â†’ the rim top face has two holes, so the triangle
-        // count is clearly higher than a single-compartment 3Ã—1 bin.
         let single = tessellate(&gridfinity::build(&gridfinity::Params::rect(3, 1)), 6).to_mesh();
         assert!(
             mesh.tri_count() > single.tri_count(),
@@ -354,7 +321,6 @@ mod tests {
 
     #[test]
     fn uneven_dividers_stay_watertight() {
-        // 4Ã—3 grid split at non-midpoint lines on both axes.
         let mut dividers = Vec::new();
         for y in 0..3 {
             dividers.push(GridEdge { x: 1, y, orientation: Orientation::V });
@@ -371,8 +337,6 @@ mod tests {
 
     #[test]
     fn divider_ring_island_is_watertight() {
-        // Dividers enclosing the centre cell of a 3Ã—3 â†’ the cavity trace has a
-        // hole loop: an island tower with its own inner compartment.
         let dividers = vec![
             GridEdge { x: 1, y: 1, orientation: Orientation::V },
             GridEdge { x: 2, y: 1, orientation: Orientation::V },
@@ -387,8 +351,6 @@ mod tests {
 
     #[test]
     fn free_standing_inner_wall_is_watertight_and_adds_volume() {
-        // A diagonal full-height inner wall floating inside the cavity of a
-        // 2×2 bin: island tower welded into floor and rim assembly.
         let base = gridfinity::Params::default();
         let base_mesh = tessellate(&gridfinity::build(&base), 6).to_mesh();
         let p = gridfinity::Params {
@@ -412,9 +374,6 @@ mod tests {
 
     #[test]
     fn partial_height_inner_wall_is_capped_below_rim() {
-        // A low free-standing barrier: tower capped at floor + 8 mm, well
-        // below the rim; the mesh must stay watertight and the cap must not
-        // reach total height.
         let p = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {
                 x1: 15.0,
@@ -432,9 +391,6 @@ mod tests {
         assert_watertight(&mesh);
         let base = tessellate(&gridfinity::build(&gridfinity::Params::default()), 6).to_mesh();
         let dv = signed_volume(&mesh) - signed_volume(&base);
-        // The wall adds ~800 mm³ but its sharp corners drop the floor fillet
-        // (which itself adds ~600 mm³ to the base bin), so the net is small —
-        // what matters is that it is positive and clearly below full height.
         let full = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {
                 x1: 15.0,
@@ -454,8 +410,6 @@ mod tests {
 
     #[test]
     fn partial_wall_crossing_cavity_is_banded_watertight() {
-        // A low wall spanning wall band to wall band: below its top the
-        // cavity is two pockets, above it one — the z-banded prism.
         let p = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {
                 x1: -5.0,
@@ -474,7 +428,6 @@ mod tests {
 
     #[test]
     fn partial_wall_one_end_on_boundary_is_watertight() {
-        // One end embedded, the other free in the cavity, partial height.
         let p = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {
                 x1: 90.0,
@@ -489,9 +442,6 @@ mod tests {
         let solid = gridfinity::build(&p);
         solid.validate().expect("banded notch wall topology valid");
         assert_watertight(&tessellate(&solid, 6).to_mesh());
-        // The wall top is 4 mm below the rim, so the kernel must have rolled a
-        // r=4 blend along the contact and run it out on the wall's side planes
-        // (horizontal axis distinguishes it from any vertical corner round).
         let ramp = solid.faces.iter().any(|f| match f.surface {
             geom::Surface::Cylinder { axis, radius, .. } => {
                 (radius - 4.0).abs() < 1e-3 && axis.z.abs() < 1e-3
@@ -499,16 +449,12 @@ mod tests {
             _ => false,
         });
         assert!(ramp, "wall-top runout blend is missing");
-        // ...and the runout trim curve is a real ellipse, not a circle.
         let ell = solid.edges.iter().any(|e| matches!(e.curve, geom::Curve::Ellipse { .. }));
         assert!(ell, "runout ellipse is missing");
     }
 
     #[test]
     fn crossing_inner_wall_splits_compartment_watertight() {
-        // A slightly skewed wall spanning the whole 2×2 cavity: both ends
-        // overlap the wall band, so the compartment splits into two loops
-        // with sharp notch corners (floor fillet drops to zero there).
         let p = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {
                 x1: -5.0,
@@ -530,8 +476,6 @@ mod tests {
 
     #[test]
     fn notching_inner_wall_is_watertight() {
-        // One end embedded in the wall band, the other free inside the
-        // cavity: the loop keeps one boundary with a peninsula notch.
         let p = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {
                 x1: 90.0,
@@ -548,19 +492,6 @@ mod tests {
         assert_watertight(&tessellate(&solid, 6).to_mesh());
     }
 
-    /// Mirror of the TS `full-height wall` fixture. Pins two facts the fix
-    /// must satisfy: the B-rep audits clean (every edge lies on every face
-    /// that references it, vertices welded, loops closed), and the
-    /// tessellation currently leaks at the island wall's semicircle end-caps.
-    ///
-    /// Leak attribution via [`tessellation_leaks`]: all 8 unpaired mesh edges
-    /// sit at z = floor_z (8.2 mm), on the `ta` tangent circle of the two
-    /// torus blend faces at the wall's left (face 134, centre (7,42,10.68),
-    /// major 3.48 / minor 2.48) and right (face 137, centre (77,42,10.68))
-    /// ends — paired against the cavity floor face (131). The B-rep says these
-    /// three faces share their edges correctly; the tessellator disagrees.
-    /// That isolates the defect to `tess.rs`'s handling of the floor face's
-    /// hole triangulation against the torus's structured-grid boundary.
     #[test]
     fn full_height_wall_fixture_audit() {
         let p = gridfinity::Params {
@@ -578,13 +509,10 @@ mod tests {
         solid.validate().expect("full-height wall topology valid");
         let report = audit(&solid);
         assert!(report.is_ok(), "B-rep must be geometrically sound:\n{report}");
-        // When the tessellation bug is fixed, uncomment this:
-        // assert!(tessellation_leaks(&tessellate(&solid, 6)).is_empty());
     }
 
     #[test]
     fn open_edge_bin_is_watertight_and_loses_volume() {
-        // 2Ã—2 bin with the whole north face open (both H edges at y=2).
         let closed = gridfinity::Params::default();
         let closed_mesh = tessellate(&gridfinity::build(&closed), 6).to_mesh();
         let open = gridfinity::Params {
@@ -602,16 +530,12 @@ mod tests {
             signed_volume(&mesh) < signed_volume(&closed_mesh) - 100.0,
             "removing a wall must remove material"
         );
-        // The footprint must not change: the open face still sits at the spec
-        // inset, not the pitch line.
         let (min, max) = mesh.bounds();
         assert!((max.y - min.y - 83.5).abs() < 1e-2, "depth {}", max.y - min.y);
     }
 
     #[test]
     fn single_open_edge_and_corner_pinch_watertight() {
-        // One open edge out of two on a face â†’ a mixed walled/open corner and a
-        // mid-face wall end (pinch against the neighbouring walled strip).
         let p = gridfinity::Params {
             open_edges: vec![GridEdge { x: 0, y: 2, orientation: Orientation::H }],
             ..gridfinity::Params::default()
@@ -623,7 +547,6 @@ mod tests {
 
     #[test]
     fn fully_open_1x1_bin_is_watertight() {
-        // Every perimeter edge open: no wall above the floor at all.
         let mut open_edges = Vec::new();
         for e in crate::layout::perimeter_edges(&cells(&[(0, 0)])) {
             open_edges.push(e);
@@ -633,16 +556,12 @@ mod tests {
         solid.validate().expect("fully-open bin topology valid");
         let mesh = tessellate(&solid, 6).to_mesh();
         assert_watertight(&mesh);
-        // Only base + floor remain: the mesh must top out at the floor.
         let (_, max) = mesh.bounds();
         assert!((max.z - 8.2).abs() < 1e-2, "top {}", max.z);
     }
 
     #[test]
     fn open_edge_with_divider_finger_watertight() {
-        // A divider wall running INTO an open face: its end lands on the outer
-        // profile, splitting the peg-welded body piece (peg profiles must
-        // split identically to stay welded).
         let p = gridfinity::Params {
             open_edges: vec![
                 GridEdge { x: 0, y: 1, orientation: Orientation::H },
@@ -658,7 +577,6 @@ mod tests {
 
     #[test]
     fn split_bin_pieces_are_watertight() {
-        // 3Ã—1 bin split after column 0 â†’ two pieces with square open seams.
         let mut p = gridfinity::Params::rect(3, 1);
         p.bins[0].split_lines = vec![SplitLine { axis: Axis::X, index: 1 }];
         let pieces = gridfinity::build_pieces(&p);
@@ -668,17 +586,13 @@ mod tests {
             let mesh = tessellate(&pc.solid, 6).to_mesh();
             assert_watertight(&mesh);
         }
-        // The seam face sits ON the pitch plane (x = 42), not inset.
         let (_, max0) = tessellate(&pieces[0].solid, 6).to_mesh().bounds();
         assert!((max0.x - 42.0).abs() < 1e-3, "seam at {}", max0.x);
-        // Piece names follow the reference convention.
         assert_eq!(pieces[0].name, "gridfinity-bin-piece-1-of-2.stl");
     }
 
     #[test]
     fn split_seam_divider_walls_both_pieces() {
-        // A divider on the split line becomes a full wall on both pieces, so
-        // each piece is a complete closed bin (no open seam).
         let mut p = gridfinity::Params::rect(2, 1);
         p.bins[0].split_lines = vec![SplitLine { axis: Axis::X, index: 1 }];
         p.divider_edges = vec![GridEdge { x: 1, y: 0, orientation: Orientation::V }];
@@ -691,7 +605,6 @@ mod tests {
             assert_watertight(&mesh);
             volumes.push(signed_volume(&mesh));
         }
-        // Compare against the open-seam variant: walled seams add material.
         let mut p_open = gridfinity::Params::rect(2, 1);
         p_open.bins[0].split_lines = vec![SplitLine { axis: Axis::X, index: 1 }];
         let open_pieces = gridfinity::build_pieces(&p_open);
@@ -736,8 +649,6 @@ mod tests {
 
     #[test]
     fn sloped_floor_displaces_volume() {
-        // A slope fills part of the cavity, so the sloped solid has strictly
-        // more material volume than the flat one.
         let flat = tessellate(&gridfinity::build(&gridfinity::Params::default()), 8).to_mesh();
         let mut sp = gridfinity::Params::default();
         sp.bins[0].slope = Some(BinSlope { angle_deg: 25.0, dir: SlopeDir::MinusX });
@@ -751,11 +662,8 @@ mod tests {
     #[test]
     fn fillet_cylinder_top_is_watertight() {
         use crate::kernel::fillet::fillet_edges;
-        // Cylinder radius 10, height 5. Filleting the top circle (between the
-        // top plane face and the cylinder side face) yields a torus blend.
         let s = Sketch::circle(0.0, 0.0, 10.0);
         let solid = extrude(&s, 0.0, 5.0);
-        // The two top semicircle arcs: Circle edges whose endpoints are at z=5.
         let top_edges: Vec<_> = (0..solid.edges.len())
             .filter(|&i| {
                 let e = solid.edges[i];
@@ -781,9 +689,6 @@ mod tests {
         let mut p = gridfinity::Params::default();
         p.bins[0].slope = Some(BinSlope { angle_deg: 20.0, dir: SlopeDir::MinusX });
         let mesh = tessellate(&gridfinity::build(&p), 10).to_mesh();
-        // MinusX â‡’ low side at x=0. Some cavity-floor vertex at xâ‰ˆ wall inset
-        // should sit at ~floor_z; the high side (xâ‰ˆfw) strictly above. Restrict
-        // to z above the base so outer-shell vertices don't win the fold.
         let low = mesh
             .positions
             .iter()
@@ -801,11 +706,6 @@ mod tests {
         assert!((low - floor_z).abs() < 0.6, "low-side floor z {low} â‰ˆ floor_z {floor_z}");
         assert!(high > floor_z + 3.0, "high-side floor z {high} should rise above floor_z");
     }
-    /// Floor-blend faces (`Torus` about +Z) whose centre lies within `d` of the
-    /// segment `a`–`b`, and the minor radius they share. The radius is returned
-    /// rather than asserted against `floor_fillet`: the model clamps the blend
-    /// to what the cavity can absorb, so the effective value (2.48 mm for the
-    /// default bin's requested 3.0) is the model's answer, not the test's.
     fn blends_near(solid: &crate::Solid, a: (f32, f32), b: (f32, f32), d: f32) -> (usize, f32) {
         use crate::kernel::math::Vec2;
         let (a, b) = (Vec2::new(a.0, a.1), Vec2::new(b.0, b.1));
@@ -819,7 +719,6 @@ mod tests {
                         return false;
                     }
                     let p = crate::kernel::math::Vec2::new(center.x, center.y);
-                    // `a == b` is the "anywhere" query; guard the 0/0.
                     let l2 = ab.dot(ab);
                     let t = if l2 < 1e-9 { 0.0 } else { ((p - a).dot(ab) / l2).clamp(0.0, 1.0) };
                     (p - (a + ab * t)).length() <= d
@@ -832,17 +731,6 @@ mod tests {
             })
     }
 
-    /// A freeform dividing wall that floats clear of the cavity boundary is a
-    /// concave floor edge like any other, so its corners must carry the floor
-    /// fillet — not just the compartment's outer corners.
-    ///
-    /// This is the regression guard on `inner_wall_quad_in`'s clearance test.
-    /// The island's corners are only rounded when its blend footprint (the wall
-    /// grown by `2·fr`) fits inside the cavity loop, and rounding them is what
-    /// lets the blend's tangent chain run around the island at all — a single
-    /// sharp corner anywhere on a loop drops that loop's blend entirely. Skewed
-    /// deliberately: the wall is at no grid angle, so nothing here can be
-    /// satisfied by an axis-aligned special case.
     #[test]
     fn freeform_floating_divider_is_filleted() {
         let wall = gridfinity::InnerWall {
@@ -859,8 +747,6 @@ mod tests {
 {}", crate::audit(&solid));
         assert_watertight(&tessellate(&solid, 6).to_mesh());
 
-        // Four corner blends around the island, and the compartment's own four
-        // are still there — the island must add to them, not replace them.
         let (on_wall, r) = blends_near(&solid, (22.0, 30.0), (62.0, 55.0), 6.0);
         assert_eq!(on_wall, 4, "want 4 blend faces around the island, got {on_wall}");
         assert!(r > 0.1, "island blend radius collapsed to {r}");
@@ -868,20 +754,9 @@ mod tests {
         let (base, br) = blends_near(&plain, (41.75, 41.75), (41.75, 41.75), 1e4);
         assert_eq!(base, 4, "plain bin should have 4 corner blends, got {base}");
         assert_eq!(total, base + 4, "island blends must add to the compartment's");
-        // Deliberately *not* asserted equal: the two chains are clamped
-        // independently now, so the compartment's radius reflects its own
-        // corner arcs and the island's reflects its own.
         assert!(br > 0.1, "compartment blend radius collapsed to {br}");
     }
 
-    /// The clearance test's other side, and the point of blending each chain
-    /// separately: a wall whose blend footprint would reach past the cavity
-    /// boundary gets no blend of its own — its floor would overlap the one the
-    /// boundary has already taken — but the **compartment keeps its own**.
-    ///
-    /// That split is the whole gain. While one radius covered both chains, this
-    /// wall cost the compartment all four of its corner blends; now it costs
-    /// only its own.
     #[test]
     fn divider_too_close_to_the_wall_stays_sharp_and_sound() {
         let p = gridfinity::Params {
@@ -900,28 +775,12 @@ mod tests {
         assert_eq!(total, 4, "the compartment must keep its own four corner blends");
     }
 
-    /// A divider that reaches the compartment boundary without splitting it
-    /// notches the cavity loop, and the region boolean leaves sharp corners
-    /// where the wall's sides meet the boundary. Those corners are rounded
-    /// afterwards, so the loop stays tangent-continuous and keeps its floor
-    /// blend — before, a single one of them dropped the blend for the whole
-    /// compartment.
-    ///
-    /// Rounding has to happen after the cut, not before: rounding the wall
-    /// first moves the intersection points off where the cavity's own split
-    /// routines put them, and the notch mouth stops welding.
-    /// The instrumentation must actually observe a real build: a default bin
-    /// exercises the region booleans, the builder and the tessellator, so every
-    /// one of those metrics has to come back non-zero. A silently-dead counter
-    /// would make the debugger's Performance panel quietly lie.
     #[test]
     fn perf_counters_see_a_real_build() {
         use crate::kernel::perf::{self, Metric};
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        // An inner wall, so the region booleans have crossings to solve — a
-        // plain bin never calls `seg_seg_points` at all.
         let p = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {
                 x1: 22.0, y1: 30.0, x2: 62.0, y2: 55.0, width: 2.4, height: None,
@@ -950,8 +809,6 @@ mod tests {
         }
     }
 
-    /// Prints the profile of a representative rebuild. Not an assertion — a
-    /// way to get the same table the debugger shows, from the terminal.
     #[test]
     #[ignore = "reporting: cargo test -p gridfinity-cad perf_report -- --ignored --nocapture"]
     fn perf_report() {
@@ -963,9 +820,6 @@ mod tests {
             ],
             ..gridfinity::Params::default()
         };
-        // Measure the *second* rebuild: warm any process-level state on the
-        // first, then reset and report the repeat — the number a slider drag
-        // actually pays.
         perf::set_enabled(true);
         let _ = tessellate(&gridfinity::build(&p), 6);
         perf::reset();
@@ -1003,14 +857,6 @@ rebuild #2 {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().i
         }
     }
 
-    /// A partial-height wall must get a **top face**.
-    ///
-    /// The banded slab stack caps a band interface from the difference of the
-    /// cross-sections either side of it. Here those two are `outline − wall`
-    /// and `outline`, which share their whole boundary bar the wall's mouth —
-    /// the case where coincident boundary runs used to fall through
-    /// `region_difference`'s inside/outside test and return empty. The wall
-    /// then had open sides and no top, and the solid was non-manifold.
     #[test]
     fn partial_height_wall_gets_a_top_face() {
         let p = gridfinity::Params {
@@ -1025,7 +871,6 @@ rebuild #2 {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().i
         assert!(crate::audit(&solid).is_ok(), "B-rep must be sound:\n{}", crate::audit(&solid));
         assert_watertight(&tessellate(&solid, 6).to_mesh());
 
-        // The cap itself: a horizontal face at floor + wall height.
         let top_z = 8.2 + 6.5;
         let caps = solid
             .faces
@@ -1058,11 +903,6 @@ rebuild #2 {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().i
         assert!(r > 0.1, "blend radius collapsed to {r}");
     }
 
-    /// The degenerate-torus guard. A blend rolling inside a corner arc produces
-    /// a torus of major radius `arc_radius - blend_radius`; letting that reach
-    /// zero makes a ring thinner than the tessellator samples, and the mesh
-    /// leaks around the corner. Every blend torus in a stock bin must be a real
-    /// one.
     #[test]
     fn blend_tori_never_degenerate_to_a_ring() {
         for walls in [
@@ -1080,20 +920,6 @@ rebuild #2 {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().i
         }
     }
 
-    /// A divider that *splits* the compartment in two is the one wall shape
-    /// still left unfilleted.
-    ///
-    /// The sharp-corner problem is solved: `round_sharp_corners` rounds what
-    /// the region boolean leaves behind, and a divider that merely notches the
-    /// compartment is filleted and watertight. Splitting it is what fails, and
-    /// the failure has moved into `fillet_edges` — it rebuilds the solid and
-    /// reports "loop not closed" around the rounded junction where the divider
-    /// meets the outer wall. The loops themselves are sound: the same geometry
-    /// builds clean and leak-free at `floor_fillet = 0`.
-    ///
-    /// So this waits on the blender, not on the model. Until then those loops
-    /// are left sharp deliberately, which reverts them to the old unfilleted
-    /// result rather than failing the build.
     #[test]
     fn freeform_crossing_divider_is_filleted() {
         let p = gridfinity::Params {
@@ -1112,8 +938,6 @@ rebuild #2 {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().i
 
 }
 
-/// Tests for the heavy soundness checker itself: it must be quiet on a
-/// known-good model and loud when a defect is planted.
 #[cfg(test)]
 mod audit_tests {
     use crate::{audit, tessellation_leaks};
@@ -1132,9 +956,6 @@ mod audit_tests {
 
     #[test]
     fn audit_catches_edge_curve_not_landing_on_vertex() {
-        // Two quads sharing an edge, but one edge's curve is deliberately
-        // offset so its endpoint doesn't sit on the vertex it claims — the
-        // kind of defect a mis-authored blend would introduce.
         let mut b = Builder::new();
         let v0 = b.vertex(Vec3::new(0.0, 0.0, 0.0));
         let v1 = b.vertex(Vec3::new(10.0, 0.0, 0.0));
@@ -1164,7 +985,6 @@ mod audit_tests {
             vec![],
         );
         let mut solid = b.build();
-        // Tamper: shift one edge's t1 so its curve no longer hits v1.
         solid.edges[e01].t1 = 9.5;
         let report = audit(&solid);
         assert!(!report.is_ok(), "audit should catch the planted defect");

@@ -1,6 +1,3 @@
-//! 2D layout editor canvas: paint polyomino bins cell by cell, toggle
-//! open/divider edges, place split lines, and draw free-form inner walls —
-//! the egui counterpart of the TS reference's shape/walls/split editors.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use gridfinity_cad::gridfinity::{InnerWall, Params};
@@ -10,7 +7,6 @@ use gridfinity_cad::layout::{
 
 const PITCH: f32 = 42.0;
 
-/// Distinguishable bin fill colors (mirrors the TS editor palette idea).
 pub const BIN_COLORS: &[Color32] = &[
     Color32::from_rgb(0x4e, 0x79, 0xa7),
     Color32::from_rgb(0xf2, 0x8e, 0x2b),
@@ -23,13 +19,9 @@ pub const BIN_COLORS: &[Color32] = &[
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
-    /// Paint/unpaint the active bin's cells.
     Cells,
-    /// Toggle open perimeter edges / internal divider edges.
     Edges,
-    /// Toggle split lines of the active bin.
     Split,
-    /// Drag to draw a free-form inner wall (mm coordinates).
     Walls,
 }
 
@@ -38,7 +30,6 @@ pub struct Editor {
     pub active_bin: usize,
     drag_start: Option<Pos2>,
     drag_now: Option<Pos2>,
-    /// Width/height applied to newly drawn inner walls.
     pub wall_width: f32,
     pub wall_height: f32,
     pub wall_full: bool,
@@ -59,11 +50,9 @@ impl Default for Editor {
 }
 
 impl Editor {
-    /// Show the canvas; returns true when `p` changed.
     pub fn canvas(&mut self, ui: &mut egui::Ui, p: &mut Params) -> bool {
         let mut changed = false;
 
-        // View extent: every bin's cells plus one spare ring, at least 5×5.
         let (mut max_x, mut max_y) = (3i32, 3i32);
         for b in &p.bins {
             for c in &b.cells {
@@ -79,7 +68,6 @@ impl Editor {
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
 
-        // Grid cell (gx,gy) → screen rect; y-up so the canvas matches model mm.
         let cell_rect = |gx: i32, gy: i32| {
             Rect::from_min_size(
                 Pos2::new(
@@ -118,7 +106,6 @@ impl Editor {
             painter.line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], grid_stroke);
         }
 
-        // Edge overlays: open perimeter edges red, dividers dark blue.
         let edge_pts = |e: &GridEdge| -> [Pos2; 2] {
             let x0 = rect.left() + e.x as f32 * cell;
             let y0 = rect.bottom() - e.y as f32 * cell;
@@ -134,7 +121,6 @@ impl Editor {
             painter.line_segment(edge_pts(e), Stroke::new(4.0, Color32::from_rgb(0x28, 0x4a, 0x7a)));
         }
 
-        // Split lines of every bin, over that bin's bounding rows/cols.
         for (bi, b) in p.bins.iter().enumerate() {
             let col = BIN_COLORS[bi % BIN_COLORS.len()].gamma_multiply(0.9);
             let (min_x, max_x, min_y, max_y) = bounds(&b.cells);
@@ -159,7 +145,6 @@ impl Editor {
             }
         }
 
-        // Inner walls (mm → grid units).
         for w in &p.inner_walls {
             let a = Pos2::new(
                 rect.left() + w.x1 / PITCH * cell,
@@ -176,7 +161,6 @@ impl Editor {
             painter.line_segment([a, b2], Stroke::new(2.0, Color32::LIGHT_GREEN));
         }
 
-        // ── Interaction ──────────────────────────────────────────────────
         match self.tool {
             Tool::Cells => {
                 if resp.clicked() {
@@ -247,8 +231,6 @@ fn bounds(cells: &[GridCell]) -> (i32, i32, i32, i32) {
     b
 }
 
-/// Toggle a cell of the active bin; a cell owned by another bin moves to the
-/// active bin. Bins may become empty (the builder skips them).
 fn toggle_cell(p: &mut Params, active: usize, c: GridCell) -> bool {
     if active >= p.bins.len() {
         return false;
@@ -261,7 +243,7 @@ fn toggle_cell(p: &mut Params, active: usize, c: GridCell) -> bool {
     match owner {
         Some((bi, k)) => {
             if bi == active && p.bins[bi].cells.len() == 1 && p.bins.len() == 1 {
-                return false; // never empty the entire layout
+                return false;
             }
             p.bins[bi].cells.remove(k);
             if bi != active {
@@ -273,7 +255,6 @@ fn toggle_cell(p: &mut Params, active: usize, c: GridCell) -> bool {
     true
 }
 
-/// Snap a grid-space point to its nearest cell edge (within 0.3 cells).
 fn nearest_edge(fx: f32, fy: f32) -> Option<GridEdge> {
     let dx = (fx - fx.round()).abs();
     let dy = (fy - fy.round()).abs();
@@ -287,8 +268,6 @@ fn nearest_edge(fx: f32, fy: f32) -> Option<GridEdge> {
     })
 }
 
-/// Perimeter edge → toggle open; internal edge → toggle divider (the same
-/// resolution the model applies via `classify_edge` against all cells).
 fn toggle_edge(p: &mut Params, e: GridEdge) -> bool {
     let all: Vec<GridCell> = p.bins.iter().flat_map(|b| b.cells.iter().copied()).collect();
     match classify_edge(&all, e) {
@@ -307,7 +286,6 @@ fn toggle_in(v: &mut Vec<GridEdge>, e: GridEdge) {
     }
 }
 
-/// Toggle the split line of the active bin nearest to a grid-space point.
 fn toggle_split(p: &mut Params, active: usize, fx: f32, fy: f32) -> bool {
     let Some(bin) = p.bins.get_mut(active) else { return false };
     if bin.cells.is_empty() {
@@ -322,7 +300,7 @@ fn toggle_split(p: &mut Params, active: usize, fx: f32, fy: f32) -> bool {
     let sl = if dx < dy {
         let idx = fx.round() as i32;
         if idx <= min_x || idx > max_x {
-            return false; // must cut strictly inside the bin
+            return false;
         }
         SplitLine { axis: Axis::X, index: idx }
     } else {

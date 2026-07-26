@@ -1,30 +1,3 @@
-//! A reusable geometry fuzzer.
-//!
-//! Randomised `Params` in, soundness verdict out. Every case goes through the
-//! full chain the model promises to uphold:
-//!
-//! 1. `try_build` — must not `Err` and must not panic (the model layer still
-//!    panics on some degenerate combinations, so the unwind is caught, not
-//!    trusted away).
-//! 2. `Solid::validate` — the cheap manifold invariant.
-//! 3. [`audit`] — the heavy *geometric* soundness check.
-//! 4. `tessellation_leaks` — the mesh must close. This is verification of an
-//!    analytic result, never a modelling step (see the hard rule in
-//!    `CLAUDE.md`).
-//!
-//! Failures are grouped by a normalised signature so a hundred instances of one
-//! defect report as one line, each with a **paste-ready `Params` literal** for
-//! the shrunk case, so a find turns straight into a regression test.
-//!
-//! ```text
-//! cargo test -p gridfinity-cad --test fuzz                       # the guarded budget
-//! FUZZ_CASES=5000 cargo test -p gridfinity-cad --test fuzz -- --ignored --nocapture
-//! FUZZ_SEED=12345 FUZZ_CASES=2000 cargo test -p gridfinity-cad --test fuzz -- --ignored --nocapture
-//! ```
-//!
-//! Deterministic: a seed reproduces a run exactly. Adding a generator arm
-//! reshuffles the stream, so quote the *case literal* in a bug report, never
-//! "seed 7 case 412".
 
 use gridfinity_cad::gridfinity::{
     self, BinSlope, InnerWall, LogicalBin, Mode, Params, SlopeDir, rect_cells,
@@ -35,9 +8,7 @@ use gridfinity_cad::{audit, tessellation_leaks};
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-// -- the generator -------------------------------------------------------
 
-/// xorshift64*, so a run is reproducible without pulling in `rand`.
 struct Rng(u64);
 
 impl Rng {
@@ -52,17 +23,13 @@ impl Rng {
         self.0 = x;
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
-    /// Uniform in `[0, n)`.
     fn below(&mut self, n: u32) -> u32 {
         (self.next_u64() >> 32) as u32 % n.max(1)
     }
-    /// Uniform in `[lo, hi]`.
     fn range(&mut self, lo: f32, hi: f32) -> f32 {
         let t = (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32;
         lo + (hi - lo) * t
     }
-    /// Snapped to `step`, which keeps values printing as short literals and
-    /// makes an identical case likelier to recur across seeds.
     fn quantised(&mut self, lo: f32, hi: f32, step: f32) -> f32 {
         (self.range(lo, hi) / step).round() * step
     }
@@ -74,22 +41,15 @@ impl Rng {
     }
 }
 
-/// Which axes of the parameter space a run explores. Narrow profiles keep a
-/// regression guard pinned to the area it guards; `Broad` is the explorer.
 #[derive(Clone, Copy, PartialEq)]
 enum Profile {
-    /// Stock bin, random free-form inner walls. The area the crossing/notching
-    /// divider work lives in.
     InnerWalls,
-    /// Everything: shape, height, thicknesses, holes, dividers, slope, mode.
     Broad,
 }
 
 fn gen_cells(rng: &mut Rng) -> Vec<GridCell> {
     let (gx, gy) = (rng.below(3) + 1, rng.below(3) + 1);
     let mut cells = rect_cells(gx, gy);
-    // Knock a corner out sometimes: an L needs a reentrant outer corner, which
-    // is where the outer profile and the cavity's concave rounding interact.
     if cells.len() > 2 && rng.chance(1, 3) {
         let victim = rng.below(cells.len() as u32) as usize;
         cells.remove(victim);
@@ -97,10 +57,6 @@ fn gen_cells(rng: &mut Rng) -> Vec<GridCell> {
     cells
 }
 
-/// Inner-wall endpoints are drawn in mm over the layout's bounding box grown by
-/// a margin, so walls land fully inside, notch the boundary, and cross clean
-/// out the far side in roughly equal measure — those are three different code
-/// paths and all three matter.
 fn gen_inner_wall(rng: &mut Rng, cells: &[GridCell]) -> InnerWall {
     let span = |sel: fn(&GridCell) -> i32| {
         let hi = cells.iter().map(sel).max().unwrap_or(0);
@@ -160,7 +116,6 @@ fn gen_case(rng: &mut Rng, profile: Profile) -> Params {
                 ]),
             });
         }
-        // Divider edges only make sense on interior grid lines.
         for _ in 0..rng.below(3) {
             let c = cells[rng.below(cells.len() as u32) as usize];
             p.divider_edges.push(GridEdge {
@@ -173,13 +128,7 @@ fn gen_case(rng: &mut Rng, profile: Profile) -> Params {
     p
 }
 
-// -- the check -----------------------------------------------------------
 
-/// Run the whole soundness chain. `Ok` means the case is clean.
-///
-/// The panic hook is silenced for the duration: the model panics on some
-/// degenerate combinations by design, and a fuzz run would otherwise emit a
-/// backtrace per case and bury the report.
 fn check(p: &Params) -> Result<(), String> {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
@@ -211,9 +160,6 @@ fn check(p: &Params) -> Result<(), String> {
     }
 }
 
-/// Collapse an error to a stable key so instances of one defect group together:
-/// numbers, ids and paths vary case to case and would otherwise split a group
-/// into hundreds of singletons.
 fn signature(err: &str) -> String {
     let mut out = String::new();
     let mut in_num = false;
@@ -231,11 +177,7 @@ fn signature(err: &str) -> String {
     out.chars().take(140).collect()
 }
 
-// -- shrinking -----------------------------------------------------------
 
-/// Greedy shrink: drop each inner wall, then each cell, then walk the scalars
-/// back toward their defaults, keeping any change that preserves the *same*
-/// failure signature. A minimal case is what makes a find quotable as a test.
 fn shrink(p: &Params, sig: &str) -> Params {
     let same = |q: &Params| check(q).is_err_and(|e| signature(&e) == sig);
     let mut best = p.clone();
@@ -289,8 +231,6 @@ fn shrink(p: &Params, sig: &str) -> Params {
     best
 }
 
-/// A paste-ready `Params` literal. Only fields that differ from the default are
-/// printed, so a report line is short enough to read and complete enough to run.
 fn repro(p: &Params) -> String {
     let d = Params::default();
     let mut f: Vec<String> = Vec::new();
@@ -365,7 +305,6 @@ fn repro(p: &Params) -> String {
     format!("Params {{ {}, ..Params::default() }}", f.join(", "))
 }
 
-// -- the driver ----------------------------------------------------------
 
 struct Finding {
     count: usize,
@@ -373,7 +312,6 @@ struct Finding {
     detail: String,
 }
 
-/// Returns a human-readable report, empty when every case was clean.
 fn run(profile: Profile, cases: u32, seed: u64) -> String {
     let mut rng = Rng::new(seed);
     let mut found: BTreeMap<String, Finding> = BTreeMap::new();
@@ -419,55 +357,6 @@ fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-/// Pinned to the free-form inner-wall space, which is where the floating /
-/// notching / crossing divider fillet work lives.
-///
-/// **Baseline at the default seed: 36/150 cases fail, 6 distinct defects.**
-/// Was 89/150 and 10 before `fillet_best_effort` (which converted every "blender
-/// refused the chain" class into a partial fillet), then 52 before
-/// `region_difference` learned to classify coincident boundary runs (which
-/// restored the missing cap on a partial-height wall's top).
-///
-/// Asserts clean but is `#[ignore]`d until those are dealt with; promote it to
-/// a gate by dropping the attribute once the report comes back empty.
-///
-/// # The dominant open defect (~half the remaining failures)
-///
-/// `validate: edge N used fwd=2 bwd=1`, reachable with **two** inner walls, one
-/// full height and one partial — it does not shrink to a single wall. Diagnosed
-/// as far as this:
-///
-/// One point on the cavity boundary gets computed twice by two different
-/// routes, and the results differ in the last few bits — e.g. `(40.55,
-/// 57.819447)` from the flat wall-subtraction path and `(40.549995, 57.81945)`
-/// from the banded (partial-height) path. That is 3 nm apart, far inside the
-/// weld distance, but the two straddle a `weld_key` grid line (`578194.47`
-/// rounds to `578194`, `578194.5` to `578195`), so `Builder` interns them as
-/// **two vertices** and the faces either side never pair.
-///
-/// Rescuing this in `Builder::vertex` — scanning neighbouring weld cells for a
-/// vertex within tolerance — was tried and **reverted**: it moved the fuzzer by
-/// one case (36 -> 35) and broke
-/// `crossing_inner_wall_splits_compartment_watertight`, because merging
-/// genuinely-distinct near vertices makes the tessellation leak. Loosening the
-/// weld is treating the symptom.
-///
-/// The fix belongs at the source: whichever two routes derive that point must
-/// *share* the solve rather than each doing it, which is what
-/// `presplit_regions` exists for. **Which** two routes is still open.
-///
-/// Ruled out so far — presplitting `outline_b` against the notch quad in
-/// `plan_piece` before handing them to the slab stack (the obvious candidate,
-/// since `plan_bands` presplits the stack itself and so appears to solve the
-/// same crossings a second time). Tried; the fuzzer did not move off 36 and the
-/// x18 class was unchanged, so the stack is not where the duplicate comes from.
-/// Reverted rather than kept as a plausible-looking no-op.
-///
-/// Next place to look: the two faces that fail to pair are the cavity-boundary
-/// wall (axis-aligned, exact coordinate) and the inner-wall face (angled,
-/// solved). Find which producer emits each and work back from there — an
-/// axis-aligned boundary coordinate arriving exact on one side and solved on
-/// the other is the signature.
 #[test]
 #[ignore = "known-failing: 6 open defects at the default seed"]
 fn fuzz_inner_walls() {
@@ -477,9 +366,6 @@ fn fuzz_inner_walls() {
     assert!(report.is_empty(), "{report}");
 }
 
-/// The explorer. Ignored by default because the model is known to reject some
-/// degenerate combinations, so this is a tool you point at the parameter space
-/// on purpose, read, and turn into targeted fixes — not a pass/fail gate.
 #[test]
 #[ignore = "exploratory: run on demand with FUZZ_CASES/FUZZ_SEED"]
 fn fuzz_params_broad() {

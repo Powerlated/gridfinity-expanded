@@ -1,25 +1,3 @@
-//! WebAssembly bindings exposing the Gridfinity model to the web app.
-//!
-//! This implements the app's geometry worker contract directly: it is a
-//! drop-in for `generateGeometry(wasm, BinParameters[]) -> Bin[]`, so nothing
-//! downstream of the worker changes. `BinParameters` deserialises into
-//! [`BinParams`] below, one bin per entry, and each bin comes back as its
-//! grouped pieces of flat triangle soup.
-//!
-//! ## What this deliberately does *not* do
-//!
-//! - **No mirroring.** The frontend's `buildBinParameters()` already mirrors
-//!   every spatial value across the design's occupied Y extent, so parameters
-//!   arrive in generation coordinates and output goes straight back out.
-//!   Mirroring here would double-apply it.
-//! - **No validation or clamping.** The UI only emits valid parameters and the
-//!   pipeline treats geometry as trusting its input; `npm run check:manifold`
-//!   is the gate that verifies the result.
-//! - **No welding or degeneracy repair.** That exists in the manifold path
-//!   because exact booleans can rebuild a feature twice within one float32 ULP.
-//!   This kernel is analytic: `tess.rs` samples each edge exactly once, so the
-//!   two faces sharing it emit identical boundary points and the soup is closed
-//!   by construction.
 
 use gridfinity_cad::gridfinity::{
     self, BASE_TOTAL_HEIGHT, HEIGHT_PER_UNIT, InnerWall, LogicalBin, Params,
@@ -28,12 +6,8 @@ use gridfinity_cad::layout::{GridCell, GridEdge};
 use gridfinity_cad::tessellate;
 use wasm_bindgen::prelude::*;
 
-/// Curve resolution (segments per 90° arc). The app has one quality setting —
-/// generated geometry is cached and reused for both preview and export, so this
-/// is export quality.
 const ARC_SEGMENTS_PER_QUARTER: usize = 16;
 
-/// The app's `Wall`: a straight, full-height segment in generation millimetres.
 #[derive(serde::Deserialize)]
 struct Wall {
     start: Point2,
@@ -47,13 +21,10 @@ struct Point2 {
     y: f32,
 }
 
-/// The app's `BinParameters` — complete, trusted, self-contained input for one
-/// bin. Field names match the TypeScript interface exactly.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BinParams {
     bin_id: String,
-    /// Total bin height in mm, already converted from height units.
     height: f32,
     perimeter_thickness: f32,
     fillet_radius: f32,
@@ -61,7 +32,6 @@ struct BinParams {
     cells: Vec<GridCell>,
     openings: Vec<GridEdge>,
     walls: Vec<Wall>,
-    /// Piece footprints from the UI's cut planning; array order is piece index.
     pieces: Vec<Vec<GridCell>>,
 }
 
@@ -72,16 +42,6 @@ struct Fasteners {
 }
 
 impl BinParams {
-    /// Maps one bin's parameters onto the kernel's [`Params`].
-    ///
-    /// Two mappings are worth spelling out:
-    ///
-    /// - **Height.** The app sends total millimetres, where a *u*-unit bin is
-    ///   `u · 7` mm tall overall. The kernel counts units *above* the 7 mm
-    ///   base, so it needs `u − 1` to reach the same total.
-    /// - **Radius.** The app has one shared radius that both rounds cavity
-    ///   corners and blends the floor; the kernel keeps those separate, so both
-    ///   of its fields take it.
     fn to_params(&self) -> Params {
         let units_above_base =
             ((self.height - BASE_TOTAL_HEIGHT) / HEIGHT_PER_UNIT).round().max(1.0) as u32;
@@ -94,8 +54,6 @@ impl BinParams {
             magnet_holes: self.fasteners.magnets,
             screw_holes: self.fasteners.m3,
             open_edges: self.openings.clone(),
-            // The app expresses every internal wall as a free-form `Wall`;
-            // it has no grid-aligned divider concept.
             divider_edges: Vec::new(),
             inner_walls: self.walls.iter().map(|w| InnerWall {
                 x1: w.start.x,
@@ -103,7 +61,6 @@ impl BinParams {
                 x2: w.end.x,
                 y2: w.end.y,
                 width: w.width,
-                // The app's walls are always full height.
                 height: None,
             }).collect(),
             mode: gridfinity::Mode::Bin,
@@ -113,16 +70,9 @@ impl BinParams {
 
 #[wasm_bindgen(start)]
 pub fn start() {
-    // Turns a Rust panic into a readable console error instead of an opaque
-    // trap. The generate path itself is fallible by construction.
     console_error_panic_hook::set_once();
 }
 
-/// Builds every supplied bin, returning each one's cut pieces grouped under it.
-///
-/// Mirrors `generateGeometry(wasm, bins)`: input is `BinParameters[]`, output is
-/// `[{binId, pieces: [{triangles: Float32Array, cells: Cell[]}]}]`, where
-/// `triangles` is a global-coordinate flat soup of 9 floats per triangle.
 #[wasm_bindgen]
 pub fn generate_geometry(bins: JsValue) -> Result<JsValue, JsValue> {
     let bins: Vec<BinParams> = serde_wasm_bindgen::from_value(bins)
@@ -133,7 +83,6 @@ pub fn generate_geometry(bins: JsValue) -> Result<JsValue, JsValue> {
         let params = bin.to_params();
         let pieces = js_sys::Array::new();
 
-        // A bin with no cut has exactly one piece: its whole footprint.
         for piece_cells in &bin.pieces {
             let solid = gridfinity::build_piece(&params, &bin.cells, piece_cells, None)
                 .map_err(|e| JsValue::from_str(&format!("bin {}: {e}", bin.bin_id)))?;
@@ -148,16 +97,6 @@ pub fn generate_geometry(bins: JsValue) -> Result<JsValue, JsValue> {
     Ok(out.into())
 }
 
-/// Tessellates to the non-indexed positional soup the app expects: nine floats
-/// per triangle, no normals (the viewer computes its own).
-///
-/// Expanded from the *welded* indexed mesh rather than straight from the
-/// tessellator. Adjacent faces sample a shared edge to within the weld
-/// tolerance, not to the bit — so emitting raw triangles would hand consumers
-/// a soup whose shared vertices differ in their last f32 ULP, and anything
-/// rebuilding adjacency by exact position would see it as full of boundary
-/// edges. Going through `to_mesh()` makes every shared corner one vertex, so
-/// re-welding downstream is exact.
 fn triangle_soup(solid: &gridfinity_cad::Solid) -> Vec<f32> {
     let mesh = tessellate(solid, ARC_SEGMENTS_PER_QUARTER).to_mesh();
     let mut out = Vec::with_capacity(mesh.indices.len() * 3);
@@ -200,7 +139,6 @@ mod tests {
         serde_json::from_str(json).expect("BinParameters must deserialise")
     }
 
-    /// The app's `BinParameters` JSON must deserialise verbatim.
     #[test]
     fn deserialises_the_worker_contract() {
         let bins = parse(ONE_CELL);
@@ -210,8 +148,6 @@ mod tests {
         assert_eq!(bins[0].pieces.len(), 1);
     }
 
-    /// A `u`-unit bin is `u · 7` mm overall, and the kernel counts units above
-    /// its 7 mm base — so the totals must agree, not the unit numbers.
     #[test]
     fn height_maps_to_the_same_total_millimetres() {
         for units in 2..=20u32 {
@@ -240,20 +176,16 @@ mod tests {
         let p = parse(json)[0].to_params();
         assert_eq!(p.wall_thickness, 2.0);
         assert!(p.magnet_holes && p.screw_holes);
-        // One shared radius drives both of the kernel's separate fields.
         assert_eq!(p.cavity_corner_radius, 1.5);
         assert_eq!(p.floor_fillet, 1.5);
         assert_eq!(p.open_edges.len(), 1);
         assert_eq!(p.inner_walls.len(), 1);
         let w = p.inner_walls[0];
         assert_eq!((w.x1, w.y1, w.x2, w.y2, w.width), (1.0, 2.0, 3.0, 4.0, 1.6));
-        // The app's walls are always full height.
         assert_eq!(w.height, None);
-        // The app has no grid-aligned divider concept.
         assert!(p.divider_edges.is_empty());
     }
 
-    /// Soup must be positions only, nine floats per triangle.
     #[test]
     fn emits_nine_floats_per_triangle() {
         let bin = &parse(ONE_CELL)[0];
@@ -264,7 +196,6 @@ mod tests {
         assert_eq!(soup.len() % 9, 0);
     }
 
-    /// A cut bin's pieces must each build, and together exceed one piece alone.
     #[test]
     fn builds_each_cut_piece() {
         let json = r#"[{
@@ -283,18 +214,11 @@ mod tests {
         }
     }
 
-    /// Rebuilds adjacency from the soup keyed on *exact* vertex position, the
-    /// way the app's printability gate does, and returns the number of edges
-    /// not shared by exactly two oppositely-wound triangles.
-    ///
-    /// This is stricter than the kernel's own manifold invariant: it also
-    /// catches a soup whose shared corners differ in their last f32 ULP.
     fn unclosed_edges(soup: &[f32]) -> usize {
         use std::collections::HashMap;
         let mut ids: HashMap<[u32; 3], u32> = HashMap::new();
         let mut vertex = Vec::new();
         for p in soup.chunks_exact(3) {
-            // Key on the raw bit patterns — exact equality, no tolerance.
             let key = [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
             let next = ids.len() as u32;
             vertex.push(*ids.entry(key).or_insert(next));
@@ -309,8 +233,6 @@ mod tests {
         directed.values().filter(|&&v| v != 0).count()
     }
 
-    /// The soup must be closed under exact-position welding, not merely under
-    /// the kernel's tolerance weld — consumers rebuild adjacency by position.
     #[test]
     fn soup_is_closed_under_exact_position_welding() {
         let bin = &parse(ONE_CELL)[0];
@@ -320,23 +242,6 @@ mod tests {
         assert_eq!(unclosed_edges(&soup), 0, "soup has unpaired edges");
     }
 
-    /// A large floor fillet on a shape with a reentrant outer corner must still
-    /// tessellate closed.
-    ///
-    /// This used to leak. The cavity rounds its concave corners by the fillet
-    /// radius `fr` (so the floor blend chain stays tangent-continuous), and the
-    /// outer profile used to leave its reentrant corners sharp. The rim strip
-    /// between the two is then a face whose hole crosses its own outer
-    /// boundary as soon as
-    ///
-    ///     fr > wall_thickness · (2 + √2)      (= 4.097 mm at wt = 1.2)
-    ///
-    /// — the sharp corner pokes out through the cavity's corner arc, earcut
-    /// cannot bridge it and paves over the hole instead. The B-rep was valid
-    /// throughout; only the tessellation showed it. Rounding the outer
-    /// reentrant corners by `OUTER_R`, which is what the reference does
-    /// (`closeReentrantCorners(footprint, outerCornerRadius)`), restores
-    /// containment across the whole slider range up to `fr = 5.6`.
     #[test]
     fn ring_and_large_fillet_cases_stay_closed() {
         const RING: &str = r#""cells":[{"x":0,"y":0},{"x":1,"y":0},{"x":2,"y":0},
@@ -356,7 +261,6 @@ mod tests {
                    {cells},"openings":{openings},"walls":[],"pieces":[[{{"x":0,"y":0}}]]}}]"#
             );
             let mut bin = parse(&json).pop().unwrap();
-            // Build the whole bin, not a single cell.
             bin.pieces = vec![bin.cells.clone()];
             let solid = gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None)
                 .unwrap_or_else(|e| panic!("{name} failed to build: {e}"));
@@ -372,18 +276,6 @@ mod tests {
         assert!(leaks.is_empty(), "unclosed output:\n  {}", leaks.join("\n  "));
     }
 
-    /// An opening on the boundary of an enclosed hole merges the hole's void
-    /// with the cavity's, and the rim assembly does not notice.
-    ///
-    /// The rim face at `z = total_h` comes out with the **whole** bin-hole
-    /// square still listed as an inner loop alongside the cavity's outer loop,
-    /// even though the cavity outer already encloses it — the hole is
-    /// subtracted twice, so earcut bridges across the face and emits chords
-    /// spanning the entire bin. The unpaired run is the hole's own side.
-    ///
-    /// Distinct from [`ring_and_large_fillet_cases_stay_closed`]: this one is
-    /// insensitive to the fillet radius and reproduces at the 2.8 mm default.
-    /// It sits in the open/seam rim assembly, not the corner geometry.
     #[ignore = "open/seam rim assembly double-subtracts a hole an opening merged into the cavity"]
     #[test]
     fn opening_on_a_hole_boundary_stays_closed() {
@@ -403,8 +295,6 @@ mod tests {
         assert_eq!(unclosed_edges(&triangle_soup(&solid)), 0, "rim leaks at the opening");
     }
 
-    /// Every piece the kernel hands back must be a closed 2-manifold, since
-    /// nothing downstream repairs it.
     #[test]
     fn pieces_are_manifold_across_the_feature_space() {
         let cases: &[(&str, &str)] = &[

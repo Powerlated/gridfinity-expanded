@@ -1,16 +1,11 @@
-//! Custom glow renderer for the 3D preview: one shader, one interleaved
-//! position+normal buffer, an orbit camera, and a depth-tested paint callback
-//! that draws inside the egui `CentralPanel` and restores GL state afterward.
 
 use eframe::glow::{self, HasContext};
 use egui::Vec2 as EVec2;
 use glam::{Mat4, Vec3};
 use std::sync::Arc;
 
-/// Overlay line thickness, in physical pixels.
 const LINE_WIDTH_PX: f32 = 1.6;
 
-/// Orbit camera state (persisted across frames).
 #[derive(Clone, Copy)]
 pub struct Camera {
     pub yaw: f32,
@@ -31,7 +26,6 @@ impl Default for Camera {
 }
 
 impl Camera {
-    /// Frame the camera around an axis-aligned bounding box.
     pub fn frame(&mut self, min: Vec3, max: Vec3) {
         self.target = (min + max) * 0.5;
         let radius = (max - min).length() * 0.5;
@@ -50,9 +44,6 @@ impl Camera {
         proj * view
     }
 
-    /// Project a world point to a position inside `rect`, for painting 2D
-    /// overlays (labels) that track 3D geometry. `None` when the point is at or
-    /// behind the eye plane, where the perspective divide is meaningless.
     pub fn project(&self, p: Vec3, rect: egui::Rect) -> Option<egui::Pos2> {
         let aspect = rect.width() / rect.height().max(1.0);
         let clip = self.view_proj(aspect) * p.extend(1.0);
@@ -62,12 +53,10 @@ impl Camera {
         let ndc = clip.truncate() / clip.w;
         Some(egui::pos2(
             rect.left() + (ndc.x * 0.5 + 0.5) * rect.width(),
-            // NDC +y is up, screen +y is down.
             rect.top() + (0.5 - ndc.y * 0.5) * rect.height(),
         ))
     }
 
-    /// Apply drag (orbit) and scroll (zoom) from an egui response.
     pub fn handle_input(&mut self, drag: EVec2, scroll: f32) {
         self.yaw -= drag.x * 0.01;
         self.pitch = (self.pitch + drag.y * 0.01).clamp(-1.54, 1.54);
@@ -77,7 +66,6 @@ impl Camera {
     }
 }
 
-/// GPU resources for drawing one mesh plus the debugger's line overlay.
 pub struct Renderer {
     program: glow::Program,
     vao: glow::VertexArray,
@@ -89,7 +77,6 @@ pub struct Renderer {
     line_count: i32,
 }
 
-/// Compile + link one vertex/fragment pair, with the `#version` line prepended.
 unsafe fn link(gl: &glow::Context, vs_src: &str, fs_src: &str) -> glow::Program {
     unsafe {
         let shader_version = if cfg!(target_arch = "wasm32") {
@@ -121,9 +108,6 @@ unsafe fn link(gl: &glow::Context, vs_src: &str, fs_src: &str) -> glow::Program 
 impl Renderer {
     pub fn new(gl: &glow::Context) -> Renderer {
         unsafe {
-            // `a_bad` flags a bin the model could not build. It is constant over
-            // a triangle (the whole bin is flagged or none of it is), so the
-            // interpolator never sees an in-between value.
             let vs_src = r#"
                 layout (location = 0) in vec3 a_pos;
                 layout (location = 1) in vec3 a_normal;
@@ -170,11 +154,6 @@ impl Renderer {
                 }
             "#;
 
-            // Thick antialiased lines: `glLineWidth > 1` is not supported on
-            // core-profile desktop GL, so each segment arrives as a quad and is
-            // widened here, in screen space, so its visual weight is constant
-            // with depth. See `wireframe.rs` for the vertex layout and why both
-            // endpoints ride on every vertex.
             let line_vs_src = r#"
                 layout (location = 0) in vec3 a_p0;
                 layout (location = 1) in vec3 a_p1;
@@ -247,10 +226,6 @@ impl Renderer {
         }
     }
 
-    /// Upload an interleaved `[pos(3), normal(3)]` vertex buffer.
-    /// Upload the shaded mesh: interleaved `[pos(3), normal(3), bad(1)]`. The
-    /// trailing flag is added by the caller, not by the kernel's
-    /// `render_buffer` — see [`crate::MESH_STRIDE`].
     pub fn upload(&mut self, gl: &glow::Context, verts: &[f32]) {
         unsafe {
             gl.bind_vertex_array(Some(self.vao));
@@ -267,9 +242,6 @@ impl Renderer {
         }
     }
 
-    /// Upload the debugger's line overlay: quad-expanded segments, interleaved
-    /// `[p0(3), p1(3), color(3), end(1), side(1)]`. An empty slice disables the
-    /// overlay pass entirely, which is how closing the debugger clears it.
     pub fn upload_lines(&mut self, gl: &glow::Context, verts: &[f32]) {
         unsafe {
             gl.bind_vertex_array(Some(self.line_vao));
@@ -286,7 +258,6 @@ impl Renderer {
         }
     }
 
-    /// `time` drives the failed-bin pulse; pass elapsed seconds.
     pub fn paint(
         &self,
         gl: &glow::Context,
@@ -307,9 +278,6 @@ impl Renderer {
             gl.enable(glow::CULL_FACE);
             gl.cull_face(glow::BACK);
 
-            // Push the fill back a hair. B-rep edges are exactly coincident with
-            // the surface they bound, so without this the overlay z-fights into
-            // speckle instead of drawing cleanly on top.
             if self.line_count > 0 {
                 gl.enable(glow::POLYGON_OFFSET_FILL);
                 gl.polygon_offset(1.0, 1.0);
@@ -335,15 +303,11 @@ impl Renderer {
                 self.paint_lines(gl, &mvp, viewport_px);
             }
 
-            // Restore state egui expects.
             gl.disable(glow::DEPTH_TEST);
             gl.disable(glow::CULL_FACE);
         }
     }
 
-    /// Two passes over the same buffer: unoccluded lines at full strength, then
-    /// the occluded remainder faintly, so construction geometry hidden inside
-    /// the solid stays readable without competing with what's in front.
     unsafe fn paint_lines(&self, gl: &glow::Context, mvp: &Mat4, viewport_px: (f32, f32)) {
         unsafe {
             gl.use_program(Some(self.line_program));
@@ -352,9 +316,6 @@ impl Renderer {
             gl.uniform_2_f32(u("u_half_vp").as_ref(), viewport_px.0 * 0.5, viewport_px.1 * 0.5);
             gl.uniform_1_f32(u("u_width").as_ref(), LINE_WIDTH_PX);
 
-            // Antialiased lines are alpha-coverage, so they must blend. Depth
-            // writes stay off: the quads are screen-space expanded and would
-            // otherwise occlude each other along shared endpoints.
             gl.enable(glow::BLEND);
             gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
             gl.depth_mask(false);
@@ -386,7 +347,6 @@ impl Renderer {
     }
 }
 
-/// A paint callback that draws the shared renderer for one frame.
 pub fn callback(
     rect: egui::Rect,
     renderer: Arc<std::sync::Mutex<Renderer>>,
@@ -395,8 +355,6 @@ pub fn callback(
 ) -> egui::PaintCallback {
     let cb = egui_glow::CallbackFn::new(move |info, painter| {
         let aspect = rect.width() / rect.height().max(1.0);
-        // Physical pixels, not logical points — line widening happens in the
-        // framebuffer's own units, so a HiDPI display must not halve it.
         let vp = info.viewport_in_pixels();
         let viewport_px = (vp.width_px as f32, vp.height_px as f32);
         renderer.lock().unwrap().paint(painter.gl(), &cam_snapshot, aspect, viewport_px, time);

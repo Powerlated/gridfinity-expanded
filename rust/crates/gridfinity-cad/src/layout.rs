@@ -1,19 +1,6 @@
-//! Grid layout logic: cells, edges, split lines, and wall classification.
-//!
-//! Pure combinatorics — no geometry, no floats beyond the pitch constant. This
-//! mirrors the edge/split semantics of the TypeScript reference so the same
-//! `BinConfig` contracts (open/divider/seam edges, auto-split) port over.
-//!
-//! Edge convention (matches the reference):
-//! - `V` edge at `(x,y)`: vertical segment on grid line `x·PITCH`, spanning
-//!   `y·PITCH..(y+1)·PITCH`; separates cell `(x-1,y)` from cell `(x,y)`.
-//! - `H` edge at `(x,y)`: horizontal segment on grid line `y·PITCH`, spanning
-//!   `x·PITCH..(x+1)·PITCH`; separates cell `(x,y-1)` from cell `(x,y)`.
 
 use std::collections::HashSet;
 
-/// Canonical Gridfinity cell pitch (mm). Re-stated here so the layout logic is
-/// self-contained; `gridfinity::GRID_PITCH` is the same value.
 pub const PITCH: i32 = 42;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -23,7 +10,6 @@ pub struct GridCell {
     pub y: i32,
 }
 
-/// Serialises as the reference's `'h' | 'v'`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Orientation {
@@ -41,7 +27,6 @@ pub struct GridEdge {
     pub orientation: Orientation,
 }
 
-/// Serialises as the reference's `'x' | 'y'`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Axis {
@@ -51,8 +36,6 @@ pub enum Axis {
     Y,
 }
 
-/// A split at a grid line. `Axis::X` → vertical line between columns `index-1`
-/// and `index`; `Axis::Y` → horizontal line between rows `index-1` and `index`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SplitLine {
@@ -60,7 +43,6 @@ pub struct SplitLine {
     pub index: i32,
 }
 
-/// Axis-aligned footprint of a set of cells, in cell coordinates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GridFootprint {
     pub min_x: i32,
@@ -92,7 +74,6 @@ impl GridFootprint {
         })
     }
 
-    /// Size in millimetres.
     pub fn mm(&self) -> (f32, f32) {
         (
             self.width_cells as f32 * PITCH as f32,
@@ -101,7 +82,6 @@ impl GridFootprint {
     }
 }
 
-/// A contiguous piece produced by splitting a bin along `split_lines`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Piece {
     pub col: i32,
@@ -113,8 +93,6 @@ fn cell_set(cells: &[GridCell]) -> HashSet<GridCell> {
     cells.iter().copied().collect()
 }
 
-/// The two cells adjacent to an edge (in canonical order). For a perimeter edge
-/// exactly one is present; for an internal edge both are.
 fn edge_neighbours(e: GridEdge) -> [GridCell; 2] {
     match e.orientation {
         Orientation::V => [GridCell { x: e.x - 1, y: e.y }, GridCell { x: e.x, y: e.y }],
@@ -124,11 +102,8 @@ fn edge_neighbours(e: GridEdge) -> [GridCell; 2] {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdgeClass {
-    /// Both adjacent cells present — edge runs through the interior.
     Internal,
-    /// Exactly one adjacent cell present — edge sits on the perimeter.
     Perimeter,
-    /// Neither adjacent cell present — edge does not border the region.
     None,
 }
 
@@ -142,17 +117,15 @@ pub fn classify_edge(cells: &[GridCell], e: GridEdge) -> EdgeClass {
     }
 }
 
-/// The four canonical edges bounding a cell.
 pub fn cell_edges(c: GridCell) -> [GridEdge; 4] {
     [
-        GridEdge { x: c.x, y: c.y, orientation: Orientation::V },       // west
-        GridEdge { x: c.x + 1, y: c.y, orientation: Orientation::V },    // east
-        GridEdge { x: c.x, y: c.y, orientation: Orientation::H },        // south
-        GridEdge { x: c.x, y: c.y + 1, orientation: Orientation::H },    // north
+        GridEdge { x: c.x, y: c.y, orientation: Orientation::V },
+        GridEdge { x: c.x + 1, y: c.y, orientation: Orientation::V },
+        GridEdge { x: c.x, y: c.y, orientation: Orientation::H },
+        GridEdge { x: c.x, y: c.y + 1, orientation: Orientation::H },
     ]
 }
 
-/// Perimeter edges of the region (exactly one adjacent cell present).
 pub fn perimeter_edges(cells: &[GridCell]) -> Vec<GridEdge> {
     let s = cell_set(cells);
     let mut out = HashSet::new();
@@ -170,7 +143,6 @@ pub fn perimeter_edges(cells: &[GridCell]) -> Vec<GridEdge> {
     v
 }
 
-/// Internal edges of the region (both adjacent cells present).
 pub fn internal_edges(cells: &[GridCell]) -> Vec<GridEdge> {
     let s = cell_set(cells);
     let mut out = HashSet::new();
@@ -193,27 +165,13 @@ pub fn sort_edges(edges: &mut [GridEdge]) {
     });
 }
 
-/// How wall layout resolves for one piece of a bin.
 #[derive(Clone, Debug, Default)]
 pub struct EffectiveWalls {
-    /// Perimeter edges that keep their outer wall.
     pub walled: HashSet<GridEdge>,
-    /// Perimeter edges whose wall is removed (open to the outside), plus seam
-    /// edges (between two pieces of the same bin) that are not dividers.
     pub open: HashSet<GridEdge>,
-    /// Internal edges (within this piece, or seams) that carry a divider wall.
     pub dividers: HashSet<GridEdge>,
 }
 
-/// Resolve which perimeter edges are walled/open and which internal edges are
-/// dividers for a piece, given the whole bin's cells and the user's open/divider
-/// exceptions. Semantics mirror the reference:
-/// - A piece-perimeter edge that is *internal to the whole bin* is a **seam**:
-///   open by default (so glued pieces share a continuous cavity), walled iff a
-///   divider sits on it.
-/// - A true outer-perimeter edge is walled by default, open iff listed in
-///   `open_edges`.
-/// - A piece-internal edge is a divider iff listed in `divider_edges`.
 pub fn effective_walls(
     piece_cells: &[GridCell],
     whole_bin_cells: &[GridCell],
@@ -227,10 +185,6 @@ pub fn effective_walls(
     for e in perimeter_edges(piece_cells) {
         match classify_edge(whole_bin_cells, e) {
             EdgeClass::Internal => {
-                // Seam between two pieces of the same bin. A divider placed on
-                // a split line becomes a full wall on both adjacent pieces (it
-                // is a piece-PERIMETER edge, so it gets a wall strip inset from
-                // the seam plane, not a centred divider strip).
                 if divider_set.contains(&e) {
                     out.walled.insert(e);
                 } else {
@@ -254,8 +208,6 @@ pub fn effective_walls(
     out
 }
 
-/// Number of split lines (along one axis) at or below coordinate `c`: this is
-/// the chunk index a cell lands in along that axis.
 fn chunk_index(c: i32, lines: &[i32]) -> i32 {
     lines.iter().filter(|&&l| l <= c).count() as i32
 }
@@ -271,9 +223,6 @@ fn axis_lines(split_lines: &[SplitLine], axis: Axis) -> Vec<i32> {
     v
 }
 
-/// Partition cells into pieces along the given split lines. Pieces are sorted
-/// `(row, col)`; empty pieces are omitted. Lines that do not separate cells are
-/// harmless (they just don't create extra chunks).
 pub fn partition_cells(cells: &[GridCell], split_lines: &[SplitLine]) -> Vec<Piece> {
     let x_lines = axis_lines(split_lines, Axis::X);
     let y_lines = axis_lines(split_lines, Axis::Y);
@@ -286,8 +235,6 @@ pub fn partition_cells(cells: &[GridCell], split_lines: &[SplitLine]) -> Vec<Pie
     let mut out: Vec<Piece> = groups
         .into_iter()
         .filter(|(_, cs)| {
-            // Keep only groups that actually contain real cells (a split line in
-            // empty space yields no group anyway, but be defensive).
             cs.iter().any(|c| s.contains(c))
         })
         .map(|((col, row), mut cs)| {
@@ -317,11 +264,9 @@ mod tests {
 
     #[test]
     fn perimeter_vs_internal_classification() {
-        // Single 1×1 cell: all 4 edges are perimeter, none internal.
         let one = cells(&[(0, 0)]);
         assert_eq!(perimeter_edges(&one).len(), 4);
         assert!(internal_edges(&one).is_empty());
-        // 2×1 block: 6 perimeter, 1 internal (the shared vertical edge at x=1).
         let two = cells(&[(0, 0), (1, 0)]);
         assert_eq!(perimeter_edges(&two).len(), 6);
         assert_eq!(internal_edges(&two).len(), 1);
@@ -329,8 +274,6 @@ mod tests {
 
     #[test]
     fn seam_edges_default_open() {
-        // Whole bin is a 2×1 block; split it at x=1. The piece-perimeter edge at
-        // x=1 is internal to the whole bin → a seam → open by default.
         let whole = cells(&[(0, 0), (1, 0)]);
         let piece = cells(&[(0, 0)]);
         let w = effective_walls(&piece, &whole, &[], &[]);
@@ -364,13 +307,12 @@ mod tests {
         let whole = cells(&[(0, 0), (1, 0), (2, 0)]);
         let pieces = partition_cells(&whole, &[SplitLine { axis: Axis::X, index: 1 }]);
         assert_eq!(pieces.len(), 2);
-        assert_eq!(pieces[0].cells.len(), 1); // col 0
-        assert_eq!(pieces[1].cells.len(), 2); // cols 1..2
+        assert_eq!(pieces[0].cells.len(), 1);
+        assert_eq!(pieces[1].cells.len(), 2);
     }
 
     #[test]
     fn partition_stale_line_is_harmless() {
-        // A split line at x=10 with no cells on either side creates no extra piece.
         let whole = cells(&[(0, 0), (1, 0)]);
         let pieces = partition_cells(&whole, &[SplitLine { axis: Axis::X, index: 10 }]);
         assert_eq!(pieces.len(), 1);

@@ -1,23 +1,3 @@
-//! Exact 2D boolean algebra on seg-loop regions.
-//!
-//! A region is a set of closed `Seg` loops: outers CCW (`loop_area > 0`),
-//! holes CW — so every run has material on its left.
-//! [`region_union`] / [`region_difference`] / [`region_intersection`] combine
-//! two of them; [`split_regions`] exposes the classified pieces underneath,
-//! each carrying a caller-supplied provenance tag so results are identified
-//! exactly rather than by comparing coordinates.
-//!
-//! Every intersection is closed form — line/line by determinant, line/circle
-//! by the quadratic, circle/circle by the radical line — and each cut point is
-//! computed once and shared verbatim by both sides, so the selected pieces
-//! chain into closed loops exactly and weld in the B-rep builder later.
-//!
-//! [`presplit_regions`] gives several booleans over the same inputs one common
-//! segmentation, which is what stops independently-computed results from
-//! T-junctioning against each other.
-//!
-//! Degenerate inputs (collinear-overlapping edges, tangencies, concentric
-//! arcs) are not supported — callers author generic positions.
 
 use crate::kernel::math::Vec2;
 use crate::kernel::sketch::{Seg, loop_area, point_in_segs};
@@ -25,32 +5,16 @@ use crate::kernel::perf;
 
 const EPS: f32 = 1e-4;
 
-// ── General region/region boolean ────────────────────────────────────────────
 
-/// Both regions' boundaries split at their mutual intersections, with every
-/// piece classified by whether it lies inside the *other* region. Cut points
-/// are computed once and shared verbatim by both sides, so the selected
-/// pieces chain into closed loops exactly.
-/// `*_outside` / `*_inside` hold only runs *strictly* off or inside the other
-/// region. Runs where the two boundaries **coincide** cannot be classified that
-/// way — their midpoints sit exactly on the other boundary, where the even–odd
-/// test is undefined — so they land in `on_same` / `on_opposite` instead,
-/// carrying A's copy only (B's duplicate is dropped, so a shared run is
-/// represented exactly once and the selected pieces still chain 1:1).
 pub struct RegionSplit<T> {
     pub a_outside: Vec<(Seg, T)>,
     pub a_inside: Vec<(Seg, T)>,
     pub b_outside: Vec<(Seg, T)>,
     pub b_inside: Vec<(Seg, T)>,
-    /// Shared boundary run with both regions' material on the same side.
-    /// Belongs to the union and the intersection, not the difference.
     pub on_same: Vec<(Seg, T)>,
-    /// Shared boundary run traversed in opposite directions, so the regions
-    /// touch back-to-back. Belongs to the difference.
     pub on_opposite: Vec<(Seg, T)>,
 }
 
-/// Unit tangent of `seg` at `p`, in traversal direction.
 fn seg_dir_at(seg: &Seg, p: Vec2) -> Vec2 {
     match *seg {
         Seg::Line { a, b } => (b - a).normalize_or_zero(),
@@ -62,19 +26,11 @@ fn seg_dir_at(seg: &Seg, p: Vec2) -> Vec2 {
     }
 }
 
-/// The seg of `loops` that `piece` runs along, if any.
-///
-/// Both boundaries are already split at every mutual crossing, so a transversal
-/// crossing lands on an endpoint and never on `piece`'s midpoint. A midpoint
-/// that is *on* the other boundary therefore means the two run together.
 fn coincident_with<'a>(loops: &'a [Vec<Seg>], piece: &Seg) -> Option<&'a Seg> {
     let m = seg_mid(piece);
     loops.iter().flatten().find(|s| on_seg(s, m))
 }
 
-/// Split two regions (outers CCW, holes CW) against each other. This is the
-/// general form of [`split_region_by_quad`]: either operand may have any
-/// number of loops made of lines and arcs.
 pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> RegionSplit<T> {
     let _perf = perf::scope(perf::Metric::SplitRegions);
     let mut a_cuts: Vec<Vec<Vec<(f32, Vec2)>>> =
@@ -98,8 +54,6 @@ pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> Regio
         r.iter().map(|l| l.iter().map(|&(s, _)| s).collect()).collect()
     };
     let (a_bare, b_bare) = (bare(a), bare(b));
-    // Even–odd: inside iff contained by an odd number of loops (an outer,
-    // minus its holes).
     let inside = |loops: &[Vec<Seg>], p: Vec2| {
         loops.iter().filter(|l| point_in_segs(p, l)).count() % 2 == 1
     };
@@ -135,7 +89,6 @@ pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> Regio
         for (si, &(ref seg, tag)) in lp.iter().enumerate() {
             let mut cuts = std::mem::take(&mut b_cuts[li][si]);
             for piece in split_seg(seg, &mut cuts) {
-                // A's copy already stands for this run.
                 if coincident_with(&a_bare, &piece).is_some() {
                     continue;
                 }
@@ -150,14 +103,6 @@ pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> Regio
     out
 }
 
-/// Split every seg of every region at its crossings with every *other*
-/// region, so all of them end up sharing one common segmentation.
-///
-/// Needed whenever several booleans over the same inputs must agree on where
-/// segment endpoints fall — e.g. the slab engine, where a boundary run that
-/// survives into two adjacent z-bands has to come back as the identical
-/// pieces in both, or the shared vertical face would T-junction against its
-/// neighbour instead of pairing 1:1.
 pub fn presplit_regions(regions: &[Vec<Vec<Seg>>]) -> Vec<Vec<Vec<Seg>>> {
     let mut cuts: Vec<Vec<Vec<Vec<(f32, Vec2)>>>> = regions
         .iter()
@@ -209,12 +154,6 @@ fn untag(loops: Vec<Vec<(Seg, ())>>) -> Vec<Vec<Seg>> {
     loops.into_iter().map(|l| l.into_iter().map(|(s, _)| s).collect()).collect()
 }
 
-/// `A ∪ B`: the boundary runs where either region's boundary is outside the
-/// other. Disjoint operands come back as separate loops and a contained
-/// operand simply vanishes — both fall out of the classification, no
-/// special-casing.
-/// A run the two share codirectionally bounds the union exactly once; one they
-/// share back-to-back is interior to it and drops out.
 pub fn region_union(a: &[Vec<Seg>], b: &[Vec<Seg>]) -> Vec<Vec<Seg>> {
     let s = split_regions(&tagged(a), &tagged(b));
     let mut kept = s.a_outside;
@@ -223,12 +162,6 @@ pub fn region_union(a: &[Vec<Seg>], b: &[Vec<Seg>]) -> Vec<Vec<Seg>> {
     untag(chain_loops(kept))
 }
 
-/// `A − B`: A's boundary outside B, plus B's boundary inside A traversed
-/// backwards (so a fully contained B becomes a hole).
-/// A codirectional shared run has B's material on the same side, so it is being
-/// removed and drops out; a back-to-back one bounds what survives and is kept.
-/// Getting this wrong is what used to make `A − (A − N)` come back empty
-/// whenever the two shared most of their boundary.
 pub fn region_difference(a: &[Vec<Seg>], b: &[Vec<Seg>]) -> Vec<Vec<Seg>> {
     let s = split_regions(&tagged(a), &tagged(b));
     let mut kept = s.a_outside;
@@ -237,9 +170,6 @@ pub fn region_difference(a: &[Vec<Seg>], b: &[Vec<Seg>]) -> Vec<Vec<Seg>> {
     untag(chain_loops(kept))
 }
 
-/// `A ∩ B`: the parts of each boundary lying inside the other.
-/// As with the union, a codirectional shared run bounds the result once; a
-/// back-to-back one has the two regions on opposite sides and meets in nothing.
 pub fn region_intersection(a: &[Vec<Seg>], b: &[Vec<Seg>]) -> Vec<Vec<Seg>> {
     let s = split_regions(&tagged(a), &tagged(b));
     let mut kept = s.a_inside;
@@ -248,17 +178,13 @@ pub fn region_intersection(a: &[Vec<Seg>], b: &[Vec<Seg>]) -> Vec<Vec<Seg>> {
     untag(chain_loops(kept))
 }
 
-/// Param of `p` along the line a→b.
 fn line_param(a: Vec2, b: Vec2, p: Vec2) -> f32 {
     let d = b - a;
     let l2 = d.length_squared();
     if l2 <= 0.0 { 0.0 } else { (p - a).dot(d) / l2 }
 }
 
-// ── Seg/seg intersection ─────────────────────────────────────────────────────
 
-/// Parameter of `p` along `seg` in `split_seg`'s convention: `t in [0,1]` for
-/// a line, unwrapped angle for an arc.
 fn seg_param(seg: &Seg, p: Vec2) -> f32 {
     match *seg {
         Seg::Line { a, b } => line_param(a, b, p),
@@ -276,7 +202,6 @@ fn seg_param(seg: &Seg, p: Vec2) -> f32 {
     }
 }
 
-/// Does `p` lie on `seg` (within its span, endpoints included)?
 fn on_seg(seg: &Seg, p: Vec2) -> bool {
     match *seg {
         Seg::Line { a, b } => {
@@ -294,7 +219,6 @@ fn on_seg(seg: &Seg, p: Vec2) -> bool {
     }
 }
 
-/// Both intersections of a circle and an infinite line, unfiltered.
 fn circle_line_pts(center: Vec2, radius: f32, q0: Vec2, q1: Vec2) -> Vec<Vec2> {
     let e = q1 - q0;
     let f = q0 - center;
@@ -309,9 +233,6 @@ fn circle_line_pts(center: Vec2, radius: f32, q0: Vec2, q1: Vec2) -> Vec<Vec2> {
     [(-qb - sq) / (2.0 * qa), (-qb + sq) / (2.0 * qa)].into_iter().map(|u| q0 + e * u).collect()
 }
 
-/// Circle/circle by the radical line: the intersections lie on the chord
-/// perpendicular to the centre line at distance `a` from the first centre.
-/// Concentric or tangent-within-EPS inputs yield nothing.
 fn circle_circle_pts(c0: Vec2, r0: f32, c1: Vec2, r1: f32) -> Vec<Vec2> {
     let d = (c1 - c0).length();
     if d < 1e-9 || d > r0 + r1 - EPS || d < (r0 - r1).abs() + EPS {
@@ -329,8 +250,6 @@ fn circle_circle_pts(c0: Vec2, r0: f32, c1: Vec2, r1: f32) -> Vec<Vec2> {
     vec![base + perp * h, base - perp * h]
 }
 
-/// Every point where two segs cross, closed form in all four combinations and
-/// filtered to both spans.
 fn seg_seg_points(p: &Seg, q: &Seg) -> Vec<Vec2> {
     perf::count(perf::Metric::SegSegPoints);
     let raw = match (*p, *q) {
@@ -338,7 +257,7 @@ fn seg_seg_points(p: &Seg, q: &Seg) -> Vec<Vec2> {
             let (e, f) = (b - a, d - c);
             let den = e.x * f.y - e.y * f.x;
             if den.abs() < 1e-9 {
-                return Vec::new(); // parallel
+                return Vec::new();
             }
             let w = c - a;
             vec![a + e * ((w.x * f.y - w.y * f.x) / den)]
@@ -364,9 +283,6 @@ fn seg_mid(seg: &Seg) -> Vec2 {
     }
 }
 
-/// Split a seg at the given `(param, point)` cuts (param = t∈[0,1] for lines,
-/// unwrapped angle for arcs). Cut points become sub-seg endpoints verbatim so
-/// both sides of a split share exact coordinates.
 fn split_seg(seg: &Seg, cuts: &mut Vec<(f32, Vec2)>) -> Vec<Seg> {
     match *seg {
         Seg::Line { a, b } => {
@@ -386,7 +302,7 @@ fn split_seg(seg: &Seg, cuts: &mut Vec<(f32, Vec2)>) -> Vec<Seg> {
             let fwd = a1 >= a0;
             let (lo, hi) = (a0.min(a1), a0.max(a1));
             let span = (hi - lo).max(1e-9);
-            let aeps = EPS.max(1e-3 / radius.max(1e-3)); // ≈ EPS of arc length
+            let aeps = EPS.max(1e-3 / radius.max(1e-3));
             cuts.retain(|&(t, _)| t > lo + aeps * span.min(1.0) && t < hi - aeps * span.min(1.0));
             if fwd {
                 cuts.sort_by(|x, y| x.0.total_cmp(&y.0));
@@ -406,9 +322,6 @@ fn split_seg(seg: &Seg, cuts: &mut Vec<(f32, Vec2)>) -> Vec<Seg> {
     }
 }
 
-/// Chain sub-segs into closed loops by endpoint proximity (endpoints of
-/// matching pieces are bit-identical by construction; the tolerance only
-/// bridges float noise in the rare mixed case). Provenance tags ride along.
 pub fn chain_loops<T: Copy>(mut segs: Vec<(Seg, T)>) -> Vec<Vec<(Seg, T)>> {
     let mut out: Vec<Vec<(Seg, T)>> = Vec::new();
     while let Some(first) = segs.pop() {
@@ -426,12 +339,11 @@ pub fn chain_loops<T: Copy>(mut segs: Vec<(Seg, T)>) -> Vec<Vec<(Seg, T)>> {
                 .filter(|&(_, d)| d < EPS)
                 .min_by(|x, y| x.1.total_cmp(&y.1))
             else {
-                break; // open chain: drop (degenerate input)
+                break;
             };
             lp.push(segs.swap_remove(idx));
         }
         if (lp.last().unwrap().0.end() - start).length() < EPS && lp.len() >= 2 {
-            // Drop zero-area slivers.
             let bare: Vec<Seg> = lp.iter().map(|&(s, _)| s).collect();
             if loop_area(&bare).abs() > EPS {
                 out.push(lp);
@@ -454,27 +366,15 @@ mod tests {
         Sketch::rectangle((x0 + x1) * 0.5, (y0 + y1) * 0.5, x1 - x0, y1 - y0).loops.remove(0)
     }
 
-    /// area(A) + area(B) == area(A∪B) + area(A∩B), for any A and B. The
-    /// strongest single check: it catches a dropped piece, a mis-signed loop
-    /// and a mis-classified span all at once.
     fn assert_conserved(a: &[Vec<Seg>], b: &[Vec<Seg>]) {
         let lhs = area(a) + area(b);
         let rhs = area(&region_union(a, b)) + area(&region_intersection(a, b));
         assert!((lhs - rhs).abs() < 1e-2, "area not conserved: {lhs} vs {rhs}");
     }
 
-    /// `A − (A − N)` must give back `A ∩ N`.
-    ///
-    /// This is how [`slab`](crate::kernel::slab) builds the cap at a band
-    /// interface: the band below is `outline − notch`, the band above is
-    /// `outline`, and the cap is their difference. The two operands then share
-    /// their entire boundary bar the notch mouth, which is the case that used
-    /// to come back empty — leaving a partial-height inner wall with no top
-    /// face and the solid non-manifold.
     #[test]
     fn difference_against_a_subset_sharing_most_of_its_boundary() {
         let outline = vec![rect(0.0, 0.0, 100.0, 100.0)];
-        // Bites into the top edge rather than crossing, so `below` stays one loop.
         let notch = vec![rect(40.0, 80.0, 60.0, 120.0)];
         let below = region_difference(&outline, &notch);
         assert!((area(&below) - 9600.0).abs() < 1e-2, "notched area {}", area(&below));
@@ -486,7 +386,6 @@ mod tests {
             area(&cap),
             cap.len()
         );
-        // And the other orientation must be empty: `below` is a subset.
         assert!(
             area(&region_difference(&below, &outline)).abs() < 1e-2,
             "subset minus superset must be empty"
@@ -518,11 +417,9 @@ mod tests {
     fn containment_both_directions() {
         let big = vec![rect(0.0, 0.0, 20.0, 20.0)];
         let small = vec![rect(5.0, 5.0, 10.0, 10.0)];
-        // Union is just the big one; intersection is just the small one.
         assert!((area(&region_union(&big, &small)) - 400.0).abs() < 1e-3);
         assert!((area(&region_union(&small, &big)) - 400.0).abs() < 1e-3);
         assert!((area(&region_intersection(&big, &small)) - 25.0).abs() < 1e-3);
-        // Subtracting an interior region punches a hole: two loops, net area.
         let d = region_difference(&big, &small);
         assert_eq!(d.len(), 2, "difference should be outer + hole");
         assert!((area(&d) - 375.0).abs() < 1e-3, "hole must subtract");
@@ -531,13 +428,6 @@ mod tests {
 
     #[test]
     fn rounded_rect_against_circle_uses_arc_arc() {
-        // Geometry chosen so the cut really lands on the corner ARC, not on the
-        // straight edges: the rect's corner arc is centred (5,5) r=5, and this
-        // circle swallows that arc's midpoint (8.54, 8.54) while leaving both
-        // its endpoints (10,5) and (5,10) outside — so it must cross the arc
-        // twice. (An earlier version used circle (10,10) r=6, which crosses the
-        // corner's *circle* outside the quarter-arc's span and so silently
-        // exercised only circle/line.)
         let a = vec![Sketch::rounded_rect(0.0, 0.0, 20.0, 20.0, 5.0).loops.remove(0)];
         let b = vec![Sketch::circle(11.0, 11.0, 4.0).loops.remove(0)];
         let corner = Seg::Arc {
@@ -548,7 +438,6 @@ mod tests {
             a0: 0.0,
             a1: std::f32::consts::FRAC_PI_2,
         };
-        // `Sketch::circle` is two semicircle arcs, so scan both.
         let hits: usize = b[0].iter().map(|s| seg_seg_points(&corner, s).len()).sum();
         assert_eq!(hits, 2, "arc/arc path must cross the corner arc exactly twice");
         let i = region_intersection(&a, &b);
@@ -567,16 +456,13 @@ mod tests {
     }
 }
 
-/// Does `ang` (any branch) fall inside the sweep `a0 -> a1`?
 fn arc_covers(a0: f32, a1: f32, ang: f32) -> bool {
     let (lo, hi) = (a0.min(a1), a0.max(a1));
     let two_pi = std::f32::consts::TAU;
-    // Walk `ang` into [lo, lo + 2pi) and compare.
     let k = ((lo - ang) / two_pi).ceil();
     ang + k * two_pi <= hi + 1e-6
 }
 
-/// Exact distance from a point to one segment.
 pub fn point_seg_distance(p: Vec2, seg: &Seg) -> f32 {
     match *seg {
         Seg::Line { a, b } => {
@@ -591,7 +477,6 @@ pub fn point_seg_distance(p: Vec2, seg: &Seg) -> f32 {
         Seg::Arc { a, b, center, radius, a0, a1 } => {
             let v = p - center;
             if v.length() > 1e-9 && arc_covers(a0, a1, f32::atan2(v.y, v.x)) {
-                // Foot of the radial projection is on the arc.
                 (v.length() - radius).abs()
             } else {
                 (p - a).length().min((p - b).length())
@@ -600,9 +485,6 @@ pub fn point_seg_distance(p: Vec2, seg: &Seg) -> f32 {
     }
 }
 
-/// Points on `seg` that can realise a closest approach to another segment
-/// without being an endpoint: for an arc, the two points radially aligned with
-/// `toward` (a line normal, or the other arc's centre direction).
 fn extremal_points(seg: &Seg, toward: Vec2) -> Vec<Vec2> {
     match *seg {
         Seg::Line { .. } => Vec::new(),
@@ -623,15 +505,10 @@ fn extremal_points(seg: &Seg, toward: Vec2) -> Vec<Vec2> {
     }
 }
 
-/// Exact minimum distance between two segments. Zero when they cross.
 pub fn seg_seg_distance(p: &Seg, q: &Seg) -> f32 {
     if !seg_seg_points(p, q).is_empty() {
         return 0.0;
     }
-    // Endpoints of each against the other. For a non-crossing pair whose
-    // closest approach is interior to both, the extremal points below supply
-    // the missing candidate; every candidate is a genuine point on its curve,
-    // so taking the minimum can only tighten toward the true distance.
     let mut best = f32::INFINITY;
     for (x, y) in [(p, q), (q, p)] {
         for e in [x.start(), x.end()] {
@@ -640,12 +517,10 @@ pub fn seg_seg_distance(p: &Seg, q: &Seg) -> f32 {
     }
     let toward = |s: &Seg, other: &Seg| -> Vec2 {
         match (*s, *other) {
-            // Closest approach of a circle to a line is along the line normal.
             (Seg::Arc { .. }, Seg::Line { a, b }) => {
                 let d = b - a;
                 Vec2::new(-d.y, d.x)
             }
-            // ...and of two circles, along the line joining their centres.
             (Seg::Arc { center: c0, .. }, Seg::Arc { center: c1, .. }) => c1 - c0,
             _ => Vec2::ZERO,
         }
@@ -658,9 +533,6 @@ pub fn seg_seg_distance(p: &Seg, q: &Seg) -> f32 {
     best
 }
 
-/// Exact minimum distance between two closed loops, measured between their
-/// *boundaries* — a loop entirely inside another still reports the gap to it,
-/// not zero.
 pub fn min_loop_distance(a: &[Seg], b: &[Seg]) -> f32 {
     let _perf = perf::scope(perf::Metric::MinLoopDistance);
     let mut best = f32::INFINITY;
@@ -697,18 +569,14 @@ mod distance_tests {
         assert_eq!(d, 0.0);
     }
 
-    /// Offset segments must measure end-to-end, not perpendicular.
     #[test]
     fn disjoint_collinear_segments_measure_the_gap() {
         let d = seg_seg_distance(&line(0.0, 0.0, 4.0, 0.0), &line(7.0, 0.0, 10.0, 0.0));
         assert!((d - 3.0).abs() < 1e-5, "{d}");
     }
 
-    /// The interior-to-interior case: the closest point on the arc is not an
-    /// endpoint, so it is only found via the extremal candidates.
     #[test]
     fn line_to_arc_uses_the_radial_closest_point() {
-        // Upper half circle, radius 2 at the origin; the line sits above it.
         let arc = Seg::Arc {
             a: Vec2::new(2.0, 0.0),
             b: Vec2::new(-2.0, 0.0),
@@ -721,16 +589,12 @@ mod distance_tests {
         assert!((d - 3.0).abs() < 1e-5, "want 5 - 2 = 3, got {d}");
     }
 
-    /// Two circles' closest approach is along their centre line, again interior
-    /// to both arcs.
     #[test]
     fn arc_to_arc_uses_the_centre_line() {
         let right = Seg::Arc {
             a: Vec2::new(0.0, 1.0), b: Vec2::new(0.0, -1.0),
             center: Vec2::ZERO, radius: 1.0, a0: PI / 2.0, a1: -PI / 2.0,
         };
-        // Left half of the unit circle at (10, 0): pi/2 -> 3pi/2 through pi,
-        // so its leftmost point (9, 0) is on the arc.
         let left = Seg::Arc {
             a: Vec2::new(10.0, 1.0), b: Vec2::new(10.0, -1.0),
             center: Vec2::new(10.0, 0.0), radius: 1.0, a0: PI / 2.0, a1: 1.5 * PI,
@@ -739,8 +603,6 @@ mod distance_tests {
         assert!((d - 8.0).abs() < 1e-4, "want 10 - 1 - 1 = 8, got {d}");
     }
 
-    /// A loop strictly inside another reports the gap between boundaries, not
-    /// zero — this is exactly how the island clearance test uses it.
     #[test]
     fn nested_loops_report_the_boundary_gap() {
         let outer = Sketch::rectangle(0.0, 0.0, 20.0, 20.0).loops[0].clone();
@@ -756,8 +618,6 @@ mod distance_tests {
         assert_eq!(min_loop_distance(&a, &b), 0.0);
     }
 
-    /// A rounded rect inside a plain one: the closest approach is corner arc to
-    /// straight side, which only the radial candidate finds.
     #[test]
     fn rounded_island_in_a_square_measures_from_the_arc() {
         let outer = Sketch::rectangle(0.0, 0.0, 30.0, 30.0).loops[0].clone();

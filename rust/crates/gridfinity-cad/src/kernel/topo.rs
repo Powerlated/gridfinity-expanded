@@ -1,12 +1,3 @@
-//! Boundary-representation topology: an explicit face / loop / edge / vertex
-//! structure with shared edges. Each `Edge` is referenced by the faces on both
-//! its sides; each `Face` is trimmed by ordered loops of directed edges. This is
-//! a genuine B-rep (topology + analytic geometry, shared edges), just without
-//! half-edge next/prev pointers — loops are stored as explicit ordered edge
-//! lists, which makes constructing correct shared topology far less error-prone.
-//!
-//! The manifold invariant (`validate`): every edge is used exactly twice across
-//! all loops, once in each direction.
 
 use crate::kernel::geom::{Curve, Surface};
 use crate::kernel::math::{Vec3, weld_key};
@@ -20,8 +11,6 @@ pub struct Vertex {
     pub point: Vec3,
 }
 
-/// An edge on an analytic `Curve`, running from `v0` to `v1` as the parameter
-/// goes `t0 → t1` (raw, unwrapped — so an arc's sweep is unambiguous).
 #[derive(Clone, Copy, Debug)]
 pub struct Edge {
     pub curve: Curve,
@@ -32,8 +21,6 @@ pub struct Edge {
 }
 
 impl Edge {
-    /// Sample the edge as it is traversed in `forward` direction, `n` segments,
-    /// returning `n + 1` points (endpoints included).
     pub fn sample(&self, forward: bool, n: usize) -> Vec<Vec3> {
         let (a, b) = if forward {
             (self.t0, self.t1)
@@ -48,7 +35,6 @@ impl Edge {
             .collect()
     }
 
-    /// Segment count appropriate for this edge at the given angular resolution.
     pub fn seg_count(&self, arc_segs_per_quarter: usize) -> usize {
         match self.curve {
             Curve::Line { .. } => 1,
@@ -62,11 +48,6 @@ impl Edge {
     }
 }
 
-/// An ordered ring of directed edges. `true` = traverse the edge `v0 → v1`.
-///
-/// A **transient** value type used only to hand a loop to [`Builder::face`];
-/// the `Solid` no longer stores `Loop`s — they are flattened into its
-/// `loop_edges`/`loops` CSR arenas, so a built solid holds no per-loop `Vec`.
 #[derive(Clone, Debug, Default)]
 pub struct Loop {
     pub edges: Vec<(EdgeId, bool)>,
@@ -78,38 +59,19 @@ impl Loop {
     }
 }
 
-/// A trimmed face: an analytic `surface` plus a contiguous run of loop ids in
-/// the owning `Solid`'s CSR arena — the first is the outer boundary, the rest
-/// are holes. `sense` = whether the surface's own normal is the outward
-/// (solid-exterior) normal; `false` flips it.
-///
-/// The loops live in the `Solid`, not the `Face`: access them via
-/// [`Solid::outer_edges`], [`Solid::face_loops`], [`Solid::inner_loops`].
 #[derive(Clone, Debug)]
 pub struct Face {
     pub surface: Surface,
     pub sense: bool,
-    /// First loop id; loops are `[loop0, loop0 + n_loops)`, outer at `loop0`.
     loop0: u32,
-    /// Number of loops, `>= 1` (outer plus zero or more inners).
     n_loops: u32,
 }
 
-/// A solid: flat, `Copy`-element arenas. One shell, manifold.
-///
-/// Two-level CSR for the loops: a face names a contiguous range of loop ids;
-/// each loop id indexes `loops` (offsets into the flat `loop_edges`). Cloning a
-/// `Solid` is therefore five flat `Vec` `memcpy`s with **zero per-loop
-/// allocation** — which is what makes `fillet::fillet_edges`' repeated clones
-/// cheap.
 #[derive(Clone, Debug)]
 pub struct Solid {
     pub verts: Vec<Vertex>,
     pub edges: Vec<Edge>,
-    /// Flat directed-edge storage for every loop, concatenated.
     loop_edges: Vec<(EdgeId, bool)>,
-    /// CSR offsets into `loop_edges`: loop `l` owns `loop_edges[loops[l]..loops[l+1]]`.
-    /// Always non-empty (`[0]` for a solid with no loops).
     loops: Vec<u32>,
     pub faces: Vec<Face>,
 }
@@ -131,48 +93,39 @@ impl Solid {
         self.verts[id].point
     }
 
-    /// Directed endpoints of an edge use.
     pub fn directed(&self, edge: EdgeId, forward: bool) -> (VertexId, VertexId) {
         let e = &self.edges[edge];
         if forward { (e.v0, e.v1) } else { (e.v1, e.v0) }
     }
 
-    /// The directed edges of loop `lid`.
     fn loop_slice(&self, lid: u32) -> &[(EdgeId, bool)] {
         let s = self.loops[lid as usize] as usize;
         let e = self.loops[lid as usize + 1] as usize;
         &self.loop_edges[s..e]
     }
 
-    /// The outer boundary of face `fid`.
     pub fn outer_edges(&self, fid: usize) -> &[(EdgeId, bool)] {
         self.loop_slice(self.faces[fid].loop0)
     }
 
-    /// Total directed-edge entries across all loops (for sizing a rebuild).
     pub fn loop_edges_len(&self) -> usize {
         self.loop_edges.len()
     }
 
-    /// Number of hole loops of face `fid`.
     pub fn n_inners(&self, fid: usize) -> usize {
         self.faces[fid].n_loops as usize - 1
     }
 
-    /// Every loop of face `fid` (outer first, then holes), each as a slice.
     pub fn face_loops(&self, fid: usize) -> impl Iterator<Item = &[(EdgeId, bool)]> {
         let f = &self.faces[fid];
         (f.loop0..f.loop0 + f.n_loops).map(move |lid| self.loop_slice(lid))
     }
 
-    /// Just the hole loops of face `fid`.
     pub fn inner_loops(&self, fid: usize) -> impl Iterator<Item = &[(EdgeId, bool)]> {
         let f = &self.faces[fid];
         (f.loop0 + 1..f.loop0 + f.n_loops).map(move |lid| self.loop_slice(lid))
     }
 
-    /// Check the manifold invariant: every edge used exactly twice, once each
-    /// direction, and each loop forms a closed chain (consecutive edges meet).
     pub fn validate(&self) -> Result<(), String> {
         let mut fwd = vec![0u32; self.edges.len()];
         let mut bwd = vec![0u32; self.edges.len()];
@@ -206,18 +159,8 @@ impl Solid {
         Ok(())
     }
 
-    /// Faces on each side of every edge, `[EdgeId] -> up to two FaceIds`.
-    ///
-    /// Returned as a flat CSR ([`EdgeFaces`]) rather than `Vec<Vec<usize>>`: a
-    /// solid with E edges used to cost E tiny `Vec` allocations here, and
-    /// `fillet_edges`/`chamfer` call this repeatedly — the single biggest churn
-    /// source after the earcut floor. Now it is five flat `Vec`s regardless of E.
-    /// Indexing (`ef[e]`) yields the face-id slice, so callers are unchanged.
     pub fn edge_faces(&self) -> EdgeFaces {
         let ne = self.edges.len();
-        // Pass 1: count distinct faces per edge. Faces are visited in ascending
-        // id order, so an edge's uses within one face are contiguous — dedup by
-        // "last face seen" reproduces the old `contains` check exactly.
         let mut counts = vec![0u32; ne];
         let mut last = vec![usize::MAX; ne];
         for fi in 0..self.faces.len() {
@@ -234,7 +177,6 @@ impl Solid {
         for e in 0..ne {
             off[e + 1] = off[e] + counts[e];
         }
-        // Pass 2: scatter face ids into the flat array at each edge's cursor.
         let mut flat = vec![0usize; off[ne] as usize];
         let mut cursor: Vec<u32> = off[..ne].to_vec();
         last.iter_mut().for_each(|x| *x = usize::MAX);
@@ -253,8 +195,6 @@ impl Solid {
     }
 }
 
-/// Flat CSR of the faces touching each edge (see [`Solid::edge_faces`]).
-/// `ef[e]` is the slice of face ids for edge `e`.
 #[derive(Clone, Debug)]
 pub struct EdgeFaces {
     off: Vec<u32>,
@@ -268,16 +208,11 @@ impl std::ops::Index<usize> for EdgeFaces {
     }
 }
 
-/// Constructs a `Solid` while deduplicating coincident vertices and shared
-/// edges, so faces built independently still reference the same topology.
 #[derive(Default)]
 pub struct Builder {
     verts: Vec<Vertex>,
     vert_index: HashMap<(i64, i64, i64), VertexId>,
     edges: Vec<Edge>,
-    // Keyed on (sorted endpoints, welded midpoint): two arcs that share endpoints
-    // but bulge differently (a circle's two semicircles) stay distinct, while a
-    // genuinely shared edge and its reverse still merge.
     edge_index: HashMap<(VertexId, VertexId, (i64, i64, i64)), EdgeId>,
     loop_edges: Vec<(EdgeId, bool)>,
     loops: Vec<u32>,
@@ -289,10 +224,6 @@ impl Builder {
         Builder { loops: vec![0], ..Builder::default() }
     }
 
-    /// A builder pre-sized for a known output. `fillet_edges`/`chamfer` rebuild a
-    /// whole solid through a fresh builder; sizing the arenas and the two intern
-    /// maps up front removes the incremental table rehash and arena regrowth that
-    /// otherwise dominates the rebuild's allocation churn.
     pub fn with_capacity(nv: usize, ne: usize, nloops: usize, nloop_edges: usize, nfaces: usize) -> Builder {
         let mut loops = Vec::with_capacity(nloops + 1);
         loops.push(0);
@@ -307,7 +238,6 @@ impl Builder {
         }
     }
 
-    /// Append a loop's directed edges to the flat arena, returning its loop id.
     fn intern_loop(&mut self, edges: &[(EdgeId, bool)]) -> u32 {
         let lid = self.loops.len() as u32 - 1;
         self.loop_edges.extend_from_slice(edges);
@@ -315,7 +245,6 @@ impl Builder {
         lid
     }
 
-    /// Intern a vertex by welded position.
     pub fn vertex(&mut self, p: Vec3) -> VertexId {
         crate::kernel::perf::count(crate::kernel::perf::Metric::BuilderVertex);
         *self.vert_index.entry(weld_key(p)).or_insert_with(|| {
@@ -325,8 +254,6 @@ impl Builder {
         })
     }
 
-    /// Intern a straight edge between two vertices; returns the edge id and the
-    /// direction (`true` if the stored edge already runs `a → b`).
     pub fn line(&mut self, a: VertexId, b: VertexId) -> (EdgeId, bool) {
         let (pa, pb) = (self.verts[a].point, self.verts[b].point);
         let mid = (pa + pb) * 0.5;
@@ -342,8 +269,6 @@ impl Builder {
         })
     }
 
-    /// Intern a circular-arc edge. `center`/`axis`/`radius`/`ref_dir` define the
-    /// circle; `a0`/`a1` are the raw (unwrapped) angles at `a`/`b`.
     pub fn arc(
         &mut self,
         a: VertexId,
@@ -367,8 +292,6 @@ impl Builder {
         })
     }
 
-    /// Intern an ellipse-arc edge (`p(t) = center + cos t·ea + sin t·eb`);
-    /// `t0`/`t1` are the raw parameters at `a`/`b`.
     #[allow(clippy::too_many_arguments)]
     pub fn ellipse(
         &mut self,
@@ -401,7 +324,6 @@ impl Builder {
         let (lo, hi) = if a < b { (a, b) } else { (b, a) };
         let key = (lo, hi, weld_key(mid));
         if let Some(&e) = self.edge_index.get(&key) {
-            // Match direction against how the edge was stored.
             return (e, self.edges[e].v0 == a);
         }
         let id = self.edges.len();
@@ -415,10 +337,6 @@ impl Builder {
         self.face_from(surface, sense, &outer.edges, &inner_slices)
     }
 
-    /// Like [`Builder::face`] but takes borrowed directed-edge slices instead of
-    /// owned `Loop`s, so a caller that already holds the edge lists in reusable
-    /// scratch buffers (the fillet/chamfer rebuild) needn't allocate a `Loop`
-    /// per loop. The loops are interned contiguously, outer first.
     pub fn face_from(
         &mut self,
         surface: Surface,

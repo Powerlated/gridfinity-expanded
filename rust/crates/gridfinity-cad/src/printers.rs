@@ -1,11 +1,6 @@
-//! Printer bed profiles, bed-fit checks, and automatic split-line planning.
-//!
-//! Pure logic — no geometry. A bin that does not fit the print bed is split into
-//! the fewest even pieces that do (mirrors the reference `printers.ts`).
 
 use crate::layout::{Axis, GridCell, GridFootprint, Piece, SplitLine, partition_cells, PITCH};
 
-/// Bed clearance (mm) kept on all sides of a part.
 pub const BED_MARGIN: f32 = 5.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,7 +10,6 @@ pub struct PrinterProfile {
     pub bed_depth: i32,
 }
 
-/// The reference printer set (bed sizes in mm).
 pub const PRINTER_PROFILES: &[PrinterProfile] = &[
     PrinterProfile { name: "Bambu Lab A1 Mini", bed_width: 180, bed_depth: 180 },
     PrinterProfile { name: "Bambu Lab P1S / X1C", bed_width: 256, bed_depth: 256 },
@@ -29,7 +23,6 @@ pub const PRINTER_PROFILES: &[PrinterProfile] = &[
     PrinterProfile { name: "Custom", bed_width: 220, bed_depth: 220 },
 ];
 
-/// The default printer (matches the reference: Prusa MK4 / MK3S+).
 pub const DEFAULT_PRINTER: PrinterProfile = PrinterProfile { name: "Prusa MK4 / MK3S+", bed_width: 250, bed_depth: 210 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +30,6 @@ pub struct BedFitResult {
     pub fits: bool,
     pub bin_width: i32,
     pub bin_depth: i32,
-    /// The part only fits after a 90° rotation.
     pub rotated: bool,
 }
 
@@ -47,8 +39,6 @@ impl PrinterProfile {
     }
 }
 
-/// Maximum number of cells that fit along a bed dimension of `bed` mm, leaving
-/// `BED_MARGIN` on each side: `floor((bed − 2·MARGIN) / PITCH)`.
 fn max_cells_for_bed(bed: i32) -> i32 {
     ((bed as f32 - 2.0 * BED_MARGIN) / PITCH as f32).floor() as i32
 }
@@ -59,7 +49,6 @@ fn fits(width_mm: f32, depth_mm: f32, bed_w: i32, bed_d: i32) -> bool {
     width_mm <= w && depth_mm <= d
 }
 
-/// Whether the footprint fits the bed in either orientation.
 pub fn check_bed_fit(cells: &[GridCell], printer: PrinterProfile) -> BedFitResult {
     let f = GridFootprint::from_cells(cells).unwrap_or(GridFootprint {
         min_x: 0,
@@ -81,9 +70,6 @@ pub fn check_bed_fit(cells: &[GridCell], printer: PrinterProfile) -> BedFitResul
     }
 }
 
-/// Candidate split-line indices along one axis, evenly spaced so each resulting
-/// chunk is at most `max_cells` cells wide. Returns the interior line indices
-/// (the cut positions), so `n` lines ⇒ `n+1` chunks.
 fn axis_split_indices(_min: i32, span_cells: i32, max_cells: i32) -> Vec<i32> {
     if max_cells >= span_cells || span_cells <= 0 {
         return Vec::new();
@@ -96,14 +82,12 @@ fn axis_split_indices(_min: i32, span_cells: i32, max_cells: i32) -> Vec<i32> {
     let n = chunks.min(span_cells).max(1);
     let mut out = Vec::with_capacity((n - 1) as usize);
     for i in 0..n - 1 {
-        // Line position relative to min, then offset back into grid coords.
         let rel = ((i + 1) as f32 * span_cells as f32 / n as f32).round() as i32;
         out.push(rel);
     }
     out
 }
 
-/// Lower-bound span of the cells along one axis (min, span).
 fn axis_span(cells: &[GridCell], axis: Axis) -> (i32, i32) {
     let mut min = i32::MAX;
     let mut max = i32::MIN;
@@ -115,8 +99,6 @@ fn axis_span(cells: &[GridCell], axis: Axis) -> (i32, i32) {
     (min, max - min + 1)
 }
 
-/// Score a candidate plan: fewer pieces, then fewer lines, then smaller worst
-/// piece. Lower is better.
 fn score(pieces: &[Piece], line_count: usize) -> (usize, usize, i32) {
     let worst = pieces
         .iter()
@@ -149,8 +131,6 @@ fn build_plan(
     (lines, n)
 }
 
-/// Choose the split-line plan that fits the whole region on the bed with the
-/// fewest pieces. Returns the plan (possibly empty if it already fits).
 pub fn compute_auto_split_lines(cells: &[GridCell], printer: PrinterProfile) -> Vec<SplitLine> {
     if check_bed_fit(cells, printer).fits {
         return Vec::new();
@@ -158,7 +138,6 @@ pub fn compute_auto_split_lines(cells: &[GridCell], printer: PrinterProfile) -> 
     let (min_x, span_x) = axis_span(cells, Axis::X);
     let (min_y, span_y) = axis_span(cells, Axis::Y);
 
-    // Try both bed orientations; keep the lowest-scored plan.
     let mut best: Option<(Vec<SplitLine>, (usize, usize, i32))> = None;
     for (max_w, max_d) in [
         (max_cells_for_bed(printer.bed_width), max_cells_for_bed(printer.bed_depth)),
@@ -193,7 +172,6 @@ mod tests {
 
     #[test]
     fn oversized_bin_does_not_fit_a1_mini() {
-        // 6×6 cells = 252×252 mm; A1 Mini bed 180×180.
         let mut c = Vec::new();
         for x in 0..6 {
             for y in 0..6 {
@@ -212,12 +190,10 @@ mod tests {
 
     #[test]
     fn auto_split_halves_oversized_run() {
-        // 8×1 cells = 336 mm along X. A1 Mini fits 4 cells (168 mm) per piece.
         let c: Vec<GridCell> = (0..8).map(|x| GridCell { x, y: 0 }).collect();
-        let lines = compute_auto_split_lines(&c, PRINTER_PROFILES[0]); // 180×180
+        let lines = compute_auto_split_lines(&c, PRINTER_PROFILES[0]);
         assert!(!lines.is_empty(), "expected a split plan");
         let pieces = partition_cells(&c, &lines);
-        // Every piece must individually fit the bed.
         for p in &pieces {
             assert!(check_bed_fit(&p.cells, PRINTER_PROFILES[0]).fits, "piece {:?} too big", p.cells);
         }
@@ -225,9 +201,7 @@ mod tests {
 
     #[test]
     fn axis_split_indices_caps_chunk_size() {
-        // span 10, max 3 ⇒ chunks = ceil(10/3)=4, indices split into 4 groups.
         let idx = axis_split_indices(0, 10, 3);
-        // 3 interior lines ⇒ 4 chunks; each chunk ≤ 3 wide.
         assert_eq!(idx.len(), 3);
         let mut prev = 0;
         for &cut in &idx {

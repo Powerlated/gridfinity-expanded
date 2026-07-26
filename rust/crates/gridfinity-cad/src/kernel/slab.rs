@@ -1,22 +1,3 @@
-//! 2.5D constructive solid geometry: solids as stacks of signed slabs.
-//!
-//! A [`Slab`] is a 2D region swept over a z-range. A sequence of union /
-//! difference slabs is resolved into one B-rep solid **exactly**: the z-range
-//! endpoints cut the stack into bands, each band's cross-section is the 2D
-//! boolean of the slabs covering it (see [`crate::kernel::region2d`]), and the
-//! solid is assembled band by band.
-//!
-//! This is the restricted boolean the kernel offers instead of general CSG.
-//! Both operands being z-prisms is what keeps every intersection curve either
-//! vertical or horizontal — so the whole thing stays inside the analytic
-//! surface/curve set, with no quartics (which a general cylinder/cylinder
-//! boolean would demand).
-//!
-//! Cones, spheres and tori are *not* expressible here; a chamfered peg stays a
-//! `loft`, and a rolling blend stays [`crate::kernel::fillet`].
-//!
-//! Every region follows the sketch convention: outer loops CCW
-//! (`loop_area > 0`), holes CW.
 
 use crate::kernel::build::{RingEdges, ring, wall_seg};
 use crate::kernel::region2d::{presplit_regions, region_difference, region_union};
@@ -25,14 +6,12 @@ use crate::kernel::geom::Surface;
 use crate::kernel::math::{Vec3, vec3_of};
 use crate::kernel::topo::{Builder, Loop, Solid};
 
-/// How a slab combines with everything stacked before it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     Union,
     Difference,
 }
 
-/// A 2D region swept between two heights.
 #[derive(Clone, Debug)]
 pub struct Slab {
     pub region: Vec<Vec<Seg>>,
@@ -49,21 +28,12 @@ impl Slab {
 
 const Z_EPS: f32 = 1e-5;
 
-/// How a stack is emitted into a builder that may already hold other geometry.
 #[derive(Clone, Debug, Default)]
 pub struct SlabOpts {
-    /// Emit the stack as a **void** — material outside the regions — instead
-    /// of a solid. Used to carve a pocket whose surrounding body is built by
-    /// the caller.
     pub cavity: bool,
-    /// Heights at which the caller supplies the horizontal face itself (an
-    /// opening onto other geometry, e.g. a cavity's rim). No cap is emitted
-    /// there, so the caller must close it or `validate` will fail.
     pub open_at: Vec<f32>,
 }
 
-/// Resolve a slab stack into one standalone solid. The result is validated
-/// before it is returned.
 pub fn build_slabs(ops: &[(Op, Slab)]) -> Result<Solid, String> {
     let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::BuildSlabs);
     let mut b = Builder::new();
@@ -73,23 +43,14 @@ pub fn build_slabs(ops: &[(Op, Slab)]) -> Result<Solid, String> {
     Ok(solid)
 }
 
-/// The z breakpoints and per-band cross-sections of a stack, computed without
-/// emitting anything.
-///
-/// [`emit_slabs`] is this plus assembly. Callers that need to know a stack's
-/// shape *before* building it — to weld their own faces onto an `open_at`
-/// interface, say — use this directly.
 pub fn plan_bands(ops: &[(Op, Slab)]) -> Result<(Vec<f32>, Vec<Vec<Vec<Seg>>>), String> {
     if ops.is_empty() {
         return Err("slab: empty stack".into());
     }
 
-    // One common segmentation across every operand, so a boundary run shared
-    // by two bands comes back as the same pieces in both.
     let split: Vec<Vec<Vec<Seg>>> =
         presplit_regions(&ops.iter().map(|(_, s)| s.region.clone()).collect::<Vec<_>>());
 
-    // Band boundaries: every slab's z endpoints.
     let mut zs: Vec<f32> = ops.iter().flat_map(|(_, s)| [s.z0, s.z1]).collect();
     zs.sort_by(f32::total_cmp);
     zs.dedup_by(|a, b| (*a - *b).abs() < Z_EPS);
@@ -97,7 +58,6 @@ pub fn plan_bands(ops: &[(Op, Slab)]) -> Result<(Vec<f32>, Vec<Vec<Vec<Seg>>>), 
         return Err("slab: stack has no height".into());
     }
 
-    // Cross-section of each band: fold the ops that cover its midpoint.
     let bands: Vec<Vec<Vec<Seg>>> = zs
         .windows(2)
         .map(|w| {
@@ -119,10 +79,6 @@ pub fn plan_bands(ops: &[(Op, Slab)]) -> Result<(Vec<f32>, Vec<Vec<Vec<Seg>>>), 
     Ok((zs, bands))
 }
 
-/// Emit a slab stack into an existing builder, so it can share edges with
-/// geometry the caller builds around it. Returns the per-band cross-sections
-/// (bottom band first) — callers need them to weld their own faces onto an
-/// `open_at` interface.
 pub fn emit_slabs(
     b: &mut Builder,
     ops: &[(Op, Slab)],
@@ -131,14 +87,6 @@ pub fn emit_slabs(
     let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::EmitSlabs);
     let (zs, bands) = plan_bands(ops)?;
 
-    // Side walls, one span per band. Bands are delimited by *all* z
-    // breakpoints, so nothing changes strictly inside a band and the vertical
-    // edges need no further splitting.
-    //
-    // Outers CCW and holes CW both put material on the left, so the outward
-    // normal is uniformly to the right of travel — one flag covers every loop
-    // and outers/holes need no distinction here. As a cavity the material is
-    // on the other side, so the whole thing flips.
     let solid_side = !opts.cavity;
     for (k, band) in bands.iter().enumerate() {
         let (za, zb) = (zs[k], zs[k + 1]);
@@ -149,13 +97,10 @@ pub fn emit_slabs(
         }
     }
 
-    // Horizontal caps at every interface, treating outside the stack as empty:
-    // material below but not above faces up, above but not below faces down
-    // (both inverted for a cavity).
     let empty: Vec<Vec<Seg>> = Vec::new();
     for (k, &z) in zs.iter().enumerate() {
         if opts.open_at.iter().any(|&o| (o - z).abs() < Z_EPS) {
-            continue; // caller closes this interface
+            continue;
         }
         let below = if k == 0 { &empty } else { &bands[k - 1] };
         let above = if k == bands.len() { &empty } else { &bands[k] };
@@ -173,14 +118,6 @@ pub fn emit_slabs(
     Ok(bands)
 }
 
-/// A horizontal cap whose *traversal* is fixed by `up` but whose outward
-/// normal is `sense`-flipped for a cavity.
-///
-/// `build::cap` couples the two — its `up` flips normal and winding together —
-/// which is wrong here. `wall_seg`'s `outward` flag only flips the surface
-/// normal and leaves the loop direction alone, so a cavity's walls traverse
-/// exactly like a solid's. Flipping the cap winding too would break the
-/// pairing between them; only the normal may flip.
 fn emit_cap(
     b: &mut Builder,
     z: f32,
@@ -204,14 +141,6 @@ fn emit_cap(
     b.face(surface, sense, mk(outer), holes.iter().map(mk).collect());
 }
 
-/// Group a region's loops into `(outer, holes)`, each hole attached to the
-/// smallest outer containing it.
-///
-/// Directions are left **exactly** as the boolean produced them. That matters:
-/// a loop can be a hole of one cap and the outer of the band wall above it (a
-/// shoulder under a tower), and reorienting it for one role breaks its pairing
-/// in the other. The boolean already emits every run material-on-the-left,
-/// which is precisely the direction each side needs.
 fn group_loops(loops: &[Vec<Seg>]) -> Vec<(Vec<Seg>, Vec<Vec<Seg>>)> {
     let mut out: Vec<(Vec<Seg>, Vec<Vec<Seg>>)> = loops
         .iter()
@@ -249,9 +178,6 @@ mod tests {
         vec![Sketch::circle(cx, cy, r).loops.remove(0)]
     }
 
-    /// Volume of the tessellated solid. Curved walls are inscribed polygons,
-    /// so a bore reads slightly small; 32 segments/quarter keeps that under
-    /// ~0.07 mm3 for the radii used here, well inside the tolerances below.
     fn volume(s: &Solid) -> f64 {
         let mesh = tessellate(s, 32).to_mesh();
         let mut v = 0.0f64;
@@ -285,8 +211,6 @@ mod tests {
 
     #[test]
     fn stacked_union_different_footprints() {
-        // A wide base with a narrower tower: the interface needs a partial
-        // up-facing cap (the shoulder) computed as below - above.
         let s = build_slabs(&[
             (Op::Union, Slab::new(rect(0.0, 0.0, 20.0, 20.0), 0.0, 5.0)),
             (Op::Union, Slab::new(rect(5.0, 5.0, 15.0, 15.0), 5.0, 10.0)),
@@ -298,7 +222,6 @@ mod tests {
 
     #[test]
     fn overlapping_union_merges_in_z() {
-        // Same z-range, overlapping footprints: one merged prism.
         let s = build_slabs(&[
             (Op::Union, Slab::new(rect(0.0, 0.0, 10.0, 10.0), 0.0, 4.0)),
             (Op::Union, Slab::new(rect(5.0, 5.0, 15.0, 15.0), 0.0, 4.0)),
@@ -310,8 +233,6 @@ mod tests {
 
     #[test]
     fn pocket_difference_makes_walls() {
-        // The "thin extrude to produce walls" step: a box minus an inset
-        // pocket that stops short of the bottom.
         let s = build_slabs(&[
             (Op::Union, Slab::new(rect(0.0, 0.0, 20.0, 20.0), 0.0, 10.0)),
             (Op::Difference, Slab::new(rect(2.0, 2.0, 18.0, 18.0), 2.0, 10.0)),
@@ -323,8 +244,6 @@ mod tests {
 
     #[test]
     fn through_bore_is_a_hole() {
-        // A cylindrical bore all the way through: exercises arc walls plus a
-        // cap with a hole loop.
         let s = build_slabs(&[
             (Op::Union, Slab::new(rect(0.0, 0.0, 20.0, 20.0), 0.0, 5.0)),
             (Op::Difference, Slab::new(circ(10.0, 10.0, 3.0), 0.0, 5.0)),
@@ -337,9 +256,6 @@ mod tests {
 
     #[test]
     fn cavity_mode_carves_into_caller_geometry() {
-        // Exactly how the model would use it: the caller builds the body
-        // shell, `emit_slabs` carves the pocket as a void, and the interface
-        // the caller closes itself (the rim) is declared open.
         use crate::kernel::build::{cap, ring, wall_between};
 
         let outer = rect(0.0, 0.0, 20.0, 20.0).remove(0);
@@ -369,8 +285,6 @@ mod tests {
 
     #[test]
     fn blind_bore_leaves_a_floor() {
-        // Bore stops short of the bottom: needs an up-facing cap at the bore
-        // floor AND a down-facing annulus nowhere - the classic counterbore.
         let s = build_slabs(&[
             (Op::Union, Slab::new(rect(0.0, 0.0, 20.0, 20.0), 0.0, 10.0)),
             (Op::Difference, Slab::new(circ(10.0, 10.0, 3.0), 4.0, 10.0)),

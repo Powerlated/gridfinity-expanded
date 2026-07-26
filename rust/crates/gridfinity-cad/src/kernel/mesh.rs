@@ -1,17 +1,10 @@
-//! Indexed triangle mesh + binary STL writer.
-//!
-//! This is the final output stage of the kernel: a `Solid` (polygon soup) is
-//! triangulated and welded into a `Mesh`, which the GUI renders and which the
-//! STL writer serializes for slicers.
 
 use crate::kernel::math::{Vec3, weld_key};
 use std::collections::HashMap;
 
-/// An indexed triangle mesh in millimetres.
 #[derive(Clone, Debug, Default)]
 pub struct Mesh {
     pub positions: Vec<Vec3>,
-    /// Three vertex indices per triangle.
     pub indices: Vec<u32>,
 }
 
@@ -24,7 +17,6 @@ impl Mesh {
         self.indices.is_empty()
     }
 
-    /// Axis-aligned bounds `(min, max)`. Returns zeros for an empty mesh.
     pub fn bounds(&self) -> (Vec3, Vec3) {
         if self.positions.is_empty() {
             return (Vec3::ZERO, Vec3::ZERO);
@@ -38,7 +30,6 @@ impl Mesh {
         (min, max)
     }
 
-    /// Iterate triangles as position triples.
     pub fn triangles(&self) -> impl Iterator<Item = [Vec3; 3]> + '_ {
         self.indices.chunks_exact(3).map(move |t| {
             [
@@ -49,9 +40,6 @@ impl Mesh {
         })
     }
 
-    /// Expand to a flat, non-indexed `[pos(3), normal(3)]` buffer with per-face
-    /// (flat) normals — the layout the renderer uploads. Degenerate triangles
-    /// are skipped.
     pub fn flat_vertices(&self) -> Vec<f32> {
         let mut out = Vec::with_capacity(self.tri_count() * 3 * 6);
         for [a, b, c] in self.triangles() {
@@ -68,12 +56,10 @@ impl Mesh {
         out
     }
 
-    /// Serialize to a binary STL blob. Per-facet normals are computed from the
-    /// winding so the file is self-describing for slicers.
     pub fn to_stl_binary(&self) -> Vec<u8> {
         let tris = self.tri_count();
         let mut buf = Vec::with_capacity(84 + tris * 50);
-        buf.extend_from_slice(&[0u8; 80]); // header
+        buf.extend_from_slice(&[0u8; 80]);
         buf.extend_from_slice(&(tris as u32).to_le_bytes());
         for [a, b, c] in self.triangles() {
             let mut n = (b - a).cross(c - a);
@@ -84,14 +70,12 @@ impl Mesh {
                 buf.extend_from_slice(&v.y.to_le_bytes());
                 buf.extend_from_slice(&v.z.to_le_bytes());
             }
-            buf.extend_from_slice(&0u16.to_le_bytes()); // attribute byte count
+            buf.extend_from_slice(&0u16.to_le_bytes());
         }
         buf
     }
 }
 
-/// Welds a stream of triangle position-triples into an indexed `Mesh`,
-/// dropping any triangle that collapses once its vertices are fused.
 pub fn weld_triangles(tris: impl IntoIterator<Item = [Vec3; 3]>) -> Mesh {
     let mut positions: Vec<Vec3> = Vec::new();
     let mut index: HashMap<(i64, i64, i64), u32> = HashMap::new();

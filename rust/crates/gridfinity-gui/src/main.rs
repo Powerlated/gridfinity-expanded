@@ -1,7 +1,3 @@
-//! egui front-end for the analytic B-rep Gridfinity engine: a 2D layout
-//! editor (polyomino bins, open/divider edges, split lines, inner walls), a
-//! live glow-rendered 3D preview, and binary-STL export (assembled or split
-//! pieces).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -13,10 +9,6 @@ mod wireframe;
 
 use eframe::egui;
 
-/// Counts allocations for the debugger's Profile panel. A library must not pick
-/// the allocator for its dependents, so the wrapper lives in the kernel and the
-/// binary installs it. It only counts while `perf` is enabled, which the
-/// debugger switches on around a single rebuild.
 #[global_allocator]
 static ALLOC: gridfinity_cad::kernel::perf::CountingAlloc<std::alloc::System> =
     gridfinity_cad::kernel::perf::CountingAlloc::new(std::alloc::System);
@@ -33,22 +25,16 @@ use gridfinity_cad::tessellate;
 use std::sync::{Arc, Mutex};
 use viewport::{Camera, Renderer};
 
-/// Curve resolution (segments per 90° arc) for the live preview vs. export.
 const PREVIEW_RES: usize = 5;
 const EXPORT_RES: usize = 48;
 
-/// Floats per shaded vertex: the kernel's `[pos(3), normal(3)]` plus a
-/// "this bin failed to build" flag the GUI appends itself.
 pub const MESH_STRIDE: usize = 7;
 
-/// A logical bin the model refused to build, and why.
 struct BinError {
-    /// Index into `Params::bins`.
     bin: usize,
     msg: String,
 }
 
-/// Tessellation → shaded vertex buffer, with every vertex tagged `bad`.
 fn flagged(tess: &gridfinity_cad::Tessellation, bad: bool) -> Vec<f32> {
     let src = tess.render_buffer();
     let flag = if bad { 1.0 } else { 0.0 };
@@ -71,23 +57,10 @@ fn vert_bounds(verts: &[f32]) -> (Vec3, Vec3) {
     if min.x > max.x { (Vec3::ZERO, Vec3::ZERO) } else { (min, max) }
 }
 
-/// Build one logical bin, converting both a returned error and a panic into a
-/// message.
-///
-/// The panic arm is not belt-and-braces. `run_all` reports what it can as an
-/// `Err`, but the model layer upstream of it still indexes and asserts its way
-/// through geometry that a bad parameter combination can make degenerate, and
-/// in a GUI an unwind out of `regenerate` takes the whole window with it. The
-/// build is pure — it borrows `Params` and returns a fresh `Solid`, touching no
-/// shared state — so catching the unwind here cannot leave anything torn.
 fn build_bin(p: &Params, bin: &LogicalBin) -> Result<Solid, String> {
     catch(|| gridfinity::build_piece(p, &bin.cells, &bin.cells, bin.slope))
 }
 
-/// Stand-in geometry for a bin that would not build: one plain box per cell, at
-/// the bin's real footprint and height. It is deliberately featureless — no
-/// pegs, no cavity — so it cannot be mistaken for a successful build, while
-/// still showing *where* the bad bin is and how big it is.
 fn placeholder(p: &Params, bin: &LogicalBin) -> Vec<f32> {
     let h = (p.height_units as f32 * gridfinity::HEIGHT_PER_UNIT).max(1.0);
     let side = gridfinity::GRID_PITCH - 2.0 * gridfinity::HALF_TOL;
@@ -101,14 +74,7 @@ fn placeholder(p: &Params, bin: &LogicalBin) -> Vec<f32> {
     out
 }
 
-/// Run a fallible build, turning a panic into the same `Err(String)` a clean
-/// failure would produce. See [`build_bin`] for why the panic arm is needed.
 fn catch<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    // Silence the default hook for the duration of the build. Its output is
-    // redundant — the message is caught below and shown in the viewport — and a
-    // slider dragged through a bad parameter range would otherwise spew a
-    // backtrace per frame. The swap is global, but only the UI thread builds,
-    // and the window it covers is exactly this call.
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
@@ -126,20 +92,14 @@ fn catch<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     }
 }
 
-/// The whole layout as one solid, without the panic.
 fn try_whole(p: &Params) -> Result<Solid, String> {
     catch(|| gridfinity::try_build(p))
 }
 
-/// Build the whole scene bin by bin, so a bin the model cannot build is
-/// isolated: the others still render normally and it gets placeholder geometry
-/// flagged for the shader's red glow.
 fn build_scene(p: &Params) -> (Vec<f32>, Vec<BinError>) {
     let mut verts = Vec::new();
     let mut errors = Vec::new();
     if p.mode != Mode::Bin {
-        // The baseplate is one solid over every cell — there is no per-bin
-        // split to isolate, so it succeeds or fails whole.
         match try_whole(p) {
             Ok(s) => verts = flagged(&tessellate(&s, PREVIEW_RES), false),
             Err(msg) => errors.push(BinError { bin: 0, msg }),
@@ -190,40 +150,23 @@ struct App {
     gl: Arc<eframe::glow::Context>,
     renderer: Arc<Mutex<Renderer>>,
     camera: Camera,
-    /// Type tags for the debugger overlay, rebuilt with the geometry and
-    /// projected to screen space each frame.
     labels: Vec<wireframe::Label>,
     dirty: bool,
-    /// Program cache is stale (params changed) — refresh before next regenerate.
     program_dirty: bool,
     tri_count: usize,
     status: String,
-    /// Bins the model refused to build this regenerate; empty when all is well.
     errors: Vec<BinError>,
-    /// The Bad Apple stress-test player; `None` unless the demo is running.
     badapple: Option<BadApple>,
 }
 
-/// Live "Bad Apple!!" playback: which frame we are on, when playback started,
-/// and a smoothed measure of how fast the kernel is turning frames into
-/// triangles.
 struct BadApple {
-    /// Builds frames off the UI thread.
     worker: badapple::Worker,
-    /// Frame currently uploaded to the GPU (`usize::MAX` until the first).
     frame: usize,
-    /// Frame currently being built by the worker, if any.
     requested: Option<usize>,
-    /// `ui.input().time` at which frame 0 should have been shown.
     epoch: f64,
-    /// Loop back to the start at the end instead of stopping.
     looping: bool,
-    /// Exponentially-smoothed generation rate, triangles per second of kernel
-    /// wall time (build only, excluding upload and paint).
     tri_rate: f64,
-    /// Triangles in the frame currently shown.
     tris: usize,
-    /// Build wall time of the frame currently shown, seconds.
     build_secs: f64,
 }
 
@@ -251,18 +194,11 @@ impl App {
         app
     }
 
-    /// Rebuild the solid, tessellate, and upload; optionally reframe the camera.
-    /// When the debugger is active, the solid is built from its enabled subset
-    /// of the model's program; otherwise every logical bin is built on its own
-    /// so one bin that fails cannot take the preview down with it.
     fn regenerate(&mut self, reframe: bool) {
         if self.program_dirty {
             self.debugger.refresh(&self.params);
             self.program_dirty = false;
         }
-        // The debugger runs an arbitrary op subset, which is *expected* to be
-        // non-manifold, so it reports its own status and nothing it produces is
-        // flagged. Only the normal preview path builds per bin and can fail.
         let dbg_solid = self.debugger.build_solid();
         let (verts, errors) = match &dbg_solid {
             Some(s) => (flagged(&tessellate(s, PREVIEW_RES), false), Vec::new()),
@@ -276,12 +212,8 @@ impl App {
         }
         self.tri_count = verts.len() / (3 * MESH_STRIDE);
 
-        // The debugger's wireframe needs the B-rep itself, not the mesh.
         let mut wf = wireframe::Wireframe::default();
         if self.debugger.is_shown() {
-            // Sketches first: labels are thinned in insertion order, and there
-            // are far fewer sketch tags than B-rep ones, so letting the B-rep
-            // edges go first would starve them of screen cells entirely.
             for (profile, plane) in self.debugger.sketch_planes() {
                 wf.add_sketch(profile, plane, PREVIEW_RES, wireframe::SKETCH_BLACK);
             }
@@ -298,17 +230,14 @@ impl App {
         self.dirty = false;
     }
 
-    /// Start the Bad Apple demo: frame the camera on the plate once and reset
-    /// the clock so playback begins at frame 0.
     fn badapple_start(&mut self, time: f64) {
         let (min, max) = badapple::bounds();
         self.camera.frame(Vec3::from_array(min), Vec3::from_array(max));
-        // A gentle three-quarter view reads better than dead-on.
         self.camera.yaw = 1.05;
         self.camera.pitch = 0.35;
         self.badapple = Some(BadApple {
             worker: badapple::Worker::spawn(),
-            frame: usize::MAX, // force the first build
+            frame: usize::MAX,
             requested: None,
             epoch: time,
             looping: true,
@@ -317,19 +246,15 @@ impl App {
             build_secs: 0.0,
         });
         self.errors.clear();
-        self.labels.clear(); // no debugger tags floating over the demo
+        self.labels.clear();
     }
 
-    /// Advance the demo. The worker builds off-thread: we upload whatever frame
-    /// it has finished, then queue the frame the wall clock is now on (dropping
-    /// any it was too slow to reach). Returns `true` while playback continues.
     fn badapple_tick(&mut self, time: f64) -> bool {
         if self.badapple.is_none() {
             return false;
         }
         let n = badapple::frame_count();
 
-        // End-of-clip: loop or stop.
         {
             let ba = self.badapple.as_mut().unwrap();
             let elapsed = (time - ba.epoch).max(0.0);
@@ -338,13 +263,12 @@ impl App {
                     ba.epoch = time;
                 } else {
                     self.badapple = None;
-                    self.dirty = true; // fall back to the normal model next frame
+                    self.dirty = true;
                     return false;
                 }
             }
         }
 
-        // Upload the most recent finished frame, if the worker produced one.
         if let Some(r) = self.badapple.as_ref().unwrap().worker.try_recv() {
             let ba = self.badapple.as_mut().unwrap();
             ba.requested = None;
@@ -352,7 +276,6 @@ impl App {
             ba.tris = r.tris;
             ba.build_secs = r.build_secs;
             let inst = if r.build_secs > 0.0 { r.tris as f64 / r.build_secs } else { 0.0 };
-            // EMA so the readout is legible instead of flickering frame to frame.
             ba.tri_rate = if ba.tri_rate == 0.0 { inst } else { 0.85 * ba.tri_rate + 0.15 * inst };
             self.tri_count = r.tris;
             let mut rr = self.renderer.lock().unwrap();
@@ -360,7 +283,6 @@ impl App {
             rr.upload_lines(&self.gl, &[]);
         }
 
-        // Queue the current target frame if the worker is idle and it's new.
         let ba = self.badapple.as_mut().unwrap();
         let elapsed = (time - ba.epoch).max(0.0);
         let target = ((elapsed * badapple::FPS) as usize).min(n - 1);
@@ -372,8 +294,6 @@ impl App {
     }
 
     fn export_stl(&mut self) {
-        // A model that will not build has nothing to write. Refusing here is
-        // what stops the export from being the one path that still crashes.
         if !self.errors.is_empty() {
             self.status = "Cannot export: fix the failed bin first".into();
             return;
@@ -398,7 +318,6 @@ impl App {
         }
     }
 
-    /// Split-aware export: one STL per printable piece, into a folder.
     fn export_pieces(&mut self) {
         if !self.errors.is_empty() {
             self.status = "Cannot export: fix the failed bin first".into();
@@ -456,8 +375,6 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ui, |ui| self.viewport(ui));
 
-        // The demo owns the geometry while it runs: drive it from the wall
-        // clock, keep repainting, and skip the normal model rebuild entirely.
         if self.badapple.is_some() {
             let time = ui.input(|i| i.time);
             self.badapple_tick(time);
@@ -482,7 +399,6 @@ impl App {
         ui.heading("Gridfinity");
         ui.add_space(4.0);
 
-        // ── Bad Apple!! kernel stress test ────────────────────────────────
         ui.horizontal(|ui| {
             let playing = self.badapple.is_some();
             let label = if playing { "■ Stop Bad Apple" } else { "▶ Bad Apple!!" };
@@ -513,14 +429,11 @@ impl App {
                 .weak(),
             );
             ui.separator();
-            // The rest of the panel drives the model, which is paused; the
-            // player owns the viewport until it is stopped.
             return;
         }
 
         let p = &mut self.params;
 
-        // ── Debugger toggle ───────────────────────────────────────────────
         ui.horizontal(|ui| {
             let mut shown = self.debugger.is_shown();
             if ui.checkbox(&mut shown, "Construction debugger").changed() {
@@ -529,7 +442,6 @@ impl App {
             }
         });
 
-        // ── Layout editor ────────────────────────────────────────────────
         ui.horizontal(|ui| {
             for (tool, label) in [
                 (Tool::Cells, "Cells"),
@@ -604,7 +516,6 @@ impl App {
         changed |= ui.add(egui::Slider::new(&mut p.cavity_corner_radius, 0.0..=8.0).text("corner r")).changed();
         changed |= ui.add(egui::Slider::new(&mut p.floor_fillet, 0.0..=6.0).text("floor fillet")).changed();
 
-        // ── Per-bin sloped floor ─────────────────────────────────────────
         ui.separator();
         ui.label(format!("Sloped floor (bin {})", self.editor.active_bin + 1));
         if let Some(bin) = p.bins.get_mut(self.editor.active_bin) {
@@ -641,7 +552,6 @@ impl App {
             changed |= ui.selectable_value(&mut p.mode, Mode::Baseplate, "Baseplate").changed();
         });
 
-        // ── Printer / bed fit ────────────────────────────────────────────
         ui.separator();
         ui.label("Printer");
         egui::ComboBox::from_id_salt("printer")
@@ -678,7 +588,6 @@ impl App {
             }
         }
 
-        // ── Export ───────────────────────────────────────────────────────
         ui.separator();
         ui.horizontal(|ui| {
             if ui.button("Export STL…").clicked() {
@@ -717,8 +626,6 @@ impl App {
 
         let cam = self.camera;
         let renderer = self.renderer.clone();
-        // The failed-bin glow pulses, so while anything is flagged the viewport
-        // has to keep animating; otherwise egui only repaints on input.
         let time = ui.input(|i| i.time) as f32;
         if !self.errors.is_empty() {
             ui.ctx().request_repaint();
@@ -728,8 +635,6 @@ impl App {
         self.paint_error_banner(ui, rect);
     }
 
-    /// Report failed bins over the viewport: what broke, and which bin the red
-    /// glow belongs to. Anchored bottom-left so it never covers the model.
     fn paint_error_banner(&self, ui: &mut egui::Ui, rect: egui::Rect) {
         if self.errors.is_empty() {
             return;
@@ -766,15 +671,6 @@ impl App {
             });
     }
 
-    /// Paint the overlay's type tags as 2D text tracking their 3D anchors.
-    ///
-    /// Text goes through egui rather than GL: it rides on top of the paint
-    /// callback, so it needs no font atlas of its own and stays crisp.
-    ///
-    /// A default bin has hundreds of edges, so labels are thinned by claiming a
-    /// coarse screen-space cell per label and dropping any that land in a taken
-    /// cell. Without that the tags overlap into an unreadable smear at anything
-    /// but extreme zoom; with it, density self-adjusts as you zoom in.
     fn paint_labels(&self, ui: &egui::Ui, rect: egui::Rect) {
         if self.labels.is_empty() {
             return;
@@ -810,10 +706,6 @@ mod tests {
     use super::*;
     use gridfinity_cad::layout::GridCell;
 
-    /// A parameter set the model cannot build. `wall_thickness` this small at
-    /// one height unit leaves the cavity degenerate, and the model panics
-    /// rather than returning an `Err` — which is exactly the case the preview
-    /// has to survive.
     fn broken() -> Params {
         Params { height_units: 1, wall_thickness: 0.4, floor_fillet: 0.0,
                  cavity_corner_radius: 0.0, ..Params::default() }
@@ -828,7 +720,6 @@ mod tests {
         (good, bad)
     }
 
-    /// The whole point: invalid geometry must not take the process down.
     #[test]
     fn a_bin_that_cannot_be_built_is_reported_not_fatal() {
         let (verts, errors) = build_scene(&broken());
@@ -840,8 +731,6 @@ mod tests {
         assert_eq!(good, 0, "nothing else built, so nothing should be unflagged");
     }
 
-    /// A good layout stays completely unflagged — the glow must not bleed into
-    /// the normal case.
     #[test]
     fn a_valid_layout_reports_nothing_and_flags_nothing() {
         let (verts, errors) = build_scene(&Params::default());
@@ -851,8 +740,6 @@ mod tests {
         assert_eq!(bad, 0, "a healthy bin must not be flagged");
     }
 
-    /// One bad bin must not cost the others their geometry — that is what
-    /// building per bin buys, versus one program over the whole layout.
     #[test]
     fn a_failed_bin_does_not_take_its_neighbours_with_it() {
         let mut p = broken();
@@ -864,7 +751,6 @@ mod tests {
         assert_eq!(errors.len(), 2, "both bins share the bad parameters");
         assert_eq!(errors.iter().map(|e| e.bin).collect::<Vec<_>>(), vec![0, 1]);
 
-        // Now make only the second bin's parameters workable.
         let mut ok = Params::default();
         ok.bins = p.bins.clone();
         let (ok_verts, ok_errors) = build_scene(&ok);
@@ -872,8 +758,6 @@ mod tests {
         assert!(ok_verts.len() > verts.len(), "real geometry beats placeholders");
     }
 
-    /// The placeholder has to land where the bin is, or the glow points at the
-    /// wrong part of the layout.
     #[test]
     fn the_placeholder_sits_on_the_failed_bin_footprint() {
         let mut p = broken();

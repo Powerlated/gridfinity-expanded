@@ -1,53 +1,22 @@
-//! Lightweight instrumentation for the heavy parts of the pipeline.
-//!
-//! The point is to answer "where did that rebuild go?" with numbers rather than
-//! intuition — which is why the metric set is deliberately small and names the
-//! operations that are actually expensive (region booleans, the closed-form
-//! seg/seg solve, builder interning, blending, tessellation) instead of trying
-//! to be a general profiler.
-//!
-//! **Off by default.** Every entry point begins with one relaxed load of
-//! [`ENABLED`], so an uninstrumented build pays a predictable-branch atomic read
-//! and nothing else — no timer, no allocation, no contention. The debugger
-//! turns it on around a rebuild and off again.
-//!
-//! Counters are global relaxed atomics. Geometry is built on one thread, so
-//! relaxed is sufficient and there is no synchronisation to pay for; if a build
-//! is ever parallelised the totals stay correct (sums of per-thread work), only
-//! the wall-clock readings would need revisiting.
 
 use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
 
-/// What gets counted. Keep this short: each variant is a row in the debugger,
-/// and a metric nobody reads is overhead with a UI cost attached.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Metric {
-    /// 2D boolean classification — the core of every region op.
     SplitRegions,
-    /// Closed-form seg/seg intersection, the inner loop of the above.
     SegSegPoints,
-    /// Closed-form loop/loop distance (island clearance tests).
     MinLoopDistance,
-    /// Point-in-loop, called per classified piece.
     PointInSegs,
-    /// Vertex interning (hash + weld).
     BuilderVertex,
-    /// Arc-edge interning.
     BuilderArc,
-    /// Face construction.
     BuilderFace,
-    /// Rolling-ball blending, including its solid rebuild.
     FilletEdges,
-    /// Analytic faces to triangles.
     Tessellate,
-    /// Slab stack resolution.
     BuildSlabs,
-    /// Slab stack emission into an existing builder.
     EmitSlabs,
-    /// Surface/surface intersection dispatch.
     IntersectSurfaces,
 }
 
@@ -93,22 +62,9 @@ const ZERO: AtomicU64 = AtomicU64::new(0);
 static CALLS: [AtomicU64; N] = [ZERO; N];
 static NANOS: [AtomicU64; N] = [ZERO; N];
 
-/// Allocations credited to each metric, **exclusive**: an allocation is charged
-/// to the innermost open [`scope`] at the moment it happens, so — unlike
-/// [`NANOS`], which nest — these columns partition the attributed allocations
-/// rather than double-counting them. Allocations made outside every scope
-/// (most construction, e.g. the transient `Loop` Vecs) land in neither array;
-/// the shortfall against the global [`ALLOCS`]/[`ALLOC_BYTES`] total is exactly
-/// that unattributed churn, which is what the SoA rework is meant to remove.
 static ALLOC_CALLS_BY: [AtomicU64; N] = [ZERO; N];
 static ALLOC_BYTES_BY: [AtomicU64; N] = [ZERO; N];
 
-/// Fixed-depth stack of the currently-open metric scopes, innermost last, one
-/// per thread. **Deliberately allocation-free** (a plain `Copy` array in a
-/// `Cell`, never a `Vec`): it is read and written from inside the global
-/// allocator, so pushing a scope must not itself allocate or the allocator
-/// re-enters. Overflow past `STACK_MAX` silently stops nesting deeper — an
-/// attribution gap, never a crash.
 const STACK_MAX: usize = 32;
 
 #[derive(Clone, Copy)]
@@ -148,7 +104,6 @@ fn pop_scope() {
     });
 }
 
-/// Index of the innermost open scope, if any.
 fn innermost_scope() -> Option<usize> {
     SCOPES.with(|s| {
         let st = s.get();
@@ -156,9 +111,6 @@ fn innermost_scope() -> Option<usize> {
     })
 }
 
-/// Allocations and bytes since the last [`reset`], filled in by
-/// [`CountingAlloc`]. Separate from the metric table because allocation is a
-/// property of the whole rebuild, not of one operation.
 static ALLOCS: AtomicU64 = AtomicU64::new(0);
 static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 static PEAK_LIVE: AtomicU64 = AtomicU64::new(0);
@@ -186,11 +138,6 @@ pub fn reset() {
     PEAK_LIVE.store(0, Relaxed);
 }
 
-/// Count a call without timing it.
-///
-/// For leaves hot enough that reading the clock would dominate what is being
-/// measured — `point_in_segs` runs millions of times in a rebuild, and two
-/// `Instant::now()` calls around it would cost more than the function.
 #[inline]
 pub fn count(m: Metric) {
     if enabled() {
@@ -198,11 +145,6 @@ pub fn count(m: Metric) {
     }
 }
 
-/// Time a call for as long as the returned guard lives.
-///
-/// Timings **nest**: `split_regions` includes the `seg_seg_points` beneath it,
-/// so the columns do not sum to the total and should be read as "time spent
-/// anywhere under this operation".
 #[inline]
 pub fn scope(m: Metric) -> Scope {
     if enabled() {
@@ -221,8 +163,6 @@ pub struct Scope {
 impl Drop for Scope {
     fn drop(&mut self) {
         if let Some(t) = self.start {
-            // Pop before recording so a re-entrant allocation here is not
-            // mis-credited to a scope that is already closing.
             pop_scope();
             CALLS[self.m as usize].fetch_add(1, Relaxed);
             NANOS[self.m as usize].fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
@@ -230,10 +170,6 @@ impl Drop for Scope {
     }
 }
 
-/// One metric's totals since the last [`reset`].
-///
-/// `nanos` nest (time spent anywhere under the op); `alloc_calls`/`alloc_bytes`
-/// are exclusive (charged to the innermost open scope) — see [`ALLOC_CALLS_BY`].
 pub struct Row {
     pub name: &'static str,
     pub calls: u64,
@@ -242,15 +178,12 @@ pub struct Row {
     pub alloc_bytes: u64,
 }
 
-/// Allocation totals since the last [`reset`].
 pub struct Allocs {
     pub count: u64,
     pub bytes: u64,
     pub peak_live_bytes: u64,
 }
 
-/// Every metric with a non-zero call count, heaviest first (by time, then
-/// calls, so untimed leaves still sort sensibly).
 pub fn snapshot() -> Vec<Row> {
     let mut rows: Vec<Row> = Metric::ALL
         .iter()
@@ -275,19 +208,6 @@ pub fn allocs() -> Allocs {
     }
 }
 
-/// A `GlobalAlloc` wrapper that counts allocations while [`enabled`].
-///
-/// Install it in the *binary* (a library must not choose the allocator for its
-/// dependents):
-///
-/// ```ignore
-/// #[global_allocator]
-/// static ALLOC: CountingAlloc<std::alloc::System> = CountingAlloc::new(std::alloc::System);
-/// ```
-///
-/// `peak_live_bytes` tracks allocated-minus-freed, so it reports the high-water
-/// mark of a rebuild rather than its churn — the two answer different questions
-/// and the churn (`bytes`) is usually the actionable one here.
 pub struct CountingAlloc<A> {
     inner: A,
 }
@@ -304,11 +224,6 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for CountingAlloc<A> {
             let size = layout.size() as u64;
             ALLOCS.fetch_add(1, Relaxed);
             ALLOC_BYTES.fetch_add(size, Relaxed);
-            // `saturating_add`: geometry is single-threaded in production, but the
-            // test harness installs this allocator and runs tests in parallel, so
-            // the live/peak counters can race. Saturating keeps it panic-free and
-            // bounded (peak is then approximate under concurrency); the churn
-            // totals above use fetch_add and stay exact regardless of ordering.
             let live = LIVE.fetch_add(size, Relaxed).saturating_add(size);
             PEAK_LIVE.fetch_max(live, Relaxed);
             if let Some(mi) = innermost_scope() {
@@ -321,8 +236,6 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for CountingAlloc<A> {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if enabled() {
-            // CAS loop so a concurrent dealloc can't drive LIVE below zero and
-            // wrap to a huge value (which would then overflow the add above).
             let size = layout.size() as u64;
             let _ = LIVE.fetch_update(Relaxed, Relaxed, |v| Some(v.saturating_sub(size)));
         }
@@ -334,12 +247,8 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for CountingAlloc<A> {
 mod tests {
     use super::*;
 
-    /// The counters are global, so these tests cannot run concurrently — one
-    /// toggling `ENABLED` would corrupt the other's reading.
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Disabled is the default and must record nothing, so a normal build is
-    /// unaffected by the presence of the instrumentation.
     #[test]
     fn disabled_records_nothing() {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -366,9 +275,6 @@ mod tests {
         let rows = snapshot();
         set_enabled(false);
 
-        // `ENABLED` is global, so tests running in parallel are also counting
-        // into these totals. Assert what pollution cannot break: our own calls
-        // are included, and the ordering contract holds.
         let pis = rows.iter().find(|r| r.name == Metric::PointInSegs.name()).expect("counted");
         assert!(pis.calls >= 2, "want >=2 calls, got {}", pis.calls);
         let tess = rows.iter().find(|r| r.name == Metric::Tessellate.name()).expect("timed");
@@ -380,8 +286,6 @@ mod tests {
         );
     }
 
-    /// An allocation made inside a scope is charged to that scope; the
-    /// attribution is exclusive, so a deeper nested scope keeps its own bytes.
     #[test]
     fn allocations_are_charged_to_the_innermost_scope() {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -389,12 +293,10 @@ mod tests {
         reset();
         {
             let _outer = scope(Metric::SplitRegions);
-            // Attributed to SplitRegions.
             let a: Vec<u8> = Vec::with_capacity(4096);
             std::hint::black_box(&a);
             {
                 let _inner = scope(Metric::SegSegPoints);
-                // Attributed to SegSegPoints, not SplitRegions.
                 let b: Vec<u8> = Vec::with_capacity(8192);
                 std::hint::black_box(&b);
             }
@@ -404,8 +306,6 @@ mod tests {
 
         let outer = rows.iter().find(|r| r.name == Metric::SplitRegions.name()).expect("charged");
         let inner = rows.iter().find(|r| r.name == Metric::SegSegPoints.name()).expect("charged");
-        // The stack is global; parallel tests may add to these, so assert our
-        // own contribution is present rather than an exact byte count.
         assert!(outer.alloc_bytes >= 4096, "outer got {} B", outer.alloc_bytes);
         assert!(inner.alloc_bytes >= 8192, "inner got {} B", inner.alloc_bytes);
         assert!(outer.alloc_calls >= 1 && inner.alloc_calls >= 1);
