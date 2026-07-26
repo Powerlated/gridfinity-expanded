@@ -209,13 +209,24 @@ pub fn segs_bbox(segs: &[Seg]) -> Aabb {
 
 pub fn point_in_segs(pt: Vec2, segs: &[Seg]) -> bool {
     crate::kernel::perf::count(crate::kernel::perf::Metric::PointInSegs);
-    let mut inside = false;
+    let mut n = 0u32;
+    for seg in segs {
+        n += seg_crossings(pt, seg);
+    }
+    n % 2 == 1
+}
+
+/// How many times a rightward ray from `pt` crosses `seg`. Parity over a closed
+/// loop's segments is the containment test, so a caller holding a spatial index
+/// can sum this over candidates instead of walking every segment.
+pub fn seg_crossings(pt: Vec2, seg: &Seg) -> u32 {
+    let mut hits = 0u32;
     let mut cross = |y0: f32, y1: f32, x: f32| {
         if (y0 > pt.y) != (y1 > pt.y) && x > pt.x {
-            inside = !inside;
+            hits += 1;
         }
     };
-    for seg in segs {
+    {
         match *seg {
             Seg::Line { a, b } => {
                 if (a.y > pt.y) != (b.y > pt.y) {
@@ -263,7 +274,7 @@ pub fn point_in_segs(pt: Vec2, segs: &[Seg]) -> bool {
             }
         }
     }
-    inside
+    hits
 }
 
 pub fn reverse_loop(segs: &[Seg]) -> Vec<Seg> {

@@ -1322,8 +1322,6 @@ fn plan_piece(
             )
         })
         .collect();
-    let peg_tops: Vec<(GridCell, Vec<Seg>)> =
-        peg_profiles.iter().map(|(c, _, _, t)| (*c, t.clone())).collect();
     let outer_rings: Vec<(Vec<Seg>, Vec<bool>)> = o
         .loops
         .iter()
@@ -1560,16 +1558,15 @@ fn plan_piece(
     }
 
     {
-        let (tops, rings, shared_c) = (peg_tops.clone(), outer_rings.clone(), shared.clone());
         let mut free: Vec<Seg> = Vec::new();
-        for (c, s_top) in &tops {
-            for (k, seg) in s_top.iter().enumerate() {
-                if peg_seg_free(&s_top[k], *c, &shared_c) {
+        for (c, _, _, s_top) in &peg_profiles {
+            for seg in s_top {
+                if peg_seg_free(seg, *c, &shared) {
                     free.push(*seg);
                 }
             }
         }
-        for (segs, shared_flags) in &rings {
+        for (segs, shared_flags) in &outer_rings {
             for (k, seg) in segs.iter().enumerate() {
                 if !shared_flags[k] {
                     free.push(seg.reversed());
@@ -1612,14 +1609,15 @@ fn plan_piece(
         );
     }
     {
-        let (tw, it, rh) = (top_walls.clone(), island_tops.clone(), rim_holes.clone());
+        let (tw, it, rh) = (&top_walls, &island_tops, &rim_holes);
+        let (tw, it, rh) = (tw.as_slice(), it.as_slice(), rh.as_slice());
         let mut outers: Vec<(Vec<Seg>, Vec<Vec<Seg>>)> = Vec::new();
-        for segs in &tw {
+        for segs in tw {
             if loop_area(segs) > 0.0 {
                 outers.push((segs.clone(), Vec::new()));
             }
         }
-        for segs in &it {
+        for segs in it {
             outers.push((segs.clone(), Vec::new()));
         }
         let holes: Vec<Vec<Seg>> = tw
@@ -1998,42 +1996,112 @@ fn stitch_loops_2d(free: Vec<Seg>) -> Vec<(Vec<Seg>, Vec<Vec<Seg>>)> {
     if loops.is_empty() {
         return Vec::new();
     }
-    let n = loops.len();
     let bbox: Vec<Aabb> = loops.iter().map(|l| segs_bbox(l)).collect();
-    let mut by_area: Vec<usize> = (0..n).collect();
-    by_area.sort_unstable_by(|&a, &b| bbox[b].area().total_cmp(&bbox[a].area()));
-    let containers: Vec<Vec<usize>> = (0..n)
-        .map(|i| {
-            let pt = loops[i][0].start();
-            let a_i = bbox[i].area();
-            by_area
-                .iter()
-                .copied()
-                .take_while(|&j| bbox[j].area() >= a_i)
-                .filter(|&j| j != i && bbox[j].contains(pt) && point_in_segs(pt, &loops[j]))
-                .collect()
-        })
-        .collect();
+    let containers = containment(&loops, &bbox);
+    let depth = |i: usize| containers[i].len();
+
     let mut out: Vec<(Vec<Seg>, Vec<Vec<Seg>>)> = Vec::new();
     let mut out_idx: HashMap<usize, usize> = HashMap::new();
     for (i, lp) in loops.iter().enumerate() {
-        if containers[i].len() % 2 == 0 {
+        if depth(i) % 2 == 0 {
             out_idx.insert(i, out.len());
             out.push((lp.clone(), Vec::new()));
         }
     }
     for (i, lp) in loops.iter().enumerate() {
-        if containers[i].len() % 2 == 1 {
+        if depth(i) % 2 == 1 {
             let owner = *containers[i]
                 .iter()
-                .filter(|&&j| containers[j].len() % 2 == 0)
-                .max_by_key(|&&j| containers[j].len())
+                .filter(|&&j| depth(j) % 2 == 0)
+                .max_by_key(|&&j| depth(j))
                 .expect("hole loop without containing outer");
             let slot = out_idx[&owner];
             out[slot].1.push(lp.clone());
         }
     }
     out
+}
+
+/// For every loop, the loops that contain it.
+///
+/// A bin's bridge underside stitches into one loop per cell, and every one of
+/// those has the same bounding-box area, so ordering candidates by area prunes
+/// nothing and the scan is quadratic in cells. Bucketing the boxes on a uniform
+/// grid keeps each query to its own neighbourhood; loops whose box spans an
+/// unreasonable share of the grid are held aside and tested every time, which
+/// bounds the insertion cost without losing candidates.
+fn containment(loops: &[Vec<Seg>], bbox: &[Aabb]) -> Vec<Vec<usize>> {
+    const MAX_CELLS: usize = 16;
+    let n = loops.len();
+    let all = bbox.iter().fold(Aabb::EMPTY, |a, b| a.union(*b));
+    let side = (all.max - all.min).max_element();
+    let k = (n as f32).sqrt().ceil().clamp(1.0, 256.0);
+    let inv = if side > 0.0 { k / side } else { 0.0 };
+    let (nx, ny) = (
+        (((all.max.x - all.min.x) * inv) as usize + 1).min(256),
+        (((all.max.y - all.min.y) * inv) as usize + 1).min(256),
+    );
+    let col = |x: f32| (((x - all.min.x) * inv).max(0.0) as usize).min(nx - 1);
+    let row = |y: f32| (((y - all.min.y) * inv).max(0.0) as usize).min(ny - 1);
+
+    let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); nx * ny];
+    let mut wide: Vec<u32> = Vec::new();
+    for (j, b) in bbox.iter().enumerate() {
+        let (i0, i1) = (col(b.min.x), col(b.max.x));
+        let (j0, j1) = (row(b.min.y), row(b.max.y));
+        if (i1 - i0 + 1) * (j1 - j0 + 1) > MAX_CELLS {
+            wide.push(j as u32);
+            continue;
+        }
+        for i in i0..=i1 {
+            for r in j0..=j1 {
+                buckets[i * ny + r].push(j as u32);
+            }
+        }
+    }
+
+    // A wide loop is tested by every query, and for a whole-bin outline that is
+    // hundreds of segments each time. Bucketing its segments by the rows they
+    // span leaves only the handful that can cross the query ray.
+    let rows: Vec<Vec<Vec<u32>>> = wide
+        .iter()
+        .map(|&j| {
+            let mut rs: Vec<Vec<u32>> = vec![Vec::new(); ny];
+            for (si, s) in loops[j as usize].iter().enumerate() {
+                let b = s.bbox();
+                for r in row(b.min.y)..=row(b.max.y) {
+                    rs[r].push(si as u32);
+                }
+            }
+            rs
+        })
+        .collect();
+
+    (0..n)
+        .map(|i| {
+            let pt = loops[i][0].start();
+            let mut out: Vec<usize> = buckets[col(pt.x) * ny + row(pt.y)]
+                .iter()
+                .map(|&j| j as usize)
+                .filter(|&j| j != i && bbox[j].contains(pt) && point_in_segs(pt, &loops[j]))
+                .collect();
+            for (w, &j) in wide.iter().enumerate() {
+                let j = j as usize;
+                if j == i || !bbox[j].contains(pt) {
+                    continue;
+                }
+                crate::kernel::perf::count(crate::kernel::perf::Metric::PointInSegs);
+                let hits: u32 = rows[w][row(pt.y)]
+                    .iter()
+                    .map(|&si| crate::kernel::sketch::seg_crossings(pt, &loops[j][si as usize]))
+                    .sum();
+                if hits % 2 == 1 {
+                    out.push(j);
+                }
+            }
+            out
+        })
+        .collect()
 }
 
 
