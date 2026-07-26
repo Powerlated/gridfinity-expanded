@@ -267,6 +267,89 @@ mod tests {
         println!("=> 500 bins/frame = {:.1} ms/frame = {:.1} fps", per * 500.0 * 1e3, 1.0 / (per * 500.0));
     }
 
+    /// Where a frame's time actually goes: per-metric table over a sample of
+    /// frames, plus the blob-size distribution that drives it.
+    #[test]
+    #[ignore]
+    fn profile() {
+        use gridfinity_cad::kernel::perf;
+        // The first 10 seconds at the source rate: a real playback window, so
+        // "ms/frame" here is directly the number that has to reach 33.3.
+        let sample: Vec<usize> = (0..(10.0 * FPS) as usize).collect();
+
+        // Blob distribution first (uninstrumented).
+        let (mut blobs, mut cells, mut biggest) = (0usize, 0usize, 0usize);
+        for &f in &sample {
+            for c in components(&FRAMES[f * FRAME_BYTES..(f + 1) * FRAME_BYTES]) {
+                blobs += 1;
+                cells += c.len();
+                biggest = biggest.max(c.len());
+            }
+        }
+        println!(
+            "{} frames: {blobs} blobs ({:.1}/frame), {cells} cells ({:.1}/frame), biggest blob {biggest} cells",
+            sample.len(),
+            blobs as f64 / sample.len() as f64,
+            cells as f64 / sample.len() as f64,
+        );
+
+        for &f in &sample {
+            let _ = build_frame(f);
+        } // warm
+
+        perf::set_enabled(true);
+        perf::reset();
+        let t = Instant::now();
+        let mut tris = 0;
+        let mut each: Vec<f64> = Vec::new();
+        for &f in &sample {
+            let ft = Instant::now();
+            tris += build_frame(f).1;
+            each.push(ft.elapsed().as_secs_f64() * 1e3);
+        }
+        let secs = t.elapsed().as_secs_f64();
+        let mut sorted = each.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |p: f64| sorted[((sorted.len() - 1) as f64 * p) as usize];
+        println!(
+            "\nper-frame ms: p50 {:.1}  p90 {:.1}  p99 {:.1}  max {:.1}  ({} of {} frames over 33.3)",
+            pct(0.50),
+            pct(0.90),
+            pct(0.99),
+            sorted[sorted.len() - 1],
+            each.iter().filter(|&&m| m > 33.3).count(),
+            each.len(),
+        );
+        let rows = perf::snapshot();
+        let allocs = perf::allocs();
+        perf::set_enabled(false);
+
+        println!(
+            "\n{:.1} ms/frame, {tris} tris ({:.0}/frame), {:.2}M tri/s",
+            secs / sample.len() as f64 * 1e3,
+            tris as f64 / sample.len() as f64,
+            tris as f64 / secs / 1e6
+        );
+        println!("{:<28} {:>10} {:>9} {:>6}  {:>10} {:>9}", "metric", "calls", "ms", "%", "allocs", "MB");
+        for r in &rows {
+            println!(
+                "{:<28} {:>10} {:>9.1} {:>5.1}%  {:>10} {:>9.1}",
+                r.name,
+                r.calls,
+                r.nanos as f64 / 1e6,
+                r.nanos as f64 / 1e9 / secs * 100.0,
+                r.alloc_calls,
+                r.alloc_bytes as f64 / 1e6,
+            );
+        }
+        println!(
+            "total allocs {} ({:.1} MB churn, {:.1} MB peak)",
+            allocs.count,
+            allocs.bytes as f64 / 1e6,
+            allocs.peak_live_bytes as f64 / 1e6
+        );
+    }
+
     /// Not a gate — prints the live throughput the GUI will show.
     #[test]
     #[ignore]
