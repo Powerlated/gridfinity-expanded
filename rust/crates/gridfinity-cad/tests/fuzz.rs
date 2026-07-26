@@ -1,0 +1,494 @@
+//! A reusable geometry fuzzer.
+//!
+//! Randomised `Params` in, soundness verdict out. Every case goes through the
+//! full chain the model promises to uphold:
+//!
+//! 1. `try_build` — must not `Err` and must not panic (the model layer still
+//!    panics on some degenerate combinations, so the unwind is caught, not
+//!    trusted away).
+//! 2. `Solid::validate` — the cheap manifold invariant.
+//! 3. [`audit`] — the heavy *geometric* soundness check.
+//! 4. `tessellation_leaks` — the mesh must close. This is verification of an
+//!    analytic result, never a modelling step (see the hard rule in
+//!    `CLAUDE.md`).
+//!
+//! Failures are grouped by a normalised signature so a hundred instances of one
+//! defect report as one line, each with a **paste-ready `Params` literal** for
+//! the shrunk case, so a find turns straight into a regression test.
+//!
+//! ```text
+//! cargo test -p gridfinity-cad --test fuzz                       # the guarded budget
+//! FUZZ_CASES=5000 cargo test -p gridfinity-cad --test fuzz -- --ignored --nocapture
+//! FUZZ_SEED=12345 FUZZ_CASES=2000 cargo test -p gridfinity-cad --test fuzz -- --ignored --nocapture
+//! ```
+//!
+//! Deterministic: a seed reproduces a run exactly. Adding a generator arm
+//! reshuffles the stream, so quote the *case literal* in a bug report, never
+//! "seed 7 case 412".
+
+use gridfinity_cad::gridfinity::{
+    self, BinSlope, InnerWall, LogicalBin, Mode, Params, SlopeDir, rect_cells,
+};
+use gridfinity_cad::kernel::tess::tessellate;
+use gridfinity_cad::layout::{GridCell, GridEdge, Orientation};
+use gridfinity_cad::{audit, tessellation_leaks};
+use std::collections::BTreeMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
+// -- the generator -------------------------------------------------------
+
+/// xorshift64*, so a run is reproducible without pulling in `rand`.
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: u64) -> Rng {
+        Rng(seed | 1)
+    }
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    /// Uniform in `[0, n)`.
+    fn below(&mut self, n: u32) -> u32 {
+        (self.next_u64() >> 32) as u32 % n.max(1)
+    }
+    /// Uniform in `[lo, hi]`.
+    fn range(&mut self, lo: f32, hi: f32) -> f32 {
+        let t = (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32;
+        lo + (hi - lo) * t
+    }
+    /// Snapped to `step`, which keeps values printing as short literals and
+    /// makes an identical case likelier to recur across seeds.
+    fn quantised(&mut self, lo: f32, hi: f32, step: f32) -> f32 {
+        (self.range(lo, hi) / step).round() * step
+    }
+    fn chance(&mut self, num: u32, den: u32) -> bool {
+        self.below(den) < num
+    }
+    fn pick<T: Copy>(&mut self, xs: &[T]) -> T {
+        xs[self.below(xs.len() as u32) as usize]
+    }
+}
+
+/// Which axes of the parameter space a run explores. Narrow profiles keep a
+/// regression guard pinned to the area it guards; `Broad` is the explorer.
+#[derive(Clone, Copy, PartialEq)]
+enum Profile {
+    /// Stock bin, random free-form inner walls. The area the crossing/notching
+    /// divider work lives in.
+    InnerWalls,
+    /// Everything: shape, height, thicknesses, holes, dividers, slope, mode.
+    Broad,
+}
+
+fn gen_cells(rng: &mut Rng) -> Vec<GridCell> {
+    let (gx, gy) = (rng.below(3) + 1, rng.below(3) + 1);
+    let mut cells = rect_cells(gx, gy);
+    // Knock a corner out sometimes: an L needs a reentrant outer corner, which
+    // is where the outer profile and the cavity's concave rounding interact.
+    if cells.len() > 2 && rng.chance(1, 3) {
+        let victim = rng.below(cells.len() as u32) as usize;
+        cells.remove(victim);
+    }
+    cells
+}
+
+/// Inner-wall endpoints are drawn in mm over the layout's bounding box grown by
+/// a margin, so walls land fully inside, notch the boundary, and cross clean
+/// out the far side in roughly equal measure — those are three different code
+/// paths and all three matter.
+fn gen_inner_wall(rng: &mut Rng, cells: &[GridCell]) -> InnerWall {
+    let span = |sel: fn(&GridCell) -> i32| {
+        let hi = cells.iter().map(sel).max().unwrap_or(0);
+        (hi + 1) as f32 * 42.0
+    };
+    let (w, h) = (span(|c| c.x), span(|c| c.y));
+    let m = 12.0;
+    InnerWall {
+        x1: rng.quantised(-m, w + m, 0.5),
+        y1: rng.quantised(-m, h + m, 0.5),
+        x2: rng.quantised(-m, w + m, 0.5),
+        y2: rng.quantised(-m, h + m, 0.5),
+        width: rng.quantised(0.8, 6.0, 0.2),
+        height: if rng.chance(1, 3) {
+            Some(rng.quantised(2.0, 16.0, 0.5))
+        } else {
+            None
+        },
+    }
+}
+
+fn gen_case(rng: &mut Rng, profile: Profile) -> Params {
+    let base = Params::default();
+    let cells = if profile == Profile::Broad {
+        gen_cells(rng)
+    } else {
+        rect_cells(2, 2)
+    };
+
+    let mut p = Params {
+        bins: vec![LogicalBin { cells: cells.clone(), ..Default::default() }],
+        ..base
+    };
+
+    let n_walls = match profile {
+        Profile::InnerWalls => rng.below(3) + 1,
+        Profile::Broad => rng.below(3),
+    };
+    p.inner_walls = (0..n_walls).map(|_| gen_inner_wall(rng, &cells)).collect();
+
+    if profile == Profile::Broad {
+        p.height_units = rng.below(6) + 1;
+        p.wall_thickness = rng.quantised(0.4, 3.0, 0.1);
+        p.cavity_corner_radius = rng.quantised(0.0, 5.0, 0.5);
+        p.floor_fillet = rng.quantised(0.0, 5.6, 0.2);
+        p.magnet_holes = rng.chance(1, 3);
+        p.screw_holes = p.magnet_holes && rng.chance(1, 2);
+        p.mode = if rng.chance(1, 8) { Mode::Baseplate } else { Mode::Bin };
+        if rng.chance(1, 6) {
+            p.bins[0].slope = Some(BinSlope {
+                angle_deg: rng.quantised(2.0, 20.0, 1.0),
+                dir: rng.pick(&[
+                    SlopeDir::PlusX,
+                    SlopeDir::MinusX,
+                    SlopeDir::PlusY,
+                    SlopeDir::MinusY,
+                ]),
+            });
+        }
+        // Divider edges only make sense on interior grid lines.
+        for _ in 0..rng.below(3) {
+            let c = cells[rng.below(cells.len() as u32) as usize];
+            p.divider_edges.push(GridEdge {
+                x: c.x,
+                y: c.y,
+                orientation: if rng.chance(1, 2) { Orientation::H } else { Orientation::V },
+            });
+        }
+    }
+    p
+}
+
+// -- the check -----------------------------------------------------------
+
+/// Run the whole soundness chain. `Ok` means the case is clean.
+///
+/// The panic hook is silenced for the duration: the model panics on some
+/// degenerate combinations by design, and a fuzz run would otherwise emit a
+/// backtrace per case and bury the report.
+fn check(p: &Params) -> Result<(), String> {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let solid = gridfinity::try_build(p).map_err(|e| format!("build error: {e}"))?;
+        solid.validate().map_err(|e| format!("validate: {e}"))?;
+        let report = audit(&solid);
+        if !report.is_ok() {
+            return Err(format!("audit: {report}"));
+        }
+        let leaks = tessellation_leaks(&tessellate(&solid, 6));
+        if !leaks.is_empty() {
+            return Err(format!("tessellation: {} leak(s), first {:?}", leaks.len(), leaks[0]));
+        }
+        Ok(())
+    }));
+    std::panic::set_hook(prev);
+
+    match outcome {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = e
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| e.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string payload>".into());
+            Err(format!("panic: {msg}"))
+        }
+    }
+}
+
+/// Collapse an error to a stable key so instances of one defect group together:
+/// numbers, ids and paths vary case to case and would otherwise split a group
+/// into hundreds of singletons.
+fn signature(err: &str) -> String {
+    let mut out = String::new();
+    let mut in_num = false;
+    for c in err.chars() {
+        if c.is_ascii_digit() || (c == '.' && in_num) {
+            if !in_num {
+                out.push('#');
+                in_num = true;
+            }
+        } else {
+            in_num = false;
+            out.push(c);
+        }
+    }
+    out.chars().take(140).collect()
+}
+
+// -- shrinking -----------------------------------------------------------
+
+/// Greedy shrink: drop each inner wall, then each cell, then walk the scalars
+/// back toward their defaults, keeping any change that preserves the *same*
+/// failure signature. A minimal case is what makes a find quotable as a test.
+fn shrink(p: &Params, sig: &str) -> Params {
+    let same = |q: &Params| check(q).is_err_and(|e| signature(&e) == sig);
+    let mut best = p.clone();
+
+    for i in (0..best.inner_walls.len()).rev() {
+        let mut q = best.clone();
+        q.inner_walls.remove(i);
+        if same(&q) {
+            best = q;
+        }
+    }
+    for i in (0..best.bins[0].cells.len()).rev() {
+        if best.bins[0].cells.len() <= 1 {
+            break;
+        }
+        let mut q = best.clone();
+        q.bins[0].cells.remove(i);
+        if same(&q) {
+            best = q;
+        }
+    }
+    for i in (0..best.divider_edges.len()).rev() {
+        let mut q = best.clone();
+        q.divider_edges.remove(i);
+        if same(&q) {
+            best = q;
+        }
+    }
+    if best.bins[0].slope.is_some() {
+        let mut q = best.clone();
+        q.bins[0].slope = None;
+        if same(&q) {
+            best = q;
+        }
+    }
+    let d = Params::default();
+    for (get, set) in [
+        (
+            (|p: &Params| p.floor_fillet) as fn(&Params) -> f32,
+            (|p: &mut Params, v: f32| p.floor_fillet = v) as fn(&mut Params, f32),
+        ),
+        (|p| p.cavity_corner_radius, |p, v| p.cavity_corner_radius = v),
+        (|p| p.wall_thickness, |p, v| p.wall_thickness = v),
+    ] {
+        let mut q = best.clone();
+        set(&mut q, get(&d));
+        if same(&q) {
+            best = q;
+        }
+    }
+    best
+}
+
+/// A paste-ready `Params` literal. Only fields that differ from the default are
+/// printed, so a report line is short enough to read and complete enough to run.
+fn repro(p: &Params) -> String {
+    let d = Params::default();
+    let mut f: Vec<String> = Vec::new();
+    let cells = &p.bins[0].cells;
+    let slope = p.bins[0].slope;
+    if *cells != d.bins[0].cells || slope.is_some() {
+        let cs: Vec<String> =
+            cells.iter().map(|c| format!("GridCell {{ x: {}, y: {} }}", c.x, c.y)).collect();
+        let sl = match slope {
+            Some(s) => format!(
+                ", slope: Some(BinSlope {{ angle_deg: {:?}, dir: SlopeDir::{:?} }})",
+                s.angle_deg, s.dir
+            ),
+            None => String::new(),
+        };
+        f.push(format!(
+            "bins: vec![LogicalBin {{ cells: vec![{}]{sl}, ..Default::default() }}]",
+            cs.join(", ")
+        ));
+    }
+    if p.height_units != d.height_units {
+        f.push(format!("height_units: {}", p.height_units));
+    }
+    for (name, v, dv) in [
+        ("wall_thickness", p.wall_thickness, d.wall_thickness),
+        ("cavity_corner_radius", p.cavity_corner_radius, d.cavity_corner_radius),
+        ("floor_fillet", p.floor_fillet, d.floor_fillet),
+    ] {
+        if v != dv {
+            f.push(format!("{name}: {v:?}"));
+        }
+    }
+    if p.magnet_holes {
+        f.push("magnet_holes: true".into());
+    }
+    if p.screw_holes {
+        f.push("screw_holes: true".into());
+    }
+    if p.mode != d.mode {
+        f.push(format!("mode: Mode::{:?}", p.mode));
+    }
+    if !p.divider_edges.is_empty() {
+        let es: Vec<String> = p
+            .divider_edges
+            .iter()
+            .map(|e| {
+                format!(
+                    "GridEdge {{ x: {}, y: {}, orientation: Orientation::{:?} }}",
+                    e.x, e.y, e.orientation
+                )
+            })
+            .collect();
+        f.push(format!("divider_edges: vec![{}]", es.join(", ")));
+    }
+    if !p.inner_walls.is_empty() {
+        let ws: Vec<String> = p
+            .inner_walls
+            .iter()
+            .map(|w| {
+                let h = match w.height {
+                    Some(h) => format!("Some({h:?})"),
+                    None => "None".into(),
+                };
+                format!(
+                    "InnerWall {{ x1: {:?}, y1: {:?}, x2: {:?}, y2: {:?}, width: {:?}, height: {h} }}",
+                    w.x1, w.y1, w.x2, w.y2, w.width
+                )
+            })
+            .collect();
+        f.push(format!("inner_walls: vec![{}]", ws.join(", ")));
+    }
+    format!("Params {{ {}, ..Params::default() }}", f.join(", "))
+}
+
+// -- the driver ----------------------------------------------------------
+
+struct Finding {
+    count: usize,
+    repro: String,
+    detail: String,
+}
+
+/// Returns a human-readable report, empty when every case was clean.
+fn run(profile: Profile, cases: u32, seed: u64) -> String {
+    let mut rng = Rng::new(seed);
+    let mut found: BTreeMap<String, Finding> = BTreeMap::new();
+    let mut failures = 0usize;
+
+    for _ in 0..cases {
+        let p = gen_case(&mut rng, profile);
+        let Err(err) = check(&p) else { continue };
+        failures += 1;
+        let sig = signature(&err);
+        match found.get_mut(&sig) {
+            Some(f) => f.count += 1,
+            None => {
+                let small = shrink(&p, &sig);
+                found.insert(
+                    sig,
+                    Finding { count: 1, repro: repro(&small), detail: err },
+                );
+            }
+        }
+    }
+
+    if found.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "{failures}/{cases} cases failed, {} distinct defect(s) (seed {seed}):\n",
+        found.len()
+    );
+    for (i, f) in found.values().enumerate() {
+        out.push_str(&format!(
+            "\n[{}] x{}  {}\n     {}\n",
+            i + 1,
+            f.count,
+            f.detail.lines().next().unwrap_or(""),
+            f.repro
+        ));
+    }
+    out
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Pinned to the free-form inner-wall space, which is where the floating /
+/// notching / crossing divider fillet work lives.
+///
+/// **Baseline at the default seed: 36/150 cases fail, 6 distinct defects.**
+/// Was 89/150 and 10 before `fillet_best_effort` (which converted every "blender
+/// refused the chain" class into a partial fillet), then 52 before
+/// `region_difference` learned to classify coincident boundary runs (which
+/// restored the missing cap on a partial-height wall's top).
+///
+/// Asserts clean but is `#[ignore]`d until those are dealt with; promote it to
+/// a gate by dropping the attribute once the report comes back empty.
+///
+/// # The dominant open defect (~half the remaining failures)
+///
+/// `validate: edge N used fwd=2 bwd=1`, reachable with **two** inner walls, one
+/// full height and one partial — it does not shrink to a single wall. Diagnosed
+/// as far as this:
+///
+/// One point on the cavity boundary gets computed twice by two different
+/// routes, and the results differ in the last few bits — e.g. `(40.55,
+/// 57.819447)` from the flat wall-subtraction path and `(40.549995, 57.81945)`
+/// from the banded (partial-height) path. That is 3 nm apart, far inside the
+/// weld distance, but the two straddle a `weld_key` grid line (`578194.47`
+/// rounds to `578194`, `578194.5` to `578195`), so `Builder` interns them as
+/// **two vertices** and the faces either side never pair.
+///
+/// Rescuing this in `Builder::vertex` — scanning neighbouring weld cells for a
+/// vertex within tolerance — was tried and **reverted**: it moved the fuzzer by
+/// one case (36 -> 35) and broke
+/// `crossing_inner_wall_splits_compartment_watertight`, because merging
+/// genuinely-distinct near vertices makes the tessellation leak. Loosening the
+/// weld is treating the symptom.
+///
+/// The fix belongs at the source: whichever two routes derive that point must
+/// *share* the solve rather than each doing it, which is what
+/// `presplit_regions` exists for. **Which** two routes is still open.
+///
+/// Ruled out so far — presplitting `outline_b` against the notch quad in
+/// `plan_piece` before handing them to the slab stack (the obvious candidate,
+/// since `plan_bands` presplits the stack itself and so appears to solve the
+/// same crossings a second time). Tried; the fuzzer did not move off 36 and the
+/// x18 class was unchanged, so the stack is not where the duplicate comes from.
+/// Reverted rather than kept as a plausible-looking no-op.
+///
+/// Next place to look: the two faces that fail to pair are the cavity-boundary
+/// wall (axis-aligned, exact coordinate) and the inner-wall face (angled,
+/// solved). Find which producer emits each and work back from there — an
+/// axis-aligned boundary coordinate arriving exact on one side and solved on
+/// the other is the signature.
+#[test]
+#[ignore = "known-failing: 6 open defects at the default seed"]
+fn fuzz_inner_walls() {
+    let cases = env_u64("FUZZ_CASES", 150) as u32;
+    let seed = env_u64("FUZZ_SEED", 0x9E37_79B9_7F4A_7C15);
+    let report = run(Profile::InnerWalls, cases, seed);
+    assert!(report.is_empty(), "{report}");
+}
+
+/// The explorer. Ignored by default because the model is known to reject some
+/// degenerate combinations, so this is a tool you point at the parameter space
+/// on purpose, read, and turn into targeted fixes — not a pass/fail gate.
+#[test]
+#[ignore = "exploratory: run on demand with FUZZ_CASES/FUZZ_SEED"]
+fn fuzz_params_broad() {
+    let cases = env_u64("FUZZ_CASES", 400) as u32;
+    let seed = env_u64("FUZZ_SEED", 0x9E37_79B9_7F4A_7C15);
+    let report = run(Profile::Broad, cases, seed);
+    if report.is_empty() {
+        println!("{cases} cases, all clean");
+    } else {
+        println!("{report}");
+    }
+}

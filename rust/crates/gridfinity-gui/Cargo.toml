@@ -1,0 +1,20 @@
+[package]
+name = "gridfinity-gui"
+description = "egui front-end for the Gridfinity parametric CAD engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gridfinity-gui"
+path = "src/main.rs"
+
+[dependencies]
+gridfinity-cad = { path = "../gridfinity-cad" }
+eframe = { version = "0.35", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+egui = "0.35"
+egui_glow = "0.35"
+glow = "0.16"
+glam = "0.29"
+bytemuck = "1"
+rfd = "0.15"
