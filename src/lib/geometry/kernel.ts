@@ -1,8 +1,8 @@
 /**
  * Geometry kernel boundary.
  *
- * Solid construction lives in the `gridfinity-parametric` Rust workspace and
- * runs here as WebAssembly. It is an analytic B-rep kernel: exact surfaces,
+ * Solid construction lives in the `rust/` Rust workspace and runs here as
+ * WebAssembly. It is an analytic B-rep kernel: exact surfaces,
  * exact curves, closed-form intersections, tessellated once at the very end.
  * That is why nothing on this side welds vertices, repairs degenerate facets,
  * or otherwise post-processes the mesh — watertightness is a property of the
