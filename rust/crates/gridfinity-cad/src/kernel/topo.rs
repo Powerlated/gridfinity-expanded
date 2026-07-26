@@ -1,7 +1,7 @@
 
 use crate::kernel::geom::{Curve, Surface};
 use crate::kernel::math::{Vec3, weld_key};
-use std::collections::HashMap;
+use crate::kernel::hash::FxHashMap;
 
 pub type VertexId = usize;
 pub type EdgeId = usize;
@@ -216,9 +216,9 @@ impl std::ops::Index<usize> for EdgeFaces {
 #[derive(Default)]
 pub struct Builder {
     verts: Vec<Vertex>,
-    vert_index: HashMap<(i64, i64, i64), VertexId>,
+    vert_index: FxHashMap<(i64, i64, i64), VertexId>,
     edges: Vec<Edge>,
-    edge_index: HashMap<(VertexId, VertexId, (i64, i64, i64)), EdgeId>,
+    edge_index: FxHashMap<(VertexId, VertexId, (i64, i64, i64)), EdgeId>,
     loop_edges: Vec<(EdgeId, bool)>,
     loops: Vec<u32>,
     faces: Vec<Face>,
@@ -234,9 +234,9 @@ impl Builder {
         loops.push(0);
         Builder {
             verts: Vec::with_capacity(nv),
-            vert_index: HashMap::with_capacity(nv),
+            vert_index: FxHashMap::with_capacity_and_hasher(nv, Default::default()),
             edges: Vec::with_capacity(ne),
-            edge_index: HashMap::with_capacity(ne),
+            edge_index: FxHashMap::with_capacity_and_hasher(ne, Default::default()),
             loop_edges: Vec::with_capacity(nloop_edges),
             loops,
             faces: Vec::with_capacity(nfaces),

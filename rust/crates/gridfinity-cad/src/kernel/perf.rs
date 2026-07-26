@@ -18,10 +18,16 @@ pub enum Metric {
     BuildSlabs,
     EmitSlabs,
     IntersectSurfaces,
+    PlanPiece,
+    ProgramRun,
+    PlanOuter,
+    PlanCavity,
+    PlanOps,
+    PlanStitch,
 }
 
 impl Metric {
-    pub const ALL: [Metric; 12] = [
+    pub const ALL: [Metric; 18] = [
         Metric::SplitRegions,
         Metric::SegSegPoints,
         Metric::MinLoopDistance,
@@ -34,6 +40,12 @@ impl Metric {
         Metric::BuildSlabs,
         Metric::EmitSlabs,
         Metric::IntersectSurfaces,
+        Metric::PlanPiece,
+        Metric::ProgramRun,
+        Metric::PlanOuter,
+        Metric::PlanCavity,
+        Metric::PlanOps,
+        Metric::PlanStitch,
     ];
 
     pub fn name(self) -> &'static str {
@@ -50,6 +62,12 @@ impl Metric {
             Metric::BuildSlabs => "slab::build_slabs",
             Metric::EmitSlabs => "slab::emit_slabs",
             Metric::IntersectSurfaces => "isect::intersect_surfaces",
+            Metric::PlanPiece => "gridfinity::plan_piece",
+            Metric::ProgramRun => "program::run",
+            Metric::PlanOuter => "  plan: outer loops",
+            Metric::PlanCavity => "  plan: cavity",
+            Metric::PlanOps => "  plan: peg loop",
+            Metric::PlanStitch => "  plan: rings+stitch",
         }
     }
 }

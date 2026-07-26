@@ -2,6 +2,7 @@
 use crate::kernel::math::Vec2;
 use crate::kernel::sketch::{Seg, loop_area, point_in_segs};
 use crate::kernel::perf;
+use crate::kernel::hash::FxHashMap;
 
 const EPS: f32 = 1e-4;
 
@@ -322,29 +323,61 @@ fn split_seg(seg: &Seg, cuts: &mut Vec<(f32, Vec2)>) -> Vec<Seg> {
     }
 }
 
-pub fn chain_loops<T: Copy>(mut segs: Vec<(Seg, T)>) -> Vec<Vec<(Seg, T)>> {
+pub fn chain_loops<T: Copy>(segs: Vec<(Seg, T)>) -> Vec<Vec<(Seg, T)>> {
+    let n = segs.len();
     let mut out: Vec<Vec<(Seg, T)>> = Vec::new();
-    while let Some(first) = segs.pop() {
-        let start = first.0.start();
-        let mut lp = vec![first];
+    if n == 0 {
+        return out;
+    }
+
+    let cell = EPS * 2.0;
+    let key = |p: Vec2| ((p.x / cell).floor() as i64, (p.y / cell).floor() as i64);
+    let mut buckets: FxHashMap<(i64, i64), Vec<u32>> =
+        FxHashMap::with_capacity_and_hasher(n * 2, Default::default());
+    for (i, (s, _)) in segs.iter().enumerate() {
+        buckets.entry(key(s.start())).or_default().push(i as u32);
+    }
+
+    let mut used = vec![false; n];
+    let mut bare: Vec<Seg> = Vec::new();
+    for seed in (0..n).rev() {
+        if used[seed] {
+            continue;
+        }
+        used[seed] = true;
+        let start = segs[seed].0.start();
+        let mut lp = vec![segs[seed]];
         loop {
             let cur = lp.last().unwrap().0.end();
             if (cur - start).length() < EPS && lp.len() >= 2 {
                 break;
             }
-            let Some((idx, _)) = segs
-                .iter()
-                .enumerate()
-                .map(|(i, (s, _))| (i, (s.start() - cur).length()))
-                .filter(|&(_, d)| d < EPS)
-                .min_by(|x, y| x.1.total_cmp(&y.1))
-            else {
-                break;
-            };
-            lp.push(segs.swap_remove(idx));
+            let (kx, ky) = key(cur);
+            let mut best: Option<(usize, f32)> = None;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    let Some(list) = buckets.get(&(kx + dx, ky + dy)) else {
+                        continue;
+                    };
+                    for &i in list {
+                        let i = i as usize;
+                        if used[i] {
+                            continue;
+                        }
+                        let d = (segs[i].0.start() - cur).length();
+                        if d < EPS && best.is_none_or(|(_, bd)| d < bd) {
+                            best = Some((i, d));
+                        }
+                    }
+                }
+            }
+            let Some((idx, _)) = best else { break };
+            used[idx] = true;
+            lp.push(segs[idx]);
         }
         if (lp.last().unwrap().0.end() - start).length() < EPS && lp.len() >= 2 {
-            let bare: Vec<Seg> = lp.iter().map(|&(s, _)| s).collect();
+            bare.clear();
+            bare.extend(lp.iter().map(|&(s, _)| s));
             if loop_area(&bare).abs() > EPS {
                 out.push(lp);
             }

@@ -1080,6 +1080,8 @@ fn plan_piece(
     tag: &str,
     prog: &mut Program,
 ) {
+    let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::PlanPiece);
+    let mut _g = crate::kernel::perf::scope(crate::kernel::perf::Metric::PlanOuter);
     let total_h = p.total_height();
     let floor_z = BASE_TOTAL_HEIGHT + FLOOR_THICKNESS;
     let openish = !walls.open.is_empty();
@@ -1103,6 +1105,8 @@ fn plan_piece(
     } else {
         p.wall_thickness.max(0.4)
     };
+    drop(_g);
+    let mut _g = crate::kernel::perf::scope(crate::kernel::perf::Metric::PlanCavity);
     let (pos, neg) = plan_cavity(cells, &walls, wt);
     let traced = trace_rects(&pos, &neg);
     let cavity_depth = total_h - floor_z;
@@ -1304,6 +1308,8 @@ fn plan_piece(
         }
     }
 
+    drop(_g);
+    let mut _g = crate::kernel::perf::scope(crate::kernel::perf::Metric::PlanOps);
     let peg_profiles: Vec<(GridCell, Vec<Seg>, Vec<Seg>, Vec<Seg>)> = cells
         .iter()
         .map(|&c| {
@@ -1536,6 +1542,8 @@ fn plan_piece(
         );
     }
 
+    drop(_g);
+    let _g = crate::kernel::perf::scope(crate::kernel::perf::Metric::PlanStitch);
     for (li, (segs, _)) in outer_rings.iter().enumerate() {
         let z1 = if openish { floor_z } else { total_h };
         prog.push(

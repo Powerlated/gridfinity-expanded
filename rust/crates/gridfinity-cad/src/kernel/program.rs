@@ -158,6 +158,7 @@ pub fn run_all(prog: &Program) -> Result<Solid, String> {
 }
 
 pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, String> {
+    let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::ProgramRun);
     let mut b = Builder::new();
     let mut blends: Vec<(EdgeId, f32)> = Vec::new();
     let mut chamfers: Vec<(EdgeId, f32, f32)> = Vec::new();

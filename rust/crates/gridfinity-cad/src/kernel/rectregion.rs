@@ -65,32 +65,36 @@ pub fn trace_rects(pos: &[RectF], neg: &[RectF]) -> Vec<TracedLoop> {
 
     let xf: Vec<f32> = xs.iter().map(|&k| k as f32 / KEY_SCALE).collect();
     let yf: Vec<f32> = ys.iter().map(|&k| k as f32 / KEY_SCALE).collect();
-    let mut occ = vec![vec![false; ny - 1]; nx - 1];
-    let contains = |r: &RectF, px: f32, py: f32| -> bool {
-        px > r.x && px < r.x + r.w && py > r.y && py < r.y + r.h
+    let mut occ = vec![false; (nx - 1) * (ny - 1)];
+    let span = |v: &[i64], lo: f32, hi: f32| -> (usize, usize) {
+        let a = v.partition_point(|&k| k < key(lo));
+        let b = v.partition_point(|&k| k < key(hi));
+        (a, b)
     };
-    for i in 0..nx - 1 {
-        for j in 0..ny - 1 {
-            let cx = (xf[i] + xf[i + 1]) * 0.5;
-            let cy = (yf[j] + yf[j + 1]) * 0.5;
-            let inside = pos.iter().any(|r| contains(r, cx, cy))
-                && !neg.iter().any(|r| contains(r, cx, cy));
-            occ[i][j] = inside;
+    let paint = |rects: &[RectF], value: bool, occ: &mut [bool]| {
+        for r in rects {
+            let (i0, i1) = span(&xs, r.x, r.x + r.w);
+            let (j0, j1) = span(&ys, r.y, r.y + r.h);
+            for i in i0..i1 {
+                occ[i * (ny - 1) + j0..i * (ny - 1) + j1].fill(value);
+            }
         }
-    }
+    };
+    paint(pos, true, &mut occ);
+    paint(neg, false, &mut occ);
 
     type Pt = (usize, usize);
     let at = |i: isize, j: isize| -> bool {
         if i < 0 || j < 0 || i as usize >= nx - 1 || j as usize >= ny - 1 {
             false
         } else {
-            occ[i as usize][j as usize]
+            occ[i as usize * (ny - 1) + j as usize]
         }
     };
     let mut adj: HashMap<Pt, Vec<Pt>> = HashMap::new();
     for i in 0..nx - 1 {
         for j in 0..ny - 1 {
-            if !occ[i][j] {
+            if !occ[i * (ny - 1) + j] {
                 continue;
             }
             let (ii, jj) = (i as isize, j as isize);

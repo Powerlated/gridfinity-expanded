@@ -4,6 +4,7 @@ pub mod audit;
 pub mod chamfer;
 pub mod fillet;
 pub mod geom;
+pub mod hash;
 pub mod isect;
 pub mod math;
 pub mod mesh;
