@@ -669,7 +669,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "egui_glow",
- "glow 0.17.0",
+ "glow",
  "glutin",
  "glutin-winit",
  "image",
@@ -759,7 +759,7 @@ checksum = "52274b9bfb8d8e252cd0f00c9f6214f360d75a0962baa77a2d62ddb002fe99d4"
 dependencies = [
  "bytemuck",
  "egui",
- "glow 0.17.0",
+ "glow",
  "log",
  "memoffset",
  "profiling",
@@ -1119,18 +1119,6 @@ dependencies = [
 
 [[package]]
 name = "glow"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5e5ea60d70410161c8bf5da3fdfeaa1c72ed2c15f8bbb9d19fe3a4fad085f08"
-dependencies = [
- "js-sys",
- "slotmap",
- "wasm-bindgen",
- "web-sys",
-]
-
-[[package]]
-name = "glow"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29038e1c483364cc6bb3cf78feee1816002e127c331a1eec55a4d202b9e1adb5"
@@ -1211,6 +1199,7 @@ dependencies = [
 name = "gridfinity-cad"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "glam",
  "mimalloc",
  "serde",
@@ -1225,10 +1214,20 @@ dependencies = [
  "egui",
  "egui_glow",
  "glam",
- "glow 0.16.0",
+ "glow",
  "gridfinity-cad",
+ "gridfinity-render",
  "mimalloc",
  "rfd",
+]
+
+[[package]]
+name = "gridfinity-render"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "glow",
 ]
 
 [[package]]
@@ -1237,12 +1236,15 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "glam",
+ "glow",
  "gridfinity-cad",
+ "gridfinity-render",
  "js-sys",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
  "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

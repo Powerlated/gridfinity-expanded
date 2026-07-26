@@ -10,12 +10,10 @@
     "preview": "vite preview",
     "classify:changes": "node scripts/classify-changes.mjs",
     "build:wasm": "node scripts/build-wasm.mjs",
-    "check:manifold": "npm run build:wasm && esbuild scripts/check-manifold.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/check-manifold.mjs --log-level=error && node node_modules/.cache/check-manifold.mjs",
     "test": "vitest run",
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@babylonjs/core": "^9.14.0",
     "@mantine/core": "^9.4.1",
     "@mantine/hooks": "^9.4.1",
     "react": "^19.2.7",
@@ -23,10 +21,10 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.0",
     "@types/node": "^24.13.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "@playwright/test": "^1.55.0",
     "@vitejs/plugin-react": "^4.7.0",
     "esbuild": "^0.25.12",
     "oxlint": "^1.71.0",

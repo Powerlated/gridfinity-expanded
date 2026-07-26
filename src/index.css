@@ -2,7 +2,7 @@
  * Global resets + the handful of structural details a component library
  * can't express, because they aren't a component: sizing the html/body/#root
  * chain, and establishing the positioning/clipping context the absolutely-
- * positioned Babylon canvas needs inside AppShell.Main. Header/navbar chrome
+ * positioned viewer canvas needs inside AppShell.Main. Header/navbar chrome
  * (flex layout, border, background) is owned by Mantine's AppShell (see
  * App.tsx) — styling it here would fight the component that already does it.
  */

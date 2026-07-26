@@ -17,12 +17,12 @@ const paths = execFileSync('git', diffArgs, { encoding: 'utf8' })
 const documentation = /^(?:AGENTS\.md|CLAUDE\.md|README(?:\.[^/]*)?|docs\/|\.agents\/)/;
 const isolatedTest = /(?:^|\/)(?:__tests__\/.*|[^/]+\.(?:test|spec)\.[cm]?[jt]sx?)$/;
 const playwrightOnly = /^(?:e2e\/|playwright\.config\.[cm]?[jt]s$)/;
-const manifold = /^(?:src\/lib\/(?:geometry\/|cuts\.ts$|coordinates\.ts$|gridfinitySpec\.ts$|export\/stl\.ts$|types\.ts$)|src\/workers\/geometry\.worker\.ts$|src\/store\.ts$|scripts\/check-manifold\.ts$|package(?:-lock)?\.json$)/;
+const geometry = /^(?:rust\/|src\/lib\/(?:geometry\/|cuts\.ts$|coordinates\.ts$|gridfinitySpec\.ts$|export\/stl\.ts$|types\.ts$)|src\/workers\/geometry\.worker\.ts$|src\/store\.ts$|package(?:-lock)?\.json$)/;
 const browserRuntime = /^(?:src\/|public\/|index\.html$|package(?:-lock)?\.json$|vite\.config\.[cm]?[jt]s$|tsconfig(?:\.[^/]*)?\.json$|postcss\.config\.[cm]?[jt]s$)/;
 const tooling = /^(?:\.github\/workflows\/|scripts\/classify-changes\.mjs$|vitest\.config\.[cm]?[jt]s$|\.gitignore$)/;
 
 let needsPlaywright = false;
-let needsManifold = false;
+let needsGeometry = false;
 
 for (const path of paths) {
   if (documentation.test(path) || isolatedTest.test(path)) continue;
@@ -30,13 +30,13 @@ for (const path of paths) {
     needsPlaywright = true;
     continue;
   }
-  if (manifold.test(path)) needsManifold = true;
+  if (geometry.test(path)) needsGeometry = true;
   if (browserRuntime.test(path)) needsPlaywright = true;
-  if (!manifold.test(path) && !browserRuntime.test(path) && !tooling.test(path)) {
+  if (!geometry.test(path) && !browserRuntime.test(path) && !tooling.test(path)) {
     needsPlaywright = true;
-    needsManifold = true;
+    needsGeometry = true;
   }
 }
 
 console.log(`playwright=${needsPlaywright}`);
-console.log(`manifold=${needsManifold}`);
+console.log(`geometry=${needsGeometry}`);

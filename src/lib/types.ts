@@ -119,3 +119,17 @@ export interface GenerateGeometryRequest {
 export type GenerateGeometryResponse =
   | { ok: true; revision: number; bins: Bin[] }
   | { ok: false; revision: number; error: string };
+
+export interface BadAppleRequest {
+  frame: number;
+}
+
+export type BadAppleResponse =
+  | { ok: true; frame: number; triangles: Float32Array }
+  | { ok: false; frame: number };
+
+export interface BadAppleClip {
+  frameCount: number;
+  fps: number;
+  bounds: { min: [number, number, number]; max: [number, number, number] };
+}

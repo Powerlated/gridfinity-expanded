@@ -18,8 +18,17 @@
  * The `.wasm` is a build artifact, not source: `npm run build:wasm` compiles it
  * from the Rust workspace into `src/wasm/`, which is gitignored.
  */
-import init, { generate_geometry } from '../../wasm/gridfinity_wasm.js';
-import type { Bin, BinParameters } from '../types';
+import init, {
+  Viewer,
+  badapple_bounds,
+  badapple_fps,
+  badapple_frame,
+  badapple_frame_count,
+  generate_geometry,
+} from '../../wasm/gridfinity_wasm.js';
+import type { BadAppleClip, Bin, BinParameters } from '../types';
+
+export type { Viewer };
 
 /** Opaque handle proving the kernel finished loading. */
 export interface GeometryKernel {
@@ -51,4 +60,36 @@ export function initKernel(source?: string | BufferSource): Promise<GeometryKern
  */
 export function generateGeometry(_kernel: GeometryKernel, bins: BinParameters[]): Bin[] {
   return generate_geometry(bins) as Bin[];
+}
+
+export function badAppleClip(_kernel: GeometryKernel): BadAppleClip {
+  const b = badapple_bounds();
+  return {
+    frameCount: badapple_frame_count(),
+    fps: badapple_fps(),
+    bounds: {
+      min: [b[0], b[1], b[2]],
+      max: [b[3], b[4], b[5]],
+    },
+  };
+}
+
+export function badAppleFrame(_kernel: GeometryKernel, frame: number): Float32Array {
+  return badapple_frame(frame);
+}
+
+/**
+ * Creates the WebGL2 viewer that the Rust workspace also uses for its egui
+ * debugger, bound to a canvas this side owns.
+ *
+ * The renderer is display-only: it consumes the same triangle soup the export
+ * branch does, applies viewer-branch preview offsets, and never feeds anything
+ * back into geometry.
+ */
+export function createViewer(
+  _kernel: GeometryKernel,
+  canvas: HTMLCanvasElement,
+  clearRgb: number,
+): Viewer {
+  return new Viewer(canvas, clearRgb);
 }

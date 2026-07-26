@@ -11,9 +11,16 @@ license.workspace = true
 # native GUI build stays lean; the wasm crate turns it on.
 serde = ["dep:serde"]
 
+badapple = ["dep:flate2"]
+
 [dependencies]
 glam = "0.29"
 serde = { version = "1", features = ["derive"], optional = true }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
+
+[[example]]
+name = "compress_badapple"
+required-features = ["badapple"]
 
 # Benchmarks and `perf_report` must see the allocator the shipping binary uses,
 # or they measure a bottleneck production does not have. Not a real dependency:

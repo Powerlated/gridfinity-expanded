@@ -5,7 +5,7 @@ use gridfinity_cad::kernel::geom::Curve;
 use gridfinity_cad::kernel::sketch::Seg;
 use gridfinity_cad::kernel::topo::{Builder, Solid};
 
-pub const LINE_STRIDE: usize = 11;
+
 
 pub const SKETCH_BLACK: [f32; 3] = [0.05, 0.05, 0.06];
 pub const EDGE_ORANGE: [f32; 3] = [1.0, 0.45, 0.05];
@@ -97,6 +97,7 @@ fn seg_kind(s: &Seg) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gridfinity_render::LINE_STRIDE;
     use gridfinity_cad::kernel::build::extrude;
     use gridfinity_cad::kernel::sketch::Sketch;
 

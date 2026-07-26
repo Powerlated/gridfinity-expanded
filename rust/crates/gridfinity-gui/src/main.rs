@@ -23,12 +23,15 @@ use gridfinity_cad::kernel::sketch::Sketch;
 use gridfinity_cad::kernel::topo::Solid;
 use gridfinity_cad::tessellate;
 use std::sync::{Arc, Mutex};
-use viewport::{Camera, Renderer};
+use viewport::{Camera, CameraExt, Renderer};
 
 const PREVIEW_RES: usize = 5;
 const EXPORT_RES: usize = 48;
 
-pub const MESH_STRIDE: usize = 7;
+pub const MESH_STRIDE: usize = gridfinity_render::VERTEX_STRIDE;
+pub const BAD_FLAG_OFFSET: usize = MESH_STRIDE - 1;
+
+pub const DEBUG_BASE_COLOR: u32 = 0x4c8cd9;
 
 struct BinError {
     bin: usize,
@@ -36,13 +39,14 @@ struct BinError {
 }
 
 fn flagged(tess: &gridfinity_cad::Tessellation, bad: bool) -> Vec<f32> {
-    let src = tess.render_buffer();
-    let flag = if bad { 1.0 } else { 0.0 };
-    let mut out = Vec::with_capacity(src.len() / 6 * MESH_STRIDE);
-    for v in src.chunks_exact(6) {
-        out.extend_from_slice(v);
-        out.push(flag);
-    }
+    let mut out = Vec::new();
+    gridfinity_render::append_smooth_shaded(
+        &mut out,
+        &tess.render_buffer(),
+        Vec3::ZERO,
+        gridfinity_render::color_of(DEBUG_BASE_COLOR),
+        bad,
+    );
     out
 }
 
@@ -174,7 +178,9 @@ struct BadApple {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> App {
         let gl = cc.gl.clone().expect("this build requires the glow backend");
-        let renderer = Arc::new(Mutex::new(Renderer::new(&gl)));
+        let renderer = Arc::new(Mutex::new(
+            Renderer::new(&gl).expect("the glow backend must compile the viewport shaders"),
+        ));
         let mut app = App {
             params: Params::default(),
             editor: Editor::default(),
@@ -722,7 +728,7 @@ mod tests {
         let mut good = 0;
         let mut bad = 0;
         for v in verts.chunks_exact(MESH_STRIDE) {
-            if v[6] > 0.5 { bad += 1 } else { good += 1 }
+            if v[BAD_FLAG_OFFSET] > 0.5 { bad += 1 } else { good += 1 }
         }
         (good, bad)
     }

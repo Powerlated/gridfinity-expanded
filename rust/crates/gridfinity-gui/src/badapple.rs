@@ -1,90 +1,31 @@
 
 #[cfg(test)]
 use crate::MESH_STRIDE;
-use gridfinity_cad::gridfinity::{self, Params};
+#[cfg(test)]
 use gridfinity_cad::layout::GridCell;
+use gridfinity_cad::badapple::{cell_params, components, frame as frame_bits};
+use gridfinity_cad::gridfinity;
 use gridfinity_cad::tessellate;
 
-pub const W: usize = 64;
-pub const H: usize = 48;
-pub const FPS: f64 = 30.0;
+pub use gridfinity_cad::badapple::{FPS, bounds, frame_count};
 
 pub const PIPELINE_DEPTH: usize = 3;
 
-const PITCH: f32 = gridfinity::GRID_PITCH;
-
-const ROW_BYTES: usize = W / 8;
-const FRAME_BYTES: usize = ROW_BYTES * H;
-
-static FRAMES: &[u8] = include_bytes!("../assets/badapple.raw");
-
-pub fn frame_count() -> usize {
-    FRAMES.len() / FRAME_BYTES
-}
-
-pub fn bounds() -> ([f32; 3], [f32; 3]) {
-    let h = 2.0 * gridfinity::HEIGHT_PER_UNIT;
-    ([0.0, 0.0, 0.0], [W as f32 * PITCH, H as f32 * PITCH, h])
-}
-
-#[inline]
-fn white(frame: &[u8], x: usize, y: usize) -> bool {
-    (frame[y * ROW_BYTES + x / 8] >> (7 - (x % 8))) & 1 == 1
-}
-
-fn cell_params() -> Params {
-    Params {
-        height_units: 2,
-        floor_fillet: 0.0,
-        magnet_holes: false,
-        screw_holes: false,
-        ..Params::default()
-    }
-}
-
-fn components(f: &[u8]) -> Vec<Vec<GridCell>> {
-    let mut seen = vec![false; W * H];
-    let mut out = Vec::new();
-    let mut stack = Vec::new();
-    for sy in 0..H {
-        for sx in 0..W {
-            if seen[sy * W + sx] || !white(f, sx, sy) {
-                continue;
-            }
-            let mut cells = Vec::new();
-            seen[sy * W + sx] = true;
-            stack.push((sx, sy));
-            while let Some((x, y)) = stack.pop() {
-                cells.push(GridCell { x: x as i32, y: (H - 1 - y) as i32 });
-                let mut nb = |nx: usize, ny: usize, stack: &mut Vec<(usize, usize)>| {
-                    if !seen[ny * W + nx] && white(f, nx, ny) {
-                        seen[ny * W + nx] = true;
-                        stack.push((nx, ny));
-                    }
-                };
-                if x > 0 { nb(x - 1, y, &mut stack); }
-                if x + 1 < W { nb(x + 1, y, &mut stack); }
-                if y > 0 { nb(x, y - 1, &mut stack); }
-                if y + 1 < H { nb(x, y + 1, &mut stack); }
-            }
-            out.push(cells);
-        }
-    }
-    out
-}
-
 fn emit(solid: &gridfinity_cad::kernel::topo::Solid, verts: &mut Vec<f32>) -> usize {
     let src = tessellate(solid, 1).render_buffer();
-    for v in src.chunks_exact(6) {
-        verts.extend_from_slice(v);
-        verts.push(0.0);
-    }
+    gridfinity_render::append_smooth_shaded(
+        verts,
+        &src,
+        glam::Vec3::ZERO,
+        gridfinity_render::color_of(crate::DEBUG_BASE_COLOR),
+        false,
+    );
     src.len() / (6 * 3)
 }
 
 #[cfg(test)]
 pub fn build_frame(frame: usize) -> (Vec<f32>, usize) {
-    let f = &FRAMES[frame * FRAME_BYTES..(frame + 1) * FRAME_BYTES];
+    let f = frame_bits(frame);
     let p = cell_params();
     let mut verts: Vec<f32> = Vec::new();
     let mut tris = 0usize;
@@ -195,7 +136,7 @@ impl Drop for Worker {
 fn build_loop(req: &Receiver<usize>, out: &SyncSender<Piece>) {
     while let Ok(frame) = req.recv() {
         let started = Instant::now();
-        let f = &FRAMES[frame * FRAME_BYTES..(frame + 1) * FRAME_BYTES];
+        let f = frame_bits(frame);
         let p = cell_params();
         for cells in components(f) {
             match gridfinity::build_piece(&p, &cells, &cells, None) {
@@ -323,7 +264,7 @@ mod tests {
                 .collect()
         });
         for f in (0..(10.0 * FPS) as usize).take(if best.is_some() { 0 } else { usize::MAX }) {
-            for c in components(&FRAMES[f * FRAME_BYTES..(f + 1) * FRAME_BYTES]) {
+            for c in components(frame_bits(f)) {
                 if leaks(&c) > 0 && best.as_ref().is_none_or(|b| c.len() < b.len()) {
                     best = Some(c);
                 }
@@ -425,7 +366,7 @@ mod tests {
         let p = cell_params();
         let mut best: Vec<GridCell> = Vec::new();
         for f in 0..(10.0 * FPS) as usize {
-            for c in components(&FRAMES[f * FRAME_BYTES..(f + 1) * FRAME_BYTES]) {
+            for c in components(frame_bits(f)) {
                 if c.len() > best.len() {
                     best = c;
                 }
@@ -494,7 +435,7 @@ mod tests {
         // real exercise, so sweep the sample rather than trusting one shape.
         let (mut checked, mut cells_seen, mut leaky, mut total) = (0usize, 0usize, 0usize, 0usize);
         for f in 0..(10.0 * FPS) as usize {
-            for c in components(&FRAMES[f * FRAME_BYTES..(f + 1) * FRAME_BYTES]) {
+            for c in components(frame_bits(f)) {
                 if c.len() < 40 {
                     continue;
                 }
@@ -519,7 +460,7 @@ mod tests {
 
         let (mut blobs, mut cells, mut biggest) = (0usize, 0usize, 0usize);
         for &f in &sample {
-            for c in components(&FRAMES[f * FRAME_BYTES..(f + 1) * FRAME_BYTES]) {
+            for c in components(frame_bits(f)) {
                 blobs += 1;
                 cells += c.len();
                 biggest = biggest.max(c.len());
@@ -619,7 +560,7 @@ mod tests {
         let mut cells_total = 0usize;
         let mut hist = [0usize; 6];
         for frame in (0..n).step_by(step) {
-            let f = &FRAMES[frame * FRAME_BYTES..(frame + 1) * FRAME_BYTES];
+            let f = frame_bits(frame);
             for c in components(f) {
                 comps += 1;
                 cells_total += c.len();
@@ -648,7 +589,7 @@ mod tests {
         );
 
         for frame in (0..n).step_by(step * 5) {
-            let f = &FRAMES[frame * FRAME_BYTES..(frame + 1) * FRAME_BYTES];
+            let f = frame_bits(frame);
             for cells in components(f) {
                 let _ = gridfinity::build_piece(&p, &cells, &cells, None);
             }
@@ -658,7 +599,7 @@ mod tests {
         perf::reset();
         let t = Instant::now();
         for frame in (0..n).step_by(step) {
-            let f = &FRAMES[frame * FRAME_BYTES..(frame + 1) * FRAME_BYTES];
+            let f = frame_bits(frame);
             for cells in components(f) {
                 let _ = gridfinity::build_piece(&p, &cells, &cells, None);
             }
@@ -692,7 +633,7 @@ build only: {:?} total, {:.2} ms/frame
         let p = cell_params();
         let (mut bs, mut ts) = (0.0f64, 0.0f64);
         for frame in (0..n).step_by(37) {
-            let f = &FRAMES[frame * FRAME_BYTES..(frame + 1) * FRAME_BYTES];
+            let f = frame_bits(frame);
             for cells in components(f) {
                 let t0 = Instant::now();
                 let Ok(solid) = gridfinity::build_piece(&p, &cells, &cells, None) else { continue };

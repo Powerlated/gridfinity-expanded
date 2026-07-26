@@ -1,72 +1,70 @@
 # Repository Development Guide
 
-This is the sole operative repository guide for LLM-assisted development. Other agent files must import it instead of duplicating policy.
+Sole operative LLM guide. Other agent files import it, never duplicate it. When the user asks to "remember" something, record it here — not in any other memory store.
 
-## Scope and Autonomy
+## Scope
 
-This repository is a React 19 + Vite 6 TypeScript application that generates printable Gridfinity STL files. Agents may choose local implementation details that fit the existing design. Ask before changing architecture, user-visible semantics, compatibility policy, or project scope.
+React 19 + Vite 6 + TypeScript app generating printable Gridfinity STLs. Pick local implementation details freely; ask before changing architecture, user-visible semantics, compatibility policy, or scope. Keep changes narrow, preserve unrelated working-tree changes, inspect call sites first — trace store, worker boundary, preview, and export paths. Preview data may be grouped/colored/positioned; export data must preserve coordinates, topology, orientation, and per-piece meaning.
 
-Keep changes narrowly scoped, preserve unrelated working-tree changes, and inspect relevant call sites before editing. In particular, trace changes across the store, worker boundary, preview, and export paths where applicable. Preview data may be grouped, colored, or positioned for presentation; printable export data must preserve its coordinates, topology, orientation, and per-piece meaning.
+## Structure
 
-## Project Structure
+`src/main.tsx` mounts; `src/App.tsx` = Mantine AppShell; `src/store.ts` = Zustand state + explicit design commands; `src/theme.ts` = Mantine defaults.
 
-`src/main.tsx` mounts the app, `src/App.tsx` defines the Mantine AppShell, `src/store.ts` owns Zustand state and explicit design commands, and `src/theme.ts` centralizes Mantine defaults. Domain logic is in `src/lib/`: shared contracts in `types.ts`, normative dimensions in `gridfinitySpec.ts`, editor-to-generation transforms in `coordinates.ts`, per-bin worker-input derivation in `binParameters.ts`, persistent per-bin triangle caching in `geometryCache.ts`, viewer-branch preview layout in `preview.ts`, edge helpers in `edges.ts`, editable cut planning in `cuts.ts`, printer fit in `printers.ts`, geometry in `geometry/`, printable-object splitting and naming in `export/printableObjects.ts`, and STL serialization in `export/stl.ts`.
+`src/lib/`: `types.ts` contracts, `gridfinitySpec.ts` normative dimensions, `coordinates.ts` editor→generation transforms, `binParameters.ts` per-bin worker input, `geometryCache.ts` per-bin triangle cache, `preview.ts` viewer-branch layout, `edges.ts`, `cuts.ts` cut planning, `printers.ts` fit, `geometry/`, `export/printableObjects.ts` splitting+naming, `export/stl.ts`.
 
-Geometry runs in `src/workers/geometry.worker.ts`, driven by `src/hooks/useBinGeometry.ts`. UI components live under `src/components/`; the left panel contains the Shape, Walls, and Cuts spatial editors, the right panel contains collapsed-by-default Dimensions, Features, and Printer fit accordions, and `BabylonViewer.tsx` renders generated triangle meshes directly. Validation scripts are in `scripts/`; Vitest files live beside source as `*.test.ts`; browser tests live in `e2e/`. [`docs/geometry-pipeline.md`](./docs/geometry-pipeline.md) is the canonical specification and architecture record.
+Geometry runs in `src/workers/geometry.worker.ts` via `src/hooks/useBinGeometry.ts`. `src/components/`: left panel = Shape/Walls/Cuts editors; right panel = collapsed Dimensions/Features/Printer-fit accordions; `viewer/ModelViewer.tsx` hosts the Rust WebGL2 renderer drawing triangle soups directly. Scripts in `scripts/`; Vitest beside source as `*.test.ts`; browser tests in `e2e/`. This guide is the canonical spec and architecture record.
 
-## Implementation Rules
+## Implementation
 
-Use TypeScript ES modules, React function components, and two-space indentation. Use `PascalCase.tsx` for components, `useName.ts` for hooks, and descriptive camelCase exports for helpers. Keep shared configuration contracts in `src/lib/types.ts` and reusable domain logic in `src/lib/`.
+TypeScript ESM, function components, two-space indent. `PascalCase.tsx`, `useName.ts`, camelCase helper exports. Shared contracts in `types.ts`, domain logic in `src/lib/`.
 
-Use Mantine controls and layout primitives before custom UI. Put cross-app control styling in `src/theme.ts`, global layout and documented library workarounds in `src/index.css`, and bespoke SVG editor styles in `src/components/sidebar/editor.css`. Avoid fixed design constants in JSX unless a value is genuinely data-driven.
+Prefer Mantine controls/layout over custom UI. Cross-app control styling → `theme.ts`; global layout and documented library workarounds → `src/index.css`; SVG editor styles → `src/components/sidebar/editor.css`. No fixed design constants in JSX unless data-driven.
 
-Tabs read and write through explicit `useAppStore()` commands. Keep `Design`, `BinParameters`, `Bin`, and their nested values plain and structured-clone compatible. A shape change resets the changed bin's openings, walls, and cuts before reseeding required cuts. The UI is responsible for only allowing valid parameters — controls constrain their own ranges and dependent values; do not add store clamping or a validation layer between the UI and geometry generation. The UI must derive complete piece groups before invoking geometry. Preview offsets are a viewer-branch concern computed by `previewLayout()` after generation, never worker input or output.
+Tabs read/write only through `useAppStore()` commands. Keep `Design`, `BinParameters`, `Bin` plain and structured-clone compatible. A shape change resets that bin's openings, walls, and cuts, then reseeds required cuts. The UI alone enforces validity — controls constrain their own ranges and dependent values; no store clamping, no validation layer. The UI derives complete piece groups before invoking geometry. Preview offsets come from `previewLayout()` after generation, never worker input/output.
 
-`generateGeometry()` is the sole production geometry path. It accepts trusted generation-ready `BinParameters[]`, builds each complete logical bin once, then intersects the finished solid with supplied piece footprints, returning each bin's cut pieces grouped in a `Bin`. The export branch splits those grouped pieces into distinct named `PrintableObject`s via `toPrintableObjects()`. Author geometry with native `manifold-3d` `CrossSection` and `Manifold` operations, exactly — never approximate shape with coarse tolerances or padding, which previously produced terraced fillets. Geometry must not plan cuts, name parts, inspect printers, validate input, verify output manifoldness, normalize coordinates, or localize output; `check:manifold` is the only manifold verifier. `manifoldTriangles()` is the one extraction boundary: it quantizes each finished part to serialized float32 precision with a 1-micron weld and degenerate-facet repair; no other repair exists.
+`generateGeometry()` is the sole production geometry path: takes trusted generation-ready `BinParameters[]`, builds each logical bin once, intersects with piece footprints, returns pieces grouped per `Bin`. Export splits them into named `PrintableObject`s via `toPrintableObjects()`. Author geometry with exact native `manifold-3d` `CrossSection`/`Manifold` ops — never coarse tolerances or padding (caused terraced fillets). Geometry must not plan cuts, name parts, inspect printers, validate input, normalize coordinates, or localize; manifoldness is verified in the Rust kernel only. `manifoldTriangles()` is the one extraction boundary: quantizes to serialized float32 with 1-micron weld and degenerate-facet repair — no other repair exists.
 
-Keep `Design` in editor row-down coordinates. `buildBinParameters()` mirrors every bin together across the complete design's maximum occupied row; generated parameters, geometry, and echoed `BinPiece.cells` use that shared generation frame. Partition pieces before mirroring so piece indexes retain their editor-derived meaning. The viewer must not transform meshes again for orientation after its Z-up display rotation; its default and reset camera orbit must present the generated layout in the same facing direction as the editor. Preview and STL export must consume the identical global-coordinate triangle soup, with multipart preview spacing applied only through viewer transforms after design cuts are mirrored into generation coordinates. Expand the quantized extraction output so each triangle owns its vertices and flat normal. Combine solids with manifold booleans and use `CrossSection.offset` for inward 2D offsets.
+`Design` stays in editor row-down coordinates. `buildBinParameters()` mirrors every bin together across the design's maximum occupied row; parameters, geometry, and echoed `BinPiece.cells` share that generation frame. Partition pieces before mirroring so piece indexes keep editor meaning. The camera is natively Z-up: never transform meshes for orientation; default and reset orbit must face the layout as the editor does. Preview and STL export consume the identical global-coordinate triangle soup, with multipart spacing applied only via viewer transforms after cuts are mirrored into generation coordinates. Expand quantized output so each triangle owns its vertices and flat normal. Combine solids with manifold booleans; use `CrossSection.offset` for inward 2D offsets.
 
-The alpha generator assumes every supplied bin is edge-connected and otherwise valid. Do not add geometry-side component normalization, repair, rejection, fallback behavior, or tests that define disconnected-bin behavior. Enclosed holes remain supported. Full specification, editing, cut, coordinate, and invalid-input rules live in [`docs/geometry-pipeline.md`](./docs/geometry-pipeline.md); future rule changes must update that document and relevant happy-path tests together.
+The alpha generator assumes every bin is edge-connected and valid. Add no geometry-side component normalization, repair, rejection, fallback, or tests defining disconnected-bin behavior. Enclosed holes stay supported. Full spec/editing/cut/coordinate/invalid-input rules live in this guide; rule changes update it and the happy-path tests together.
 
-When changing the geometry pipeline (`src/lib/geometry/`, `src/workers/geometry.worker.ts`, `src/hooks/useBinGeometry.ts`, `src/lib/binParameters.ts`, `src/lib/coordinates.ts`, `src/lib/geometryCache.ts`, `src/lib/preview.ts`, `src/lib/export/printableObjects.ts`, `src/lib/cuts.ts`, `src/lib/gridfinitySpec.ts`, `src/lib/edges.ts`) or the Babylon viewer (`src/components/viewer/BabylonViewer.tsx`), update the matching document in `docs/` in the same change.
+Changing the geometry pipeline (`src/lib/geometry/`, `src/workers/geometry.worker.ts`, `src/hooks/useBinGeometry.ts`, `src/lib/{binParameters,coordinates,geometryCache,preview,cuts,gridfinitySpec,edges}.ts`, `src/lib/export/printableObjects.ts`) or the viewer (`src/components/viewer/ModelViewer.tsx`, `rust/crates/gridfinity-render/`, `rust/crates/gridfinity-wasm/src/viewer.rs`) requires updating the matching section of this guide in the same change.
 
-## Validation and Completion
+`rust/crates/gridfinity-render` is a shared `glow`+`glam` crate with no egui or wasm deps, consumed by the egui debugger (`gridfinity-gui`) and the web app (`gridfinity-wasm`). Keep front-end concerns out; change its camera, shaders, or vertex format only with both consumers in mind.
 
-Available commands:
+## Validation
 
-- `npm run lint`: run Oxlint.
-- `npm run test`: run the existing Vitest suite.
-- `npm run build`: type-check and produce the Vite build.
-- `npm run check:manifold`: validate production geometry and serialized STL printability.
-- `npm run test:e2e`: run the Chromium Playwright smoke suite.
-- `npm run classify:changes -- <base> <head>`: classify revision changes for CI gates.
+- `npm run lint` — Oxlint
+- `npm run test` — Vitest
+- `npm run build` — type-check + Vite build
+- `cd rust && cargo test --workspace` — geometry kernel suite, the printability gate
+- `npm run test:e2e` — Chromium Playwright smoke
+- `npm run classify:changes -- <base> <head>` — CI gate classification
 
-Run lint and the production build for every non-trivial code change. Do not add new Vitest coverage by default during rapid feature development. Run existing Vitest tests locally when changing printer, cut-to-part, or export behavior already covered by the suite; CI always runs the complete suite.
+Lint + build on every non-trivial code change. Don't add Vitest coverage by default during rapid feature development; run existing Vitest when changing printer, cut-to-part, or export behavior it covers (CI always runs all of it).
 
-Run `check:manifold` for every print-affecting change, including geometry, cut/part generation, STL serialization, walls, fasteners, worker generation, and configuration consumed by geometry. Manifold validation is the printability gate.
+Run the Rust suite for every print-affecting change: geometry, cut/part generation, STL serialization, walls, fasteners, worker generation, geometry-consumed config. Watertightness is a B-rep property asserted by `Solid::validate` and tessellation-leak checks; no TypeScript manifold verifier exists or may be reintroduced.
 
-Use Playwright for every browser-visible change. If Playwright is unavailable locally, equivalent manual browser verification is acceptable, but the final report must name the method used. CI has no manual fallback: when path classification requires Playwright, a browser-test failure is a failed check.
+Use Playwright for every browser-visible change. Locally, equivalent manual browser verification is acceptable if the report names the method. In CI there is no fallback: if classification requires Playwright, a browser-test failure fails the check.
 
-A task is complete only when required commands have finished with confirmed successful exit codes. Timeouts, truncated output, and partially observed runs are not successes. Final reports must honestly list checks run, their results, and any required or relevant checks omitted.
+Never run visual or browser verification yourself — no browser automation, no screenshot capture, no ad-hoc scripts that stand in for looking at the app. Always ask the user to perform the visual check and report back what they saw. Write and hand over the test or the exact steps; the user drives the browser.
 
-## CI Change Classification
+Complete means required commands finished with confirmed successful exit codes. Timeouts, truncated output, and partial runs are not successes. Final reports list checks run, results, and any required or relevant checks omitted.
 
-CI always runs lint, Vitest, and the production build. The repository classifier conditionally enables additional gates with a broad, fail-safe mapping:
+## CI Classification
 
-- Runtime UI, application entrypoints, styles, store, hooks, workers, shared types, dependencies, and build configuration require Playwright.
-- Geometry, cut/part generation, STL export, geometry workers, and geometry-consumed configuration require manifold validation.
-- Ambiguous shared runtime files require both.
-- Documentation-only and isolated test-only changes require neither additional gate.
+CI always runs lint, Vitest, build. The classifier adds gates fail-safe:
 
-When a changed path is not safely recognized, classify it conservatively. Keep deployment behavior in `.github/workflows/deploy.yml` unchanged unless deployment is explicitly in scope.
+- Playwright: runtime UI, entrypoints, styles, store, hooks, workers, shared types, dependencies, build config
+- Rust: geometry, cut/part generation, STL export, geometry workers, geometry-consumed config, anything under `rust/`
+- Both: ambiguous shared runtime files
+- Neither: docs-only, isolated test-only
+
+Classify unrecognized paths conservatively. Leave `.github/workflows/deploy.yml` behavior alone unless deployment is explicitly in scope.
 
 ## Pull Requests
 
-Create a dedicated feature branch in a new Git worktree based on the latest `origin/main`, and make changes in that worktree rather than directly on `main`. Open pull requests with `main` as the target branch.
-
-Use short, imperative commit subjects. Pull requests should describe user-visible changes, list validation commands, link related issues, and include screenshots or recordings for UI changes. For geometry or export changes, call out printability and manifold implications. Pull requests that touch the geometry pipeline or Babylon viewer must include any corresponding `docs/` updates.
-
-Use `--body-file` for multiline `gh` pull-request bodies and comments. Do not embed escaped `\\n` sequences in shell arguments because GitHub renders them as literal text.
+Work in a dedicated feature branch in a new worktree off latest `origin/main`, not on `main`; target `main`. Short imperative commit subjects. PRs describe user-visible changes, list validation commands, link issues, include screenshots/recordings for UI changes, call out printability and manifold implications for geometry/export changes, and carry any `AGENTS.md` updates for pipeline or viewer touches. Use `--body-file` for multiline `gh` bodies — escaped `\n` renders literally.
 
 ## Known Limitations
 

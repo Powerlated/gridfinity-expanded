@@ -6,6 +6,9 @@ use gridfinity_cad::layout::{GridCell, GridEdge};
 use gridfinity_cad::tessellate;
 use wasm_bindgen::prelude::*;
 
+#[cfg(target_arch = "wasm32")]
+mod viewer;
+
 const ARC_SEGMENTS_PER_QUARTER: usize = 16;
 
 #[derive(serde::Deserialize)]
@@ -95,6 +98,52 @@ pub fn generate_geometry(bins: JsValue) -> Result<JsValue, JsValue> {
         out.push(&obj);
     }
     Ok(out.into())
+}
+
+#[wasm_bindgen]
+pub fn badapple_frame_count() -> usize {
+    gridfinity_cad::badapple::frame_count()
+}
+
+#[wasm_bindgen]
+pub fn badapple_fps() -> f64 {
+    gridfinity_cad::badapple::FPS
+}
+
+#[wasm_bindgen]
+pub fn badapple_bounds() -> js_sys::Float32Array {
+    let (min, max) = gridfinity_cad::badapple::bounds();
+    js_sys::Float32Array::from(&[min[0], min[1], min[2], max[0], max[1], max[2]][..])
+}
+
+#[wasm_bindgen]
+pub fn badapple_frame(index: usize) -> js_sys::Float32Array {
+    let params = gridfinity_cad::badapple::cell_params();
+    let mut soup: Vec<f32> = Vec::new();
+    for cells in gridfinity_cad::badapple::components(gridfinity_cad::badapple::frame(index)) {
+        match gridfinity::build_piece(&params, &cells, &cells, None) {
+            Ok(solid) => soup.extend_from_slice(&frame_soup(&solid)),
+            Err(_) => {
+                for cell in &cells {
+                    let one = [*cell];
+                    if let Ok(solid) = gridfinity::build_piece(&params, &one, &one, None) {
+                        soup.extend_from_slice(&frame_soup(&solid));
+                    }
+                }
+            }
+        }
+    }
+    js_sys::Float32Array::from(&soup[..])
+}
+
+fn frame_soup(solid: &gridfinity_cad::Solid) -> Vec<f32> {
+    let mesh = tessellate(solid, 1).to_mesh();
+    let mut out = Vec::with_capacity(mesh.indices.len() * 3);
+    for &i in &mesh.indices {
+        let p = mesh.positions[i as usize];
+        out.extend_from_slice(&[p.x, p.y, p.z]);
+    }
+    out
 }
 
 fn triangle_soup(solid: &gridfinity_cad::Solid) -> Vec<f32> {

@@ -4,17 +4,19 @@ import { Sidebar } from './components/sidebar/Sidebar';
 import { SettingsPanel } from './components/sidebar/SettingsPanel';
 import { PanelResizeHandle } from './components/sidebar/PanelResizeHandle';
 import { ExportMenu } from './components/ExportMenu';
+import { useBadApple } from './hooks/useBadApple';
 import { useBinGeometry } from './hooks/useBinGeometry';
 import { useAppStore } from './store';
 
-const BabylonViewer = lazy(() => import('./components/viewer/BabylonViewer').then((module) => ({
-  default: module.BabylonViewer,
+const ModelViewer = lazy(() => import('./components/viewer/ModelViewer').then((module) => ({
+  default: module.ModelViewer,
 })));
 
 export default function App() {
   const design = useAppStore((s) => s.design);
   const panelWidths = useAppStore((s) => s.panelWidths);
   const { bins, design: generatedDesign, generating, error } = useBinGeometry(design);
+  const badApple = useBadApple();
 
   return (
     <AppShell
@@ -49,7 +51,14 @@ export default function App() {
             </div>
           </div>
         )}>
-          <BabylonViewer bins={bins} design={generatedDesign} error={error} />
+          <ModelViewer
+            bins={bins}
+            design={generatedDesign}
+            error={error}
+            badApple={badApple.active ? badApple.triangles : null}
+            badAppleBounds={badApple.active ? badApple.clip?.bounds ?? null : null}
+            badAppleFrame={badApple.active ? badApple.frame : null}
+          />
         </Suspense>
       </AppShell.Main>
     </AppShell>

@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/gridfinity-cad", "crates/gridfinity-gui", "crates/gridfinity-wasm"]
+members = [
+    "crates/gridfinity-cad",
+    "crates/gridfinity-gui",
+    "crates/gridfinity-render",
+    "crates/gridfinity-wasm",
+]
 
 [workspace.package]
 version = "0.1.0"

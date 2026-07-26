@@ -28,6 +28,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Set up Rust
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Build the geometry kernel
+        run: npm run build:wasm
+
       - name: Classify changed paths
         id: changes
         run: node scripts/classify-changes.mjs "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}" >> "$GITHUB_OUTPUT"
@@ -41,9 +47,10 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Validate printability
-        if: steps.changes.outputs.manifold == 'true'
-        run: npm run check:manifold
+      - name: Validate geometry
+        if: steps.changes.outputs.geometry == 'true'
+        working-directory: rust
+        run: cargo test --workspace
 
       - name: Install Chromium
         if: steps.changes.outputs.playwright == 'true'

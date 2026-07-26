@@ -2,6 +2,8 @@
 
 pub mod kernel;
 
+#[cfg(feature = "badapple")]
+pub mod badapple;
 pub mod gridfinity;
 pub mod layout;
 pub mod printers;
