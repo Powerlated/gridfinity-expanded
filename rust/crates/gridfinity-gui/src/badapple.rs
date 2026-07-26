@@ -199,6 +199,81 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn face_shapes() {
+        let p = cell_params();
+        let mut best: Vec<GridCell> = Vec::new();
+        for f in 0..(10.0 * FPS) as usize {
+            for c in components(&FRAMES[f * FRAME_BYTES..(f + 1) * FRAME_BYTES]) {
+                if c.len() > best.len() {
+                    best = c;
+                }
+            }
+        }
+        let solid = gridfinity::build_piece(&p, &best, &best, None).unwrap();
+        println!(
+            "biggest blob: {} cells, {} faces, {} edges, {} verts",
+            best.len(),
+            solid.faces.len(),
+            solid.edges.len(),
+            solid.verts.len()
+        );
+        let mut hist = [0usize; 8];
+        let mut worst: Vec<(usize, usize, usize)> = Vec::new();
+        for fi in 0..solid.faces.len() {
+            let loops = solid.face_loops(fi).count();
+            let pts: usize = solid.face_loops(fi).map(|l| l.len()).sum();
+            let b = (usize::BITS - pts.leading_zeros()) as usize;
+            hist[b.min(7)] += 1;
+            if pts > 64 {
+                worst.push((fi, loops, pts));
+            }
+        }
+        for (i, n) in hist.iter().enumerate() {
+            if *n > 0 {
+                println!("  faces with <2^{i} boundary edges: {n}");
+            }
+        }
+        worst.sort_by_key(|w| std::cmp::Reverse(w.2));
+        for &(fi, loops, pts) in worst.iter().take(10) {
+            println!("  big face {fi}: {loops} loops, {pts} boundary edges");
+        }
+        unsafe { std::env::set_var("TESS_DIAG", "1") };
+        let _ = gridfinity_cad::kernel::tess::tess_diag();
+        let t = Instant::now();
+        let tess = tessellate(&solid, 1);
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        let d = gridfinity_cad::kernel::tess::tess_diag();
+        println!("tessellate: {ms:.1} ms, {} tris", tess.tris.len());
+        for (n, v) in ["grid", "sample", "earcut", "retain", "chords"].iter().zip(d) {
+            println!("  {n:<8} {:>8.1} ms", v as f64 / 1e6);
+        }
+        let leaks = gridfinity_cad::tessellation_leaks(&tess);
+        assert!(leaks.is_empty(), "{} leaks in the biggest blob", leaks.len());
+
+        // The many-hole bridging path only fires on faces with thousands of
+        // loops, which no ordinary bin produces -- these blobs are its only
+        // real exercise, so sweep the sample rather than trusting one shape.
+        let (mut checked, mut cells_seen, mut leaky, mut total) = (0usize, 0usize, 0usize, 0usize);
+        for f in 0..(10.0 * FPS) as usize {
+            for c in components(&FRAMES[f * FRAME_BYTES..(f + 1) * FRAME_BYTES]) {
+                if c.len() < 40 {
+                    continue;
+                }
+                let s = gridfinity::build_piece(&p, &c, &c, None).unwrap();
+                let n = gridfinity_cad::tessellation_leaks(&tessellate(&s, 1)).len();
+                leaky += (n > 0) as usize;
+                total += n;
+                checked += 1;
+                cells_seen += c.len();
+            }
+        }
+        println!(
+            "swept {checked} blobs ({cells_seen} cells): {leaky} leaky, {total} leak edges"
+        );
+    }
+
+    #[test]
+    #[ignore]
     fn profile() {
         use gridfinity_cad::kernel::perf;
         let sample: Vec<usize> = (0..(10.0 * FPS) as usize).collect();

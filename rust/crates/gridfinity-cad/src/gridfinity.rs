@@ -3,7 +3,7 @@ use crate::kernel::build::{loop_of, ring, wall_between};
 use crate::kernel::geom::Surface;
 use crate::layout::{
     EdgeClass, EffectiveWalls, GridCell, GridEdge, Orientation, SplitLine, cell_edges,
-    classify_edge, effective_walls, partition_cells,
+    classify_edge_in, effective_walls, partition_cells,
 };
 use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
@@ -1087,7 +1087,8 @@ fn plan_piece(
     let openish = !walls.open.is_empty();
     let slope = if openish { None } else { slope };
 
-    let seam = |e: &GridEdge| classify_edge(bin_cells, *e) == EdgeClass::Internal;
+    let bin_set = crate::layout::cell_set(bin_cells);
+    let seam = |e: &GridEdge| classify_edge_in(&bin_set, *e) == EdgeClass::Internal;
     let inset = |e: &GridEdge| -> f32 { if seam(e) { 0.0 } else { HALF_TOL } };
     let walled = |e: &GridEdge| walls.walled.contains(e);
     let loops = boundary_steps(cells);

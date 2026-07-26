@@ -1,5 +1,5 @@
 
-use crate::kernel::build::{loop_of, ring, ring_on_plane, seg_edge, wall_between};
+use crate::kernel::build::{RingEdges, loop_of, ring, ring_into, ring_on_plane, seg_edge, wall_between};
 use crate::kernel::chamfer::chamfer_edges;
 use crate::kernel::fillet;
 use crate::kernel::geom::Surface;
@@ -157,11 +157,55 @@ pub fn run_all(prog: &Program) -> Result<Solid, String> {
     run(prog, |_| true)
 }
 
+/// Rough upper bound on the interned vertices/edges/faces a full run emits, so
+/// `Builder`'s intern maps do not rehash their way up to six figures. Only the
+/// magnitude matters; over-estimating costs memory, under-estimating costs a
+/// rehash.
+fn size_hint(prog: &Program) -> (usize, usize, usize) {
+    let mut segs = 0usize;
+    let mut faces = 0usize;
+    for st in &prog.steps {
+        match &st.op {
+            Op::Loft { profiles, .. } => {
+                let n = profiles
+                    .iter()
+                    .map(|(name, _)| prog.sketch(name).map_or(0, |s| s.len()))
+                    .max()
+                    .unwrap_or(0);
+                segs += n * profiles.len() * 2;
+                faces += n * profiles.len();
+            }
+            Op::Wall { lower, upper, .. } | Op::WallFaces { lower, upper, .. } => {
+                segs += (lower.len() + upper.len()) * 2;
+                faces += lower.len();
+            }
+            Op::SlopedWall { lower, upper, .. } => {
+                segs += (lower.len() + upper.len()) * 2;
+                faces += lower.len();
+            }
+            Op::PlanarFace { outer, holes, .. } | Op::Cap { outer, holes, .. } => {
+                segs += outer.0.len() + holes.iter().map(|h| h.0.len()).sum::<usize>();
+                faces += 1;
+            }
+            Op::Slabs { stack, .. } => {
+                let n: usize =
+                    stack.iter().map(|(_, s)| s.region.iter().map(|l| l.len()).sum::<usize>()).sum();
+                segs += n * 4;
+                faces += n * 3;
+            }
+            _ => {}
+        }
+    }
+    (segs, segs * 2, faces)
+}
+
 pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, String> {
     let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::ProgramRun);
-    let mut b = Builder::new();
+    let (nv, ne, nf) = size_hint(prog);
+    let mut b = Builder::with_capacity(nv, ne, nf, nf * 4, nf);
     let mut blends: Vec<(EdgeId, f32)> = Vec::new();
     let mut chamfers: Vec<(EdgeId, f32, f32)> = Vec::new();
+    let (mut ra, mut rb) = (RingEdges::default(), RingEdges::default());
 
     for (i, st) in prog.steps.iter().enumerate() {
         if !enabled(i) {
@@ -217,12 +261,13 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                         Ok((p, *z))
                     })
                     .collect::<Result<_, _>>()?;
+                ring_into(&mut b, resolved[0].0, resolved[0].1, &mut ra);
                 for w in resolved.windows(2) {
                     let (lower, z0) = w[0];
                     let (upper, z1) = w[1];
-                    let lo = ring(&mut b, lower, z0);
-                    let hi = ring(&mut b, upper, z1);
-                    wall_between(&mut b, lower, upper, &lo, &hi, z0, z1, *outward);
+                    ring_into(&mut b, upper, z1, &mut rb);
+                    wall_between(&mut b, lower, upper, &ra, &rb, z0, z1, *outward);
+                    std::mem::swap(&mut ra, &mut rb);
                 }
             }
             Op::PlanarFace { plane, outer, holes } => {
@@ -242,9 +287,9 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                 emit_hole(&mut b, *at, *from_z, profile)?;
             }
             Op::WallFaces { lower, upper, z0, z1, outward } => {
-                let lo = ring(&mut b, lower, *z0);
-                let hi = ring(&mut b, upper, *z1);
-                wall_between(&mut b, lower, upper, &lo, &hi, *z0, *z1, *outward);
+                ring_into(&mut b, lower, *z0, &mut ra);
+                ring_into(&mut b, upper, *z1, &mut rb);
+                wall_between(&mut b, lower, upper, &ra, &rb, *z0, *z1, *outward);
             }
             Op::SlopedWall { lower, upper, lower_plane, upper_plane, outward } => {
                 let lo_rt = lower_plane.resolve(prog);
@@ -254,9 +299,9 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                 wall_between(&mut b, lower, upper, &lo, &hi, lo_rt.0.z, hi_rt.0.z, *outward);
             }
             Op::Wall { lower, upper, z0, z1, outward } => {
-                let lo = ring(&mut b, lower, *z0);
-                let hi = ring(&mut b, upper, *z1);
-                wall_between(&mut b, lower, upper, &lo, &hi, *z0, *z1, *outward);
+                ring_into(&mut b, lower, *z0, &mut ra);
+                ring_into(&mut b, upper, *z1, &mut rb);
+                wall_between(&mut b, lower, upper, &ra, &rb, *z0, *z1, *outward);
             }
             Op::Cap { z, up, outer, holes } => {
                 let o = ring(&mut b, &outer.0, *z);

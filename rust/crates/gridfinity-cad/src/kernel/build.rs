@@ -4,6 +4,7 @@ use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::sketch::{Seg, Sketch, loop_area, reverse_loop};
 use crate::kernel::topo::{Builder, EdgeId, Loop, Solid, VertexId};
 
+#[derive(Default, Clone)]
 pub struct RingEdges {
     pub verts: Vec<VertexId>,
     pub edges: Vec<(EdgeId, bool)>,
@@ -25,25 +26,34 @@ fn seg_radius(s: &Seg) -> Option<f32> {
 }
 
 pub fn ring(b: &mut Builder, segs: &[Seg], z: f32) -> RingEdges {
+    let mut out = RingEdges::default();
+    ring_into(b, segs, z, &mut out);
+    out
+}
+
+/// `ring` into a caller-owned buffer. Emitting one ring per band allocates two
+/// `Vec`s per call, and a loft of thousands of pegs does that millions of times.
+pub fn ring_into(b: &mut Builder, segs: &[Seg], z: f32, out: &mut RingEdges) {
     let n = segs.len();
-    let verts: Vec<VertexId> = segs
-        .iter()
-        .map(|s| {
-            let p = s.start();
-            b.vertex(vec3_of(p.x, p.y, z))
-        })
-        .collect();
-    let mut edges = Vec::with_capacity(n);
+    out.verts.clear();
+    out.edges.clear();
+    out.verts.reserve(n);
+    out.edges.reserve(n);
+    for s in segs {
+        let p = s.start();
+        let v = b.vertex(vec3_of(p.x, p.y, z));
+        out.verts.push(v);
+    }
     for k in 0..n {
         let k1 = (k + 1) % n;
-        edges.push(match segs[k] {
-            Seg::Line { .. } => b.line(verts[k], verts[k1]),
+        let (v0, v1) = (out.verts[k], out.verts[k1]);
+        out.edges.push(match segs[k] {
+            Seg::Line { .. } => b.line(v0, v1),
             Seg::Arc { center, radius, a0, a1, .. } => {
-                b.arc(verts[k], verts[k1], vec3_of(center.x, center.y, z), Vec3::Z, radius, Vec3::X, a0, a1)
+                b.arc(v0, v1, vec3_of(center.x, center.y, z), Vec3::Z, radius, Vec3::X, a0, a1)
             }
         });
     }
-    RingEdges { verts, edges }
 }
 
 pub fn ring_on_plane(b: &mut Builder, segs: &[Seg], plane: (Vec3, Vec3)) -> RingEdges {
@@ -117,8 +127,8 @@ pub fn wall_between(
             Seg::Arc { a0, a1, .. } => outward == (a1 > a0),
             _ => outward,
         };
-        let lp = Loop::new(vec![(be, bd), (vb.0, vb.1), (te, !td), (va.0, !va.1)]);
-        b.face(surface, sense, lp, vec![]);
+        let lp = [(be, bd), (vb.0, vb.1), (te, !td), (va.0, !va.1)];
+        b.face_from(surface, sense, &lp, &[]);
     }
 }
 

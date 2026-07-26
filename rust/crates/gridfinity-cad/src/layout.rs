@@ -1,5 +1,5 @@
 
-use std::collections::HashSet;
+use crate::kernel::hash::FxHashSet;
 
 pub const PITCH: i32 = 42;
 
@@ -89,7 +89,9 @@ pub struct Piece {
     pub cells: Vec<GridCell>,
 }
 
-fn cell_set(cells: &[GridCell]) -> HashSet<GridCell> {
+pub type CellSet = FxHashSet<GridCell>;
+
+pub fn cell_set(cells: &[GridCell]) -> CellSet {
     cells.iter().copied().collect()
 }
 
@@ -108,7 +110,13 @@ pub enum EdgeClass {
 }
 
 pub fn classify_edge(cells: &[GridCell], e: GridEdge) -> EdgeClass {
-    let s = cell_set(cells);
+    classify_edge_in(&cell_set(cells), e)
+}
+
+/// Same classification against a set the caller already owns. `classify_edge`
+/// rebuilds the set on every call, which is quadratic when a whole boundary is
+/// classified against one bin.
+pub fn classify_edge_in(s: &CellSet, e: GridEdge) -> EdgeClass {
     let [a, b] = edge_neighbours(e);
     match (s.contains(&a), s.contains(&b)) {
         (true, true) => EdgeClass::Internal,
@@ -126,37 +134,33 @@ pub fn cell_edges(c: GridCell) -> [GridEdge; 4] {
     ]
 }
 
-pub fn perimeter_edges(cells: &[GridCell]) -> Vec<GridEdge> {
-    let s = cell_set(cells);
-    let mut out = HashSet::new();
+/// Every cell edge, classified once. A cell edge is visited by at most two
+/// cells, so emitting only from the lower-coordinate side dedupes without a set.
+fn scan_edges(cells: &[GridCell], s: &CellSet, want_internal: bool) -> Vec<GridEdge> {
+    let mut v: Vec<GridEdge> = Vec::new();
     for &c in cells {
         for e in cell_edges(c) {
             let [a, b] = edge_neighbours(e);
-            let n = s.contains(&a) as u8 + s.contains(&b) as u8;
-            if n == 1 {
-                out.insert(e);
+            let (ina, inb) = (s.contains(&a), s.contains(&b));
+            if (ina && inb) != want_internal {
+                continue;
             }
+            if ina && inb && a != c {
+                continue;
+            }
+            v.push(e);
         }
     }
-    let mut v: Vec<GridEdge> = out.into_iter().collect();
     sort_edges(&mut v);
     v
 }
 
+pub fn perimeter_edges(cells: &[GridCell]) -> Vec<GridEdge> {
+    scan_edges(cells, &cell_set(cells), false)
+}
+
 pub fn internal_edges(cells: &[GridCell]) -> Vec<GridEdge> {
-    let s = cell_set(cells);
-    let mut out = HashSet::new();
-    for &c in cells {
-        for e in cell_edges(c) {
-            let [a, b] = edge_neighbours(e);
-            if s.contains(&a) && s.contains(&b) {
-                out.insert(e);
-            }
-        }
-    }
-    let mut v: Vec<GridEdge> = out.into_iter().collect();
-    sort_edges(&mut v);
-    v
+    scan_edges(cells, &cell_set(cells), true)
 }
 
 pub fn sort_edges(edges: &mut [GridEdge]) {
@@ -167,9 +171,9 @@ pub fn sort_edges(edges: &mut [GridEdge]) {
 
 #[derive(Clone, Debug, Default)]
 pub struct EffectiveWalls {
-    pub walled: HashSet<GridEdge>,
-    pub open: HashSet<GridEdge>,
-    pub dividers: HashSet<GridEdge>,
+    pub walled: FxHashSet<GridEdge>,
+    pub open: FxHashSet<GridEdge>,
+    pub dividers: FxHashSet<GridEdge>,
 }
 
 pub fn effective_walls(
@@ -178,12 +182,14 @@ pub fn effective_walls(
     open_edges: &[GridEdge],
     divider_edges: &[GridEdge],
 ) -> EffectiveWalls {
-    let open_set: HashSet<GridEdge> = open_edges.iter().copied().collect();
-    let divider_set: HashSet<GridEdge> = divider_edges.iter().copied().collect();
+    let open_set: FxHashSet<GridEdge> = open_edges.iter().copied().collect();
+    let divider_set: FxHashSet<GridEdge> = divider_edges.iter().copied().collect();
     let mut out = EffectiveWalls::default();
 
-    for e in perimeter_edges(piece_cells) {
-        match classify_edge(whole_bin_cells, e) {
+    let piece_set = cell_set(piece_cells);
+    let bin_set = cell_set(whole_bin_cells);
+    for e in scan_edges(piece_cells, &piece_set, false) {
+        match classify_edge_in(&bin_set, e) {
             EdgeClass::Internal => {
                 if divider_set.contains(&e) {
                     out.walled.insert(e);
@@ -200,7 +206,7 @@ pub fn effective_walls(
             }
         }
     }
-    for e in internal_edges(piece_cells) {
+    for e in scan_edges(piece_cells, &piece_set, true) {
         if divider_set.contains(&e) {
             out.dividers.insert(e);
         }
