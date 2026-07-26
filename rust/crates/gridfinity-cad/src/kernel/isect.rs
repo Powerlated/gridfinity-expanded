@@ -265,6 +265,20 @@ fn plane_torus(a: &Surface, b: &Surface) -> Intersection {
     let (_, n) = plane_parts(pl);
     let Surface::Torus { center, axis, major_r, minor_r, .. } = *to else { unreachable!() };
     let cos_t = axis.dot(n).abs();
+    if cos_t < TOL {
+        let offset = -pl.signed_distance(center);
+        if offset.abs() > major_r + minor_r + TOL {
+            return Intersection::Empty;
+        }
+        return Intersection::Curves(
+            [1.0f32, -1.0]
+                .iter()
+                .map(|&branch| {
+                    Curve::torus_section(center, axis, n, offset, major_r, minor_r, branch)
+                })
+                .collect(),
+        );
+    }
     if cos_t < 1.0 - TOL {
         return Intersection::Unsupported(
             "plane/torus at a general angle is a quartic (Cassinian) curve",
@@ -449,6 +463,22 @@ mod tests {
         let isect = intersect_surfaces(&pl, &to);
         assert_eq!(isect.curves().len(), 2, "inner and outer rings");
         assert_on_both(&pl, &to, &isect);
+    }
+
+    #[test]
+    fn plane_torus_parallel_to_the_axis_gives_two_spiric_branches() {
+        let to = Surface::torus_z(Vec3::ZERO, 10.0, 2.0);
+        let pl = Surface::plane(Vec3::new(3.0, 0.0, 0.0), Vec3::X);
+        let isect = intersect_surfaces(&pl, &to);
+        assert_eq!(isect.curves().len(), 2, "the two halves either side of the plane normal");
+        assert_on_both(&pl, &to, &isect);
+    }
+
+    #[test]
+    fn a_plane_clear_of_the_torus_meets_it_nowhere() {
+        let to = Surface::torus_z(Vec3::ZERO, 10.0, 2.0);
+        let pl = Surface::plane(Vec3::new(12.5, 0.0, 0.0), Vec3::X);
+        assert!(matches!(intersect_surfaces(&pl, &to), Intersection::Empty));
     }
 
     #[test]

@@ -15,5 +15,6 @@ pub mod rectregion;
 pub mod region2d;
 pub mod slab;
 pub mod sketch;
+pub mod split;
 pub mod tess;
 pub mod topo;
