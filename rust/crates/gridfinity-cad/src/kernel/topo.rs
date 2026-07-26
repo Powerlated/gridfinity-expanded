@@ -1,12 +1,10 @@
 
 use crate::kernel::geom::{Curve, Surface};
-use crate::kernel::math::{Vec3, WELD, weld_key};
+use crate::kernel::math::{Vec3, weld_key};
 use crate::kernel::hash::FxHashMap;
 
 pub type VertexId = usize;
 pub type EdgeId = usize;
-
-const STRADDLE_TOLERANCE_CELLS: f32 = 0.05;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Vertex {
@@ -238,20 +236,6 @@ impl std::ops::Index<usize> for EdgeFaces {
     }
 }
 
-fn straddled_axes(p: Vec3) -> (i64, i64, i64) {
-    let axis = |v: f32| -> i64 {
-        let scaled = v * WELD;
-        let frac = scaled - scaled.round();
-        if frac.abs() < 0.5 - STRADDLE_TOLERANCE_CELLS {
-            0
-        } else if frac > 0.0 {
-            1
-        } else {
-            -1
-        }
-    };
-    (axis(p.x), axis(p.y), axis(p.z))
-}
 
 #[derive(Default)]
 pub struct Builder {
@@ -347,49 +331,11 @@ impl Builder {
 
     pub fn vertex(&mut self, p: Vec3) -> VertexId {
         crate::kernel::perf::count(crate::kernel::perf::Metric::BuilderVertex);
-        let key = weld_key(p);
-        let offsets = straddled_axes(p);
-        if offsets != (0, 0, 0) {
-            if let Some(&id) = self.vert_index.get(&key) {
-                return id;
-            }
-            if let Some(id) = self.neighbouring_vertex(key, p, offsets) {
-                self.vert_index.insert(key, id);
-                return id;
-            }
-        }
-        *self.vert_index.entry(key).or_insert_with(|| {
+        *self.vert_index.entry(weld_key(p)).or_insert_with(|| {
             let id = self.verts.len();
             self.verts.push(Vertex { point: p });
             id
         })
-    }
-
-    fn neighbouring_vertex(
-        &self,
-        key: (i64, i64, i64),
-        p: Vec3,
-        (sx, sy, sz): (i64, i64, i64),
-    ) -> Option<VertexId> {
-        let mut best: Option<(VertexId, f32)> = None;
-        for dx in [0, sx] {
-            for dy in [0, sy] {
-                for dz in [0, sz] {
-                    if (dx, dy, dz) == (0, 0, 0) {
-                        continue;
-                    }
-                    let probe = (key.0 + dx, key.1 + dy, key.2 + dz);
-                    let Some(&id) = self.vert_index.get(&probe) else {
-                        continue;
-                    };
-                    let d = (self.verts[id].point - p).abs().max_element();
-                    if d * WELD <= STRADDLE_TOLERANCE_CELLS && best.is_none_or(|(_, bd)| d < bd) {
-                        best = Some((id, d));
-                    }
-                }
-            }
-        }
-        best.map(|(id, _)| id)
     }
 
     pub fn line(&mut self, a: VertexId, b: VertexId) -> (EdgeId, bool) {

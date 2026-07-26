@@ -86,14 +86,6 @@ mod tests {
     }
 
     #[test]
-    fn a_point_computed_twice_across_a_weld_cell_boundary_interns_once() {
-        let mut b = crate::kernel::topo::Builder::new();
-        let a = b.vertex(kernel::math::Vec3::new(40.55, 57.819447, 8.2));
-        let c = b.vertex(kernel::math::Vec3::new(40.549995, 57.81945, 8.2));
-        assert_eq!(a, c, "f32 drift across a weld cell boundary must not split a vertex");
-    }
-
-    #[test]
     fn a_partial_height_wall_leaving_the_footprint_stays_manifold() {
         let p = gridfinity::Params {
             bins: vec![LogicalBin {

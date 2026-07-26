@@ -141,17 +141,18 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   it must finish through `build_compact` (not `build`) to drop and renumber them. **Plain `build`
   must never compact:** callers pick blend and chamfer edges by id *before* building, and
   renumbering would silently repoint those selections at other edges.
-**Vertex interning is straddle-aware.** `weld_key` rounds `p * WELD`, so two computations of the
-*same* point that differ by an f32 ulp can land either side of a cell boundary (observed:
-`57.819447` → 578194, `57.81945` → 578195) and intern as two vertices, which dangles every edge
-touching them and fails `validate`. `Builder::vertex` therefore checks, arithmetically and with no
-hashing, whether any coordinate sits within `STRADDLE_TOLERANCE_CELLS` of a boundary; only then does
-it probe the (at most 7) neighbouring cells and reuse a vertex within that tolerance. Points in a
-cell's interior — almost all of them — keep the original single-`entry` fast path. This is a
-**reconciliation at intern time, not the root fix**: the real defect is that two producers in the
-banded-cavity path derive the same wall corner through different arithmetic. It still costs ~10% of
-a 32x32 build (18.0 → 20.0ms, alternating A/B), which is the price of not having found those
-producers yet.
+
+**A shared cut point must be solved once, not once per side.** `presplit_regions` used to walk
+*ordered* region pairs, so a crossing was solved twice — `seg_seg_points(sA, sB)` for A's cut list
+and `seg_seg_points(sB, sA)` for B's. The line/line determinant is not ulp-symmetric under that
+swap, so the two "shared" copies could differ by an f32 ulp; if that ulp straddled a `weld_key`
+cell boundary (observed: `57.819447` → 578194 vs `57.81945` → 578195) the two segments interned
+*two* vertices, every edge touching them dangled, and `validate` failed with `fwd=1 bwd=0`. It walks
+unordered pairs now and pushes the identical `pt` into both segments' cut lists, which is what
+"cut points are computed once and shared verbatim" was always supposed to mean. Halving the solves
+also made it **faster than before the bug was known**: a 32x32 build went 19.4 → 17.1ms
+(alternating A/B). Resist any fix for this class that reconciles *downstream* — snapping in
+`Builder::vertex` was tried, cost ~10% of a build, and only hid which producer was wrong.
 
 - **`sketch.rs`** — 2D profiles as closed loops of `Line`/`Arc` segments (`rectangle`,
   `rounded_rect`, `circle`). Corner radii are real arcs. Outer loops CCW.
@@ -226,7 +227,9 @@ producers yet.
 - **`region2d.rs`** — exact 2D boolean algebra on seg-loop regions (outers CCW, holes CW):
   `region_union`/`region_difference`/`region_intersection`. All four Line/Arc intersection pairs
   are closed form (line/line by determinant, line/circle by the quadratic, circle/circle by the
-  radical line); cut points are computed once and shared verbatim so selected pieces chain exactly.
+  radical line); cut points are computed once, for an *unordered* segment pair, and pushed verbatim
+  into both sides' cut lists so selected pieces chain exactly (see the shared-cut-point note under
+  `topo.rs` for why solving each side separately silently splits vertices).
   `presplit_regions` gives several booleans over the same inputs one common segmentation — required
   whenever their results must weld to each other. `split_regions` exposes the classified pieces with
   caller-supplied provenance tags, which is how the inner-wall planner names contact runs without

@@ -150,15 +150,20 @@ pub fn presplit_regions(regions: &[Vec<Vec<Seg>>]) -> Vec<Vec<Vec<Seg>>> {
         .iter()
         .map(|r| r.iter().fold(Aabb::EMPTY, |acc, x| acc.union(*x)))
         .collect();
-    for (ri, r) in regions.iter().enumerate() {
-        for (li, l) in r.iter().enumerate() {
-            for (si, s) in l.iter().enumerate() {
-                let sbox = boxes[ri][li][si];
-                for (rj, r2) in regions.iter().enumerate() {
-                    if ri == rj || !boxes_meet(sbox, region_box[rj]) {
-                        continue;
-                    }
-                    for (lj, l2) in r2.iter().enumerate() {
+    for ri in 0..regions.len() {
+        for rj in ri + 1..regions.len() {
+            if !boxes_meet(region_box[ri], region_box[rj]) {
+                continue;
+            }
+            let (before, from_rj) = cuts.split_at_mut(rj);
+            let (cuts_i, cuts_j) = (&mut before[ri], &mut from_rj[0]);
+            for (li, l) in regions[ri].iter().enumerate() {
+                if !boxes_meet(loop_box[ri][li], region_box[rj]) {
+                    continue;
+                }
+                for (si, s) in l.iter().enumerate() {
+                    let sbox = boxes[ri][li][si];
+                    for (lj, l2) in regions[rj].iter().enumerate() {
                         if !boxes_meet(sbox, loop_box[rj][lj]) {
                             continue;
                         }
@@ -171,7 +176,8 @@ pub fn presplit_regions(regions: &[Vec<Vec<Seg>>]) -> Vec<Vec<Vec<Seg>>> {
                                 continue;
                             }
                             for pt in seg_seg_points(s, s2) {
-                                cuts[ri][li][si].push((seg_param(s, pt), pt));
+                                cuts_i[li][si].push((seg_param(s, pt), pt));
+                                cuts_j[lj][sj].push((seg_param(s2, pt), pt));
                             }
                         }
                     }
