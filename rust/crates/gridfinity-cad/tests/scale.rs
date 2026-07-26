@@ -104,6 +104,28 @@ fn build_bench() {
 
 #[test]
 #[ignore]
+fn plan_bench() {
+    let (w, h) = match std::env::var("SCALE_WH") {
+        Ok(s) => {
+            let mut it = s.split('x').map(|v| v.parse().unwrap());
+            (it.next().unwrap(), it.next().unwrap())
+        }
+        Err(_) => (48, 48),
+    };
+    let p = params_for(blob(w, h), Params::default());
+    let mut best = f64::INFINITY;
+    let mut ops = 0;
+    for _ in 0..15 {
+        let t = Instant::now();
+        let prog = gridfinity_cad::gridfinity::program(&p);
+        best = best.min(t.elapsed().as_secs_f64() * 1e3);
+        ops = prog.steps.len();
+    }
+    println!("\nplan best of 15 at {w}x{h}: {best:.3}ms for {ops} ops");
+}
+
+#[test]
+#[ignore]
 fn scale_report() {
     println!();
     for (w, h) in [(2, 2), (4, 4), (6, 6), (8, 8), (12, 12), (16, 16), (24, 24), (32, 32)] {

@@ -381,6 +381,22 @@ No superlinear cost remains in the pipeline. Everything now scales linearly or b
 count; the items above `plan_piece` in the profile grow only through more compartments, meaning
 more calls, not more work per call.
 
+**`plan_piece` was investigated and left alone.** At 1476 cells it splits roughly `pegemit` 3.7ms
+/ `stitch_loops_2d` 3.9ms / peg profiles 1.3ms / outer+cavity 2.2ms. Removing the loop clones in
+`stitch_loops_2d` and moving sketch names into their `Op::Sketch` instead of cloning both measured
+*neutral* — the clones are a few hundred bytes each and sit under this machine's noise. Keying
+`Program`'s `sketches` map by step index instead of storing a second copy of each profile made
+planning slightly cheaper and the **whole build ~3ms slower**, because `Program::sketch` then
+chases into the large `steps` vec on every loft lookup during `run`; it was reverted. The only
+real cost found is the ~5 per-cell `format!` labels, worth ~1ms of 11.9ms (consistent across four
+alternating A/B rounds) — display-only text the construction debugger needs, and removing the
+per-label allocation means giving `Program` a string arena and changing `Step`'s API for ~1.6% of
+a rebuild. Not taken.
+
+**Always A/B by alternating** stash/unstash within one session, several rounds. A single
+before/after pair on this machine drifts enough to invent a 2.5ms improvement that a proper
+alternating run shows to be 0.5ms — that nearly shipped the `sketches` regression above.
+
 `perf_counters_see_a_real_build` needs an inner wall that *crosses* the compartment boundary. With
 box rejection in place a free-standing wall yields no crossing pair at all, so `seg_seg_points`
 legitimately never gets called and the metric never fires.
