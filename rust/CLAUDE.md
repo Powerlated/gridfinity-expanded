@@ -362,11 +362,24 @@ alone — all `#[ignore]`d tools, like `fuzz.rs`). Four changes, biggest first:
   `project` calls per grid face removed, one weld key per boundary point instead of three per
   triangle, and a pre-sized output buffer: 16.2 → 12.4ms on a 660-cell bin.
 
-**Measure the tessellator with `tess_bench`, not a single rebuild.** The first two tessellator
-changes above were initially recorded here as null results because single-shot timing put them
-inside its noise; best-of-25 resolves them as ~1.08×. The remaining cost there is not
-compute — it is the boundary-sample gather and writing 120724 × 72-byte `Tri`s (~8.7 MB), so look
-at the output format before optimising further.
+**Measure with `tess_bench`/`build_bench`, never a single rebuild.** This machine's single-shot
+spread is ±30%, wide enough to hide a 10% change and to invent one. Two of the tessellator changes
+above were first recorded here as null results on single-shot evidence; best-of-25 resolves them
+as ~1.08×.
+
+**Scalar micro-optimisation in `tess` is exhausted.** Three plausible ones were tried against
+`tess_bench` and all measured flat, because LLVM already hoists them: a `Curve::prepare` mirroring
+`Surface::prepare` (the per-sample `radial_frame` is loop-invariant), hoisting the four
+`EdgeSamples` slices out of `tess_grid_face`'s grid fill, and batching `copy_face` into one
+`memcpy` per run of untouched faces (1.8% at 1476 cells, and it would have made `Solid` promise
+that a face's loops are contiguous *and* that faces' loop ranges are ordered — not part of its
+contract, and a trap for any future operator that emits faces out of order). What remains is
+memory traffic: the boundary-sample gather and writing 120724 × 72-byte `Tri`s (~8.7 MB). The next
+real gain there is the output format, not the arithmetic.
+
+No superlinear cost remains in the pipeline. Everything now scales linearly or better with cell
+count; the items above `plan_piece` in the profile grow only through more compartments, meaning
+more calls, not more work per call.
 
 `perf_counters_see_a_real_build` needs an inner wall that *crosses* the compartment boundary. With
 box rejection in place a free-standing wall yields no crossing pair at all, so `seg_seg_points`

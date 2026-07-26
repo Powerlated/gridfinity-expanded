@@ -61,6 +61,7 @@ fn tess_bench() {
     let solid = try_build(&p).expect("build");
     let mut best = f64::INFINITY;
     let mut tris = 0;
+    let _ = gridfinity_cad::kernel::tess::tess_diag();
     for _ in 0..25 {
         let t = Instant::now();
         let tess = tessellate(&solid, 4);
@@ -68,6 +69,37 @@ fn tess_bench() {
         tris = tess.tris.len();
     }
     println!("\ntess best of 25: {best:.3}ms for {tris} tris ({} faces)", solid.faces.len());
+    let d = gridfinity_cad::kernel::tess::tess_diag();
+    let avg = |x: u64| x as f64 / 1e6 / 25.0;
+    println!(
+        "  per-run avg: grid {:.2} sample {:.2} triangulate {:.2} retain {:.2}",
+        avg(d[0]),
+        avg(d[1]),
+        avg(d[2]),
+        avg(d[3])
+    );
+}
+
+#[test]
+#[ignore]
+fn build_bench() {
+    let (w, h) = match std::env::var("SCALE_WH") {
+        Ok(s) => {
+            let mut it = s.split('x').map(|v| v.parse().unwrap());
+            (it.next().unwrap(), it.next().unwrap())
+        }
+        Err(_) => (32, 32),
+    };
+    let p = params_for(blob(w, h), Params::default());
+    let mut best = f64::INFINITY;
+    let mut faces = 0;
+    for _ in 0..15 {
+        let t = Instant::now();
+        let s = try_build(&p).expect("build");
+        best = best.min(t.elapsed().as_secs_f64() * 1e3);
+        faces = s.faces.len();
+    }
+    println!("\nbuild best of 15 at {w}x{h}: {best:.3}ms for {faces} faces");
 }
 
 #[test]

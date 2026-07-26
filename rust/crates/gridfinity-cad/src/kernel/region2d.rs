@@ -639,7 +639,6 @@ fn aabb_gap(x: Aabb, y: Aabb) -> f32 {
     (dx * dx + dy * dy).sqrt()
 }
 
-///
 pub fn loops_within(a: &[Seg], b: &[Seg], limit: f32) -> bool {
     let _perf = perf::scope(perf::Metric::MinLoopDistance);
     if a.is_empty() || b.is_empty() || limit <= 0.0 {

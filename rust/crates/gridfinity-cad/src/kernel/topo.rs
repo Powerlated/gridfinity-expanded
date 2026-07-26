@@ -199,7 +199,6 @@ impl Solid {
         EdgeFaces { off, flat }
     }
 
-    ///
     fn compact_edges(&mut self) {
         let mut used = vec![false; self.edges.len()];
         for &(e, _) in &self.loop_edges {
@@ -267,7 +266,6 @@ impl Builder {
         }
     }
 
-    ///
     pub fn resume(solid: &Solid, seed: &[bool]) -> Builder {
         let mut b = Builder {
             verts: solid.verts.clone(),
@@ -306,7 +304,6 @@ impl Builder {
         b
     }
 
-    ///
     pub fn copy_face(&mut self, solid: &Solid, fid: usize) -> usize {
         let f = &solid.faces[fid];
         let loop0 = self.loops.len() as u32 - 1;
@@ -463,7 +460,6 @@ impl Builder {
         }
     }
 
-    ///
     pub fn build_compact(self) -> Solid {
         let mut s = self.build();
         s.compact_edges();
