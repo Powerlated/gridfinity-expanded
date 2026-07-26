@@ -9,6 +9,7 @@ pub mod isect;
 pub mod math;
 pub mod mesh;
 pub mod perf;
+pub mod planar;
 pub mod program;
 pub mod rectregion;
 pub mod region2d;

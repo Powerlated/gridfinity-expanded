@@ -31,7 +31,7 @@ Prohibited anywhere in the modelling pipeline (`sketch` → `build` → `topo` �
 
 Explicitly still allowed, because they sit *at or after* the tessellation boundary:
 
-- `earcutr` inside `tess.rs`, for final planar-face-with-holes triangulation only.
+- `planar.rs`, called from `tess.rs`, for final planar-face-with-holes triangulation only.
 - `weld_triangles`, `to_stl_binary`, `flat_vertices`, bounds — export and GL upload.
 - Mesh-based *verification* in tests (`assert_watertight`, `signed_volume`): checking the analytic
   result, never producing it.
@@ -70,14 +70,14 @@ startup): `timeout 6 ./target/debug/gridfinity-gui.exe`.
 
 Two crates (`Cargo.toml` = virtual workspace, edition 2024, resolver 3):
 
-- **`crates/gridfinity-cad`** — the engine library. Deps: `glam` (math) + `earcutr` (used *only*
-  for final planar-face-with-holes triangulation; the B-rep kernel itself is hand-rolled).
+- **`crates/gridfinity-cad`** — the engine library. One dependency: `glam` (math). Everything
+  else, B-rep kernel and triangulator alike, is hand-rolled.
 - **`crates/gridfinity-gui`** — the eframe/egui/glow app. Depends on `gridfinity-cad`.
 
 Inside `gridfinity-cad`, the CAD engine lives in **`src/kernel/`** and the parametric model beside
 it in `src/`:
 
-- `src/kernel/` — `math`, `geom`, `sketch`, `topo`, `build`, `fillet`, `tess`, `mesh`, plus the 2D
+- `src/kernel/` — `math`, `geom`, `sketch`, `topo`, `build`, `fillet`, `tess`, `planar`, `mesh`, plus the 2D
   region engines `region2d` and `rectregion`. **Nothing here knows about Gridfinity**, and the
   dependency direction is one-way: no kernel module may import from the model layer. Paths are
   `crate::kernel::topo`, `gridfinity_cad::kernel::geom`, etc.
@@ -150,12 +150,25 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   decided **once per face** (area-weighted vote against the analytic normal) — never per triangle,
   or curved faces get inconsistent internal edges. Non-planar 4-sided faces whose loop follows
   iso-u/iso-v lines (cylinder walls, cone chamfers, blend patches) take a structured-grid path
-  (avoids earcut slivers from collinear boundary runs); everything else, including planar-with-
-  holes, goes through `earcutr` with a zero-uv-area sliver filter, followed by
-  `split_boundary_chords`: earcut drops collinear boundary vertices, so triangle edges that chord
-  across boundary samples the neighbouring face emits individually are fanned back through the
-  dropped points (only through vertices earcut didn't use — inserting used ones would duplicate
-  triangles).
+  (cheaper, and gives quad strips a predictable diagonal); everything else, including planar-with-
+  holes, goes to [`planar`](#planarrs). The only triangles dropped are ones a weld would collapse
+  anyway (two vertices on the same weld key): a flat triangle with three *distinct* vertices still
+  has its three edges paired against its neighbours, so discarding it on area alone punches a slit
+  in the mesh.
+- **`planar.rs`** — planar polygon-with-holes triangulation: **monotone decomposition** (sweep top to
+  bottom, diagonals at split/merge vertices) then the stack triangulation of each y-monotone piece.
+  Chosen over ear clipping for what it guarantees, not for speed: **every boundary vertex the caller
+  supplies appears in the output** (so the neighbouring face's samples still line up and nothing has
+  to be fanned back in afterwards), holes are handled by the sweep rather than by bridging, and each
+  interior edge is shared by exactly two triangles by construction. Degeneracy is the whole
+  difficulty, because cavity floors are rectilinear and full of exactly-equal coordinates: the sweep
+  order is lexicographic (decreasing y, then increasing x), which *is* an infinitesimal shear, so no
+  two distinct vertices tie and no edge is horizontal in the sweep's frame; the orientation predicate
+  is shear invariant, so the same cross product decides left-of-edge in both frames; and the face
+  tracer names the edge it came in on **by index, through an explicit twin**, never by angle, which
+  is what a diagonal lying along a boundary edge would break. Its tests assert the three properties
+  that matter — exact area, full edge pairing, no dropped vertex — over rectilinear, many-hole,
+  collinear-staircase and random inputs.
 - **`program.rs`** — a model expressed as a **flat labelled list of ops** the kernel executes. A
   `Program` carries geometry (profiles, heights, `(seg, z)` blend selections) — never builder
   handles — so `run(prog, |i| bool)` can execute *any subset*: prefixes step through the
@@ -298,9 +311,7 @@ That instrumentation drove a churn-first data-oriented pass: a `Solid` is now fl
 `Vec`s, so cloning it is a few `memcpy`s; `Solid::edge_faces` returns a two-pass CSR (`EdgeFaces`,
 `ef[e]` slices) instead of a `Vec` per edge; and `fillet`/`chamfer`'s `rebuild_loop` takes that
 `edge_faces` as a borrow rather than recomputing it once per face. Together those cut a default
-rebuild's allocation churn ~77% (fillet_edges ~92%). The residual top churn source is `earcutr`
-inside `tess.rs` — a third-party, at-the-tessellation-boundary allocation that is deliberately not
-chased.
+rebuild's allocation churn ~77% (fillet_edges ~92%).
 
 `debugger.rs` is the construction debugger (right panel, toggled from the params panel). It calls
 `gridfinity::program(&p)` to get the model's op list, caches per-prefix face counts for display,

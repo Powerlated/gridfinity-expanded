@@ -15,5 +15,4 @@ serde = ["dep:serde"]
 glam = "0.29"
 # Robust, pure-Rust ear-cutting for the final planar-face-with-holes
 # triangulation only. The analytic B-rep kernel itself is hand-rolled.
-earcutr = "0.4"
 serde = { version = "1", features = ["derive"], optional = true }

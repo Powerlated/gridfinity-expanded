@@ -397,7 +397,7 @@ mod tests {
         let ms = t.elapsed().as_secs_f64() * 1e3;
         let d = gridfinity_cad::kernel::tess::tess_diag();
         println!("tessellate: {ms:.1} ms, {} tris", tess.tris.len());
-        for (n, v) in ["grid", "sample", "earcut", "retain", "chords"].iter().zip(d) {
+        for (n, v) in ["grid", "sample", "triangulate", "retain"].iter().zip(d) {
             println!("  {n:<8} {:>8.1} ms", v as f64 / 1e6);
         }
         let leaks = gridfinity_cad::tessellation_leaks(&tess);
