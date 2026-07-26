@@ -1,5 +1,5 @@
 
-use crate::kernel::math::{Vec2, Vec3};
+use crate::kernel::math::{Vec2, Vec3, weld_key};
 use crate::kernel::mesh::{Mesh, weld_triangles};
 use crate::kernel::topo::{EdgeId, Solid};
 
@@ -178,11 +178,16 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
         let t1 = diag.then(now);
         triangulate(&mut sc);
         let t2 = diag.then(now);
-        let uv = &sc.uv;
+        // Drop only what a weld would collapse anyway. A triangle whose three
+        // vertices are distinct but collinear has zero area, yet its three
+        // edges are still paired against its neighbours -- discarding it on
+        // area alone punches a three-edge slit in the mesh, which is what a
+        // staircase polyomino's cavity floor used to do.
+        let pts3 = &sc.pts3;
         sc.tris.retain(|&[a, b, c]| {
-            let cr = (uv[b].x - uv[a].x) * (uv[c].y - uv[a].y)
-                - (uv[b].y - uv[a].y) * (uv[c].x - uv[a].x);
-            cr.abs() > 1e-10
+            let (ka, kb, kc) =
+                (weld_key(pts3[a]), weld_key(pts3[b]), weld_key(pts3[c]));
+            ka != kb && kb != kc && ka != kc
         });
         let t3 = diag.then(now);
         split_boundary_chords(&mut sc);

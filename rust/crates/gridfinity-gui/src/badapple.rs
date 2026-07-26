@@ -197,6 +197,142 @@ mod tests {
         println!("=> 500 bins/frame = {:.1} ms/frame = {:.1} fps", per * 500.0 * 1e3, 1.0 / (per * 500.0));
     }
 
+    /// Shrink a leaking blob to the smallest still-leaking connected subset, so
+    /// the defect can be read off a shape small enough to reason about.
+    #[test]
+    #[ignore]
+    fn leak_hunt() {
+        let p = cell_params();
+        let connected = |cs: &[GridCell]| -> bool {
+            if cs.is_empty() {
+                return false;
+            }
+            let set: std::collections::HashSet<GridCell> = cs.iter().copied().collect();
+            let mut seen = std::collections::HashSet::new();
+            let mut stack = vec![cs[0]];
+            seen.insert(cs[0]);
+            while let Some(c) = stack.pop() {
+                for d in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let n = GridCell { x: c.x + d.0, y: c.y + d.1 };
+                    if set.contains(&n) && seen.insert(n) {
+                        stack.push(n);
+                    }
+                }
+            }
+            seen.len() == cs.len()
+        };
+        let leaks = |cs: &[GridCell]| -> usize {
+            match gridfinity::build_piece(&p, cs, cs, None) {
+                Ok(s) => gridfinity_cad::tessellation_leaks(&tessellate(&s, 1)).len(),
+                Err(_) => 0,
+            }
+        };
+
+        // The scan is slow; the shape it converges on is checked in directly so
+        // the analysis below can be iterated on. Set LEAK_SCAN to redo it.
+        let mut best: Option<Vec<GridCell>> = (std::env::var("LEAK_SCAN").is_err()).then(|| {
+            [(0, 5), (1, 5), (1, 4), (1, 3), (2, 3), (2, 2), (2, 1), (3, 1), (3, 0), (4, 0)]
+                .iter()
+                .map(|&(x, y)| GridCell { x, y })
+                .collect()
+        });
+        for f in (0..(10.0 * FPS) as usize).take(if best.is_some() { 0 } else { usize::MAX }) {
+            for c in components(&FRAMES[f * FRAME_BYTES..(f + 1) * FRAME_BYTES]) {
+                if leaks(&c) > 0 && best.as_ref().is_none_or(|b| c.len() < b.len()) {
+                    best = Some(c);
+                }
+            }
+        }
+        let mut cur = best.expect("no leaking blob in the sample");
+        println!("smallest leaking blob: {} cells, {} leaks", cur.len(), leaks(&cur));
+
+        loop {
+            let mut shrunk = false;
+            for i in 0..cur.len() {
+                let mut trial = cur.clone();
+                trial.remove(i);
+                if connected(&trial) && leaks(&trial) > 0 {
+                    cur = trial;
+                    shrunk = true;
+                    break;
+                }
+            }
+            if !shrunk {
+                break;
+            }
+        }
+
+        let (mx, my) = (
+            cur.iter().map(|c| c.x).min().unwrap(),
+            cur.iter().map(|c| c.y).min().unwrap(),
+        );
+        let cur: Vec<GridCell> = cur.iter().map(|c| GridCell { x: c.x - mx, y: c.y - my }).collect();
+        println!("minimal: {} cells {:?}", cur.len(), cur);
+        let (w, h) = (
+            cur.iter().map(|c| c.x).max().unwrap() + 1,
+            cur.iter().map(|c| c.y).max().unwrap() + 1,
+        );
+        for y in (0..h).rev() {
+            let row: String = (0..w)
+                .map(|x| if cur.contains(&GridCell { x, y }) { '#' } else { '.' })
+                .collect();
+            println!("  {row}");
+        }
+
+        let s = gridfinity::build_piece(&p, &cur, &cur, None).unwrap();
+        println!("validate: {:?}", s.validate());
+        let report = gridfinity_cad::audit(&s);
+        println!("{report}");
+        let tess = tessellate(&s, 1);
+        let mut bad: Vec<usize> = Vec::new();
+        for l in gridfinity_cad::tessellation_leaks(&tess) {
+            println!(
+                "  leak {:?} -> {:?} imbalance {} count {} faces {:?}",
+                l.a, l.b, l.imbalance, l.count, l.faces
+            );
+            bad.extend(l.faces.iter().copied());
+        }
+        bad.sort_unstable();
+        bad.dedup();
+        for fi in bad {
+            let f = &s.faces[fi];
+            println!(
+                "\nface {fi}: {:?} sense {} loops {:?}",
+                std::mem::discriminant(&f.surface),
+                f.sense,
+                s.face_loops(fi).map(|l| l.len()).collect::<Vec<_>>()
+            );
+            println!("  surface {:?}", f.surface);
+            for (li, lp) in s.face_loops(fi).enumerate() {
+                println!("  loop {li}:");
+                for &(e, fwd) in lp {
+                    let ed = s.edges[e];
+                    let (v0, v1) = s.directed(e, fwd);
+                    println!(
+                        "    e{e} {} {:?} -> {:?}",
+                        if fwd { '+' } else { '-' },
+                        s.vertex(v0),
+                        s.vertex(v1)
+                    );
+                    let _ = ed;
+                }
+            }
+            let tris: Vec<usize> = tess
+                .face_of_tri
+                .iter()
+                .enumerate()
+                .filter(|&(_, &f)| f == fi)
+                .map(|(i, _)| i)
+                .collect();
+            println!("  {} triangles", tris.len());
+            for i in tris {
+                let t = tess.tris[i];
+                let n = (t.pos[1] - t.pos[0]).cross(t.pos[2] - t.pos[0]).length();
+                println!("    {:?} {:?} {:?}  |n|={n:.6}", t.pos[0], t.pos[1], t.pos[2]);
+            }
+        }
+    }
+
     #[test]
     #[ignore]
     fn face_shapes() {
