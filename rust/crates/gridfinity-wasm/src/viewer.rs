@@ -52,6 +52,12 @@ impl Viewer {
         );
     }
 
+    pub fn upload_vertices(&mut self, verts: &[f32]) {
+        self.staged.clear();
+        self.staged.extend_from_slice(verts);
+        self.renderer.upload(&self.gl, &self.staged);
+    }
+
     pub fn commit_scene(&mut self, refit: bool) {
         if refit {
             match bounds_of(&self.staged) {

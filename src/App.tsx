@@ -55,9 +55,7 @@ export default function App() {
             bins={bins}
             design={generatedDesign}
             error={error}
-            badApple={badApple.active ? badApple.triangles : null}
-            badAppleBounds={badApple.active ? badApple.clip?.bounds ?? null : null}
-            badAppleFrame={badApple.active ? badApple.frame : null}
+            badApple={badApple}
           />
         </Suspense>
       </AppShell.Main>

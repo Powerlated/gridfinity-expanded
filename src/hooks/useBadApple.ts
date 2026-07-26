@@ -1,15 +1,28 @@
 import { useEffect, useRef, useState } from 'react';
+import type { MutableRefObject } from 'react';
 import type { BadAppleClip, BadAppleRequest, BadAppleResponse } from '../lib/types';
 
 const HASH = '#badapple';
 const MAX_POOL_SIZE = 4;
 const MAX_LEAD_FRAMES = 8;
 
-export interface BadAppleState {
+export interface BadAppleFrame {
+  frame: number;
+  vertices: Float32Array;
+}
+
+/**
+ * Playback feed for the clip.
+ *
+ * Frames reach the viewer through `pending`, a ref the render loop drains,
+ * rather than through React state. A `setState` per frame re-rendered the whole
+ * app thirty times a second and blocked the render loop; only `active` and
+ * `clip` change rarely enough to belong in state.
+ */
+export interface BadAppleFeed {
   active: boolean;
   clip: BadAppleClip | null;
-  frame: number;
-  triangles: Float32Array | null;
+  pending: MutableRefObject<BadAppleFrame | null>;
 }
 
 function hashIsBadApple(): boolean {
@@ -20,10 +33,10 @@ function poolSize(): number {
   return Math.min(MAX_POOL_SIZE, Math.max(1, (navigator.hardwareConcurrency ?? 2) - 1));
 }
 
-export function useBadApple(): BadAppleState {
+export function useBadApple(): BadAppleFeed {
   const [active, setActive] = useState(hashIsBadApple);
   const [clip, setClip] = useState<BadAppleClip | null>(null);
-  const [rendered, setRendered] = useState<{ frame: number; triangles: Float32Array } | null>(null);
+  const pending = useRef<BadAppleFrame | null>(null);
   const clipRef = useRef<BadAppleClip | null>(null);
 
   useEffect(() => {
@@ -35,7 +48,7 @@ export function useBadApple(): BadAppleState {
   useEffect(() => {
     if (!active) {
       setClip(null);
-      setRendered(null);
+      pending.current = null;
       clipRef.current = null;
       return;
     }
@@ -66,7 +79,7 @@ export function useBadApple(): BadAppleState {
           pump();
           return;
         }
-        if (data.ok) ready.set(data.frame, data.triangles);
+        if (data.ok) ready.set(data.frame, data.vertices);
         idle.push(worker);
         pump();
       };
@@ -115,12 +128,12 @@ export function useBadApple(): BadAppleState {
         best = Math.min(...ready.keys());
       }
 
-      const triangles = ready.get(best)!;
+      const vertices = ready.get(best)!;
       for (const frame of [...ready.keys()]) {
         if (frame <= best) ready.delete(frame);
       }
       displayed = best;
-      setRendered({ frame: best, triangles });
+      pending.current = { frame: best, vertices };
       pump();
     };
     raf = requestAnimationFrame(tick);
@@ -129,13 +142,9 @@ export function useBadApple(): BadAppleState {
       disposed = true;
       cancelAnimationFrame(raf);
       workers.forEach((worker) => worker.terminate());
+      pending.current = null;
     };
   }, [active]);
 
-  return {
-    active,
-    clip,
-    frame: rendered?.frame ?? 0,
-    triangles: rendered?.triangles ?? null,
-  };
+  return { active, clip, pending };
 }

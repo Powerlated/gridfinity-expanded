@@ -5,12 +5,12 @@ import { createViewer, initKernel } from '../../lib/geometry/kernel';
 import type { Viewer } from '../../lib/geometry/kernel';
 import { previewLayout } from '../../lib/preview';
 import type { PreviewPiece } from '../../lib/preview';
-import type { BadAppleClip, Bin, Design } from '../../lib/types';
+import type { Bin, Design } from '../../lib/types';
+import type { BadAppleFeed } from '../../hooks/useBadApple';
 import { binColor } from '../sidebar/binColors';
 
 const NO_PARTS: PreviewPiece[] = [];
 const CLEAR_COLOR = 0x1c1c21;
-const BAD_APPLE_COLOR = 0xe9e9f2;
 const DEFAULT_CAMERA_YAW = 0.9;
 const FACE_ORIENTATION = 'counter-clockwise';
 
@@ -22,9 +22,7 @@ interface Props {
   bins: Bin[];
   design: Design | null;
   error: string | null;
-  badApple?: Float32Array | null;
-  badAppleBounds?: BadAppleClip['bounds'] | null;
-  badAppleFrame?: number | null;
+  badApple?: BadAppleFeed | null;
 }
 
 export function ModelViewer({
@@ -32,14 +30,16 @@ export function ModelViewer({
   design,
   error,
   badApple = null,
-  badAppleBounds = null,
-  badAppleFrame = null,
 }: Props) {
   const designParts = useMemo(() => previewLayout(bins, design), [bins, design]);
-  const parts = badApple ? NO_PARTS : designParts;
+  const active = badApple?.active ?? false;
+  const parts = active ? NO_PARTS : designParts;
+  const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewerRef = useRef<Viewer | null>(null);
+  const feedRef = useRef<BadAppleFeed | null>(null);
   const badAppleFramedRef = useRef(false);
+  feedRef.current = active ? badApple : null;
   const [viewer, setViewer] = useState<Viewer | null>(null);
   const [kernelError, setKernelError] = useState<string | null>(null);
 
@@ -74,6 +74,25 @@ export function ModelViewer({
 
         const tick = (time: number) => {
           frame = requestAnimationFrame(tick);
+          const next = feedRef.current?.pending.current ?? null;
+          if (next) {
+            feedRef.current!.pending.current = null;
+            created.upload_vertices(next.vertices);
+            if (!badAppleFramedRef.current) {
+              badAppleFramedRef.current = true;
+              const clipBounds = feedRef.current?.clip?.bounds;
+              if (clipBounds) {
+                created.frame_bounds(
+                  Float32Array.from(clipBounds.min),
+                  Float32Array.from(clipBounds.max),
+                );
+              }
+              created.look_down();
+            }
+            if (containerRef.current) {
+              containerRef.current.dataset.badappleFrame = String(next.frame);
+            }
+          }
           created.render(time / 1000);
         };
         frame = requestAnimationFrame(tick);
@@ -136,7 +155,7 @@ export function ModelViewer({
   }, [viewer]);
 
   useEffect(() => {
-    if (!viewer || badApple) return;
+    if (!viewer || active) return;
     viewer.begin_scene();
     for (const part of parts) {
       viewer.add_piece(
@@ -148,28 +167,12 @@ export function ModelViewer({
     }
     viewer.commit_scene(true);
     badAppleFramedRef.current = false;
-  }, [badApple, parts, viewer]);
-
-  useEffect(() => {
-    if (!viewer || !badApple) return;
-    viewer.begin_scene();
-    viewer.add_piece(badApple, 0, 0, BAD_APPLE_COLOR);
-    const framed = badAppleFramedRef.current;
-    viewer.commit_scene(!framed && !badAppleBounds);
-    if (!framed) {
-      badAppleFramedRef.current = true;
-      if (badAppleBounds) {
-        viewer.frame_bounds(
-          Float32Array.from(badAppleBounds.min),
-          Float32Array.from(badAppleBounds.max),
-        );
-      }
-      viewer.look_down();
-    }
-  }, [badApple, badAppleBounds, viewer]);
+    delete containerRef.current?.dataset.badappleFrame;
+  }, [active, parts, viewer]);
 
   return (
     <div
+      ref={containerRef}
       className="viewer"
       data-part-count={parts.length}
       data-coordinate-orientation="generation-y-mirrored"
@@ -177,7 +180,6 @@ export function ModelViewer({
       data-face-orientation={FACE_ORIENTATION}
       data-mesh-topology="flat-triangle-soup"
       data-renderer="rust-webgl2"
-      data-badapple-frame={badAppleFrame ?? undefined}
       data-preview-offsets={parts.map((part) =>
         `${part.previewOffset.x.toFixed(2)},${part.previewOffset.y.toFixed(2)}`).join(';')}
     >

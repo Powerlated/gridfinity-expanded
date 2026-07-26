@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 import wasmUrl from '../wasm/gridfinity_wasm_bg.wasm?url';
-import { badAppleClip, badAppleFrame, initKernel } from '../lib/geometry/kernel';
+import { badAppleClip, badAppleFrameVertices, initKernel } from '../lib/geometry/kernel';
+import { BAD_APPLE_COLOR } from '../lib/badApple';
 import type { BadAppleRequest, BadAppleResponse, BadAppleClip } from '../lib/types';
 
 const kernelReady = initKernel(wasmUrl);
@@ -14,9 +15,9 @@ self.onmessage = async (event: MessageEvent<BadAppleRequest>) => {
   const { frame } = event.data;
   try {
     const kernel = await kernelReady;
-    const triangles = badAppleFrame(kernel, frame);
-    const response: BadAppleResponse = { ok: true, frame, triangles };
-    self.postMessage(response, [triangles.buffer as ArrayBuffer]);
+    const vertices = badAppleFrameVertices(kernel, frame, BAD_APPLE_COLOR);
+    const response: BadAppleResponse = { ok: true, frame, vertices };
+    self.postMessage(response, [vertices.buffer as ArrayBuffer]);
   } catch {
     const response: BadAppleResponse = { ok: false, frame };
     self.postMessage(response);

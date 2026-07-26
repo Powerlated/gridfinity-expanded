@@ -4,6 +4,8 @@ use gridfinity_cad::gridfinity::{
 };
 use gridfinity_cad::layout::{GridCell, GridEdge};
 use gridfinity_cad::tessellate;
+use glam::Vec3;
+use gridfinity_render::{append_flat_shaded, color_of};
 use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
@@ -117,23 +119,27 @@ pub fn badapple_bounds() -> js_sys::Float32Array {
 }
 
 #[wasm_bindgen]
-pub fn badapple_frame(index: usize) -> js_sys::Float32Array {
+pub fn badapple_frame_vertices(index: usize, rgb: u32) -> js_sys::Float32Array {
     let params = gridfinity_cad::badapple::cell_params();
-    let mut soup: Vec<f32> = Vec::new();
+    let color = color_of(rgb);
+    let mut verts: Vec<f32> = Vec::new();
+    let mut stage = |soup: &[f32]| {
+        append_flat_shaded(&mut verts, soup, Vec3::ZERO, color, false);
+    };
     for cells in gridfinity_cad::badapple::components(gridfinity_cad::badapple::frame(index)) {
         match gridfinity::build_piece(&params, &cells, &cells, None) {
-            Ok(solid) => soup.extend_from_slice(&frame_soup(&solid)),
+            Ok(solid) => stage(&frame_soup(&solid)),
             Err(_) => {
                 for cell in &cells {
                     let one = [*cell];
                     if let Ok(solid) = gridfinity::build_piece(&params, &one, &one, None) {
-                        soup.extend_from_slice(&frame_soup(&solid));
+                        stage(&frame_soup(&solid));
                     }
                 }
             }
         }
     }
-    js_sys::Float32Array::from(&soup[..])
+    js_sys::Float32Array::from(&verts[..])
 }
 
 fn frame_soup(solid: &gridfinity_cad::Solid) -> Vec<f32> {

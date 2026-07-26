@@ -22,8 +22,8 @@ import init, {
   Viewer,
   badapple_bounds,
   badapple_fps,
-  badapple_frame,
   badapple_frame_count,
+  badapple_frame_vertices,
   generate_geometry,
 } from '../../wasm/gridfinity_wasm.js';
 import type { BadAppleClip, Bin, BinParameters } from '../types';
@@ -74,8 +74,19 @@ export function badAppleClip(_kernel: GeometryKernel): BadAppleClip {
   };
 }
 
-export function badAppleFrame(_kernel: GeometryKernel, frame: number): Float32Array {
-  return badapple_frame(frame);
+/**
+ * Builds one clip frame as a render-ready flat-shaded vertex buffer.
+ *
+ * The colour is baked in here, inside the worker, so the main thread never
+ * expands a triangle soup: at 30 frames a second that expansion starved the
+ * render loop and pointer handling, which showed up as camera lag.
+ */
+export function badAppleFrameVertices(
+  _kernel: GeometryKernel,
+  frame: number,
+  rgb: number,
+): Float32Array {
+  return badapple_frame_vertices(frame, rgb);
 }
 
 /**

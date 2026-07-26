@@ -125,7 +125,7 @@ export interface BadAppleRequest {
 }
 
 export type BadAppleResponse =
-  | { ok: true; frame: number; triangles: Float32Array }
+  | { ok: true; frame: number; vertices: Float32Array }
   | { ok: false; frame: number };
 
 export interface BadAppleClip {

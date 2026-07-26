@@ -32,6 +32,8 @@ Changing the geometry pipeline (`src/lib/geometry/`, `src/workers/geometry.worke
 
 `rust/crates/gridfinity-render` is a shared `glow`+`glam` crate with no egui or wasm deps, consumed by the egui debugger (`gridfinity-gui`) and the web app (`gridfinity-wasm`). Keep front-end concerns out; change its camera, shaders, or vertex format only with both consumers in mind.
 
+The `#badapple` route is an easter egg, not part of the design pipeline. It plays through `src/hooks/useBadApple.ts` over a worker pool, and everything about it is shaped to keep the main thread free: workers call `badapple_frame_vertices()`, which bakes colour and flat-shaded normals in so the returned buffer goes straight to `Viewer::upload_vertices` as a plain GPU upload — the main thread never expands a triangle soup. Frames reach the viewer through the feed's `pending` ref, drained inside the existing render loop, and `data-badapple-frame` is set imperatively. Never route clip frames through React state or `add_piece`; either one re-introduces per-frame main-thread work and the camera visibly stutters.
+
 ## Validation
 
 - `npm run lint` — Oxlint
