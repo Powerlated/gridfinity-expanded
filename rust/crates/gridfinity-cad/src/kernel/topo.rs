@@ -198,6 +198,30 @@ impl Solid {
         }
         EdgeFaces { off, flat }
     }
+
+    ///
+    fn compact_edges(&mut self) {
+        let mut used = vec![false; self.edges.len()];
+        for &(e, _) in &self.loop_edges {
+            used[e] = true;
+        }
+        if used.iter().all(|u| *u) {
+            return;
+        }
+        let mut remap = vec![usize::MAX; self.edges.len()];
+        let mut next = 0usize;
+        for e in 0..self.edges.len() {
+            if used[e] {
+                remap[e] = next;
+                self.edges.swap(next, e);
+                next += 1;
+            }
+        }
+        self.edges.truncate(next);
+        for (e, _) in &mut self.loop_edges {
+            *e = remap[*e];
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -241,6 +265,63 @@ impl Builder {
             loops,
             faces: Vec::with_capacity(nfaces),
         }
+    }
+
+    ///
+    pub fn resume(solid: &Solid, seed: &[bool]) -> Builder {
+        let mut b = Builder {
+            verts: solid.verts.clone(),
+            edges: solid.edges.clone(),
+            vert_index: FxHashMap::default(),
+            edge_index: FxHashMap::default(),
+            loop_edges: Vec::with_capacity(solid.loop_edges.len()),
+            loops: {
+                let mut l = Vec::with_capacity(solid.loops.len());
+                l.push(0);
+                l
+            },
+            faces: Vec::with_capacity(solid.faces.len()),
+        };
+        for (fi, &wanted) in seed.iter().enumerate() {
+            if !wanted {
+                continue;
+            }
+            for lp in solid.face_loops(fi) {
+                for &(e, _) in lp {
+                    let ed = solid.edges[e];
+                    for v in [ed.v0, ed.v1] {
+                        b.vert_index.entry(weld_key(solid.verts[v].point)).or_insert(v);
+                    }
+                    let (lo, hi) = if ed.v0 < ed.v1 { (ed.v0, ed.v1) } else { (ed.v1, ed.v0) };
+                    let mid = match ed.curve {
+                        Curve::Line { .. } => {
+                            (solid.verts[ed.v0].point + solid.verts[ed.v1].point) * 0.5
+                        }
+                        _ => ed.curve.point((ed.t0 + ed.t1) * 0.5),
+                    };
+                    b.edge_index.entry((lo, hi, weld_key(mid))).or_insert(e);
+                }
+            }
+        }
+        b
+    }
+
+    ///
+    pub fn copy_face(&mut self, solid: &Solid, fid: usize) -> usize {
+        let f = &solid.faces[fid];
+        let loop0 = self.loops.len() as u32 - 1;
+        for lp in solid.face_loops(fid) {
+            self.loop_edges.extend_from_slice(lp);
+            self.loops.push(self.loop_edges.len() as u32);
+        }
+        let id = self.faces.len();
+        self.faces.push(Face {
+            surface: f.surface,
+            sense: f.sense,
+            loop0,
+            n_loops: f.n_loops,
+        });
+        id
     }
 
     fn intern_loop(&mut self, edges: &[(EdgeId, bool)]) -> u32 {
@@ -380,5 +461,12 @@ impl Builder {
             loops: self.loops,
             faces: self.faces,
         }
+    }
+
+    ///
+    pub fn build_compact(self) -> Solid {
+        let mut s = self.build();
+        s.compact_edges();
+        s
     }
 }

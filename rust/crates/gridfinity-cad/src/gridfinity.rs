@@ -7,7 +7,7 @@ use crate::layout::{
 };
 use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
-use crate::kernel::region2d::{chain_loops, min_loop_distance, region_difference, split_regions};
+use crate::kernel::region2d::{chain_loops, loops_within, region_difference, split_regions};
 use crate::kernel::program::{
     DirLoop as POpDirLoop, HoleProfile as PHoleProfile, Op as POp, PlaneRef as PPlaneRef, Program,
     run_all,
@@ -891,7 +891,7 @@ fn inner_wall_quad(w: &InnerWall, r: f32) -> Option<Vec<Seg>> {
 }
 
 fn island_clears(island: &[Seg], outer: &[Seg], needed: f32) -> bool {
-    needed <= 0.0 || min_loop_distance(island, outer) >= needed
+    needed <= 0.0 || !loops_within(island, outer, needed)
 }
 
 fn inner_wall_quad_in(w: &InnerWall, r: f32, outer: &[Seg]) -> Option<Vec<Seg>> {

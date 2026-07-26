@@ -1,10 +1,20 @@
 
 use crate::kernel::math::Vec2;
-use crate::kernel::sketch::{Seg, loop_area, point_in_segs};
+use crate::kernel::sketch::{Aabb, Seg, loop_area, point_in_segs};
 use crate::kernel::perf;
 use crate::kernel::hash::FxHashMap;
 
 const EPS: f32 = 1e-4;
+
+const BOX_TOL: f32 = 1e-2;
+
+#[inline]
+fn boxes_meet(x: Aabb, y: Aabb) -> bool {
+    x.min.x - BOX_TOL <= y.max.x
+        && y.min.x - BOX_TOL <= x.max.x
+        && x.min.y - BOX_TOL <= y.max.y
+        && y.min.y - BOX_TOL <= x.max.y
+}
 
 
 pub struct RegionSplit<T> {
@@ -38,10 +48,27 @@ pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> Regio
         a.iter().map(|l| vec![Vec::new(); l.len()]).collect();
     let mut b_cuts: Vec<Vec<Vec<(f32, Vec2)>>> =
         b.iter().map(|l| vec![Vec::new(); l.len()]).collect();
+    let b_boxes: Vec<Vec<Aabb>> =
+        b.iter().map(|l| l.iter().map(|(s, _)| s.bbox()).collect()).collect();
+    let b_loop_box: Vec<Aabb> = b_boxes
+        .iter()
+        .map(|l| l.iter().fold(Aabb::EMPTY, |acc, x| acc.union(*x)))
+        .collect();
     for (ai, al) in a.iter().enumerate() {
         for (asi, (aseg, _)) in al.iter().enumerate() {
+            let abox = aseg.bbox();
             for (bi, bl) in b.iter().enumerate() {
+                if !boxes_meet(abox, b_loop_box[bi]) {
+                    continue;
+                }
                 for (bsi, (bseg, _)) in bl.iter().enumerate() {
+                    if !boxes_meet(abox, b_boxes[bi][bsi]) {
+                        debug_assert!(
+                            seg_seg_points(aseg, bseg).is_empty(),
+                            "box prune dropped a real crossing"
+                        );
+                        continue;
+                    }
                     for pt in seg_seg_points(aseg, bseg) {
                         a_cuts[ai][asi].push((seg_param(aseg, pt), pt));
                         b_cuts[bi][bsi].push((seg_param(bseg, pt), pt));
@@ -109,15 +136,40 @@ pub fn presplit_regions(regions: &[Vec<Vec<Seg>>]) -> Vec<Vec<Vec<Seg>>> {
         .iter()
         .map(|r| r.iter().map(|l| vec![Vec::new(); l.len()]).collect())
         .collect();
+    let boxes: Vec<Vec<Vec<Aabb>>> = regions
+        .iter()
+        .map(|r| r.iter().map(|l| l.iter().map(|s| s.bbox()).collect()).collect())
+        .collect();
+    let loop_box: Vec<Vec<Aabb>> = boxes
+        .iter()
+        .map(|r| {
+            r.iter().map(|l| l.iter().fold(Aabb::EMPTY, |acc, x| acc.union(*x))).collect()
+        })
+        .collect();
+    let region_box: Vec<Aabb> = loop_box
+        .iter()
+        .map(|r| r.iter().fold(Aabb::EMPTY, |acc, x| acc.union(*x)))
+        .collect();
     for (ri, r) in regions.iter().enumerate() {
         for (li, l) in r.iter().enumerate() {
             for (si, s) in l.iter().enumerate() {
+                let sbox = boxes[ri][li][si];
                 for (rj, r2) in regions.iter().enumerate() {
-                    if ri == rj {
+                    if ri == rj || !boxes_meet(sbox, region_box[rj]) {
                         continue;
                     }
-                    for l2 in r2 {
-                        for s2 in l2 {
+                    for (lj, l2) in r2.iter().enumerate() {
+                        if !boxes_meet(sbox, loop_box[rj][lj]) {
+                            continue;
+                        }
+                        for (sj, s2) in l2.iter().enumerate() {
+                            if !boxes_meet(sbox, boxes[rj][lj][sj]) {
+                                debug_assert!(
+                                    seg_seg_points(s, s2).is_empty(),
+                                    "box prune dropped a real crossing"
+                                );
+                                continue;
+                            }
                             for pt in seg_seg_points(s, s2) {
                                 cuts[ri][li][si].push((seg_param(s, pt), pt));
                             }
@@ -578,6 +630,35 @@ pub fn min_loop_distance(a: &[Seg], b: &[Seg]) -> f32 {
         }
     }
     best
+}
+
+#[inline]
+fn aabb_gap(x: Aabb, y: Aabb) -> f32 {
+    let dx = (y.min.x - x.max.x).max(x.min.x - y.max.x).max(0.0);
+    let dy = (y.min.y - x.max.y).max(x.min.y - y.max.y).max(0.0);
+    (dx * dx + dy * dy).sqrt()
+}
+
+///
+pub fn loops_within(a: &[Seg], b: &[Seg], limit: f32) -> bool {
+    let _perf = perf::scope(perf::Metric::MinLoopDistance);
+    if a.is_empty() || b.is_empty() || limit <= 0.0 {
+        return false;
+    }
+    let boxes: Vec<Aabb> = b.iter().map(|s| s.bbox()).collect();
+    let all = boxes.iter().fold(Aabb::EMPTY, |acc, x| acc.union(*x));
+    for p in a {
+        let pb = p.bbox();
+        if aabb_gap(pb, all) >= limit {
+            continue;
+        }
+        for (q, qb) in b.iter().zip(&boxes) {
+            if aabb_gap(pb, *qb) < limit && seg_seg_distance(p, q) < limit {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]

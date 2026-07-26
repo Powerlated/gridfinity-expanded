@@ -1,7 +1,7 @@
 
 use crate::kernel::geom::{Curve, Surface};
 use crate::kernel::math::Vec3;
-use crate::kernel::topo::{Builder, EdgeId, Loop, Solid};
+use crate::kernel::topo::{Builder, EdgeId, Solid};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
@@ -283,20 +283,31 @@ fn fillet_edges_with(
         vinfo.insert(ed.v1, (bld.ta_p1, bld.tb_p1));
     }
 
-    let nb = bm.len();
-    let mut b = Builder::with_capacity(
-        solid.verts.len() + 4 * nb,
-        solid.edges.len() + 4 * nb,
-        solid.faces.len() + nb,
-        solid.loop_edges_len() + 4 * nb,
-        solid.faces.len() + nb,
-    );
+    let mut edge_moved = vec![false; solid.edges.len()];
+    for (e, moved) in edge_moved.iter_mut().enumerate() {
+        let ed = solid.edges[e];
+        *moved = want.contains_key(&e)
+            || vinfo.contains_key(&ed.v0)
+            || vinfo.contains_key(&ed.v1);
+    }
+    let mut touched = vec![false; solid.faces.len()];
+    for (fi, t) in touched.iter_mut().enumerate() {
+        *t = solid
+            .face_loops(fi)
+            .any(|lp| lp.iter().any(|&(e, _)| edge_moved[e]));
+    }
+
+    let mut b = Builder::resume(solid, &touched);
 
     let mut loop_scratch: Vec<(EdgeId, bool)> = Vec::new();
     let mut items_scratch: Vec<Emitted> = Vec::new();
     let mut inner_ranges: Vec<usize> = Vec::new();
 
-    for fi in 0..solid.faces.len() {
+    for (fi, &is_touched) in touched.iter().enumerate() {
+        if !is_touched {
+            b.copy_face(solid, fi);
+            continue;
+        }
         loop_scratch.clear();
         inner_ranges.clear();
         rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, solid.outer_edges(fi), edge_faces, &mut b, &mut items_scratch, &mut loop_scratch)?;
@@ -325,20 +336,15 @@ fn fillet_edges_with(
         let e_tb = emit_curv(&mut b, bld.tb_p0, bld.tb_p1, bld.tb);
         let e_ca0 = emit_curv(&mut b, bld.ta_p0, bld.tb_p0, bld.ca0);
         let e_ca1 = emit_curv(&mut b, bld.ta_p1, bld.tb_p1, bld.ca1);
-        let lp = if bld.fwd_a {
-            Loop::new(vec![
-                (e_ta.0, !e_ta.1),
-                e_ca0,
-                e_tb,
-                (e_ca1.0, !e_ca1.1),
-            ])
+        let lp: [(EdgeId, bool); 4] = if bld.fwd_a {
+            [(e_ta.0, !e_ta.1), e_ca0, e_tb, (e_ca1.0, !e_ca1.1)]
         } else {
-            Loop::new(vec![e_ta, e_ca1, (e_tb.0, !e_tb.1), (e_ca0.0, !e_ca0.1)])
+            [e_ta, e_ca1, (e_tb.0, !e_tb.1), (e_ca0.0, !e_ca0.1)]
         };
-        b.face(bld.surface, bld.sense, lp, vec![]);
+        b.face_from(bld.surface, bld.sense, &lp, &[]);
     }
 
-    let s = b.build();
+    let s = b.build_compact();
     if let Err(e) = s.validate() {
         return Err(format!("blend: rebuilt solid invalid: {e}"));
     }

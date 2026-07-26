@@ -783,7 +783,7 @@ mod tests {
 
         let p = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {
-                x1: 22.0, y1: 30.0, x2: 62.0, y2: 55.0, width: 2.4, height: None,
+                x1: -5.0, y1: 40.0, x2: 90.0, y2: 45.0, width: 2.4, height: None,
             }],
             ..gridfinity::Params::default()
         };

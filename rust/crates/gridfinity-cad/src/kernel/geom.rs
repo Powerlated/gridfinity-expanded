@@ -88,7 +88,12 @@ impl Surface {
         Surface::Sphere { center, axis: Vec3::Z, radius, ref_dir: Vec3::X }
     }
 
-    fn point_f(&self, uv: Uv, d0: Vec3, d1: Vec3) -> Vec3 {
+    #[inline]
+    fn radial_at(u: f32, d0: Vec3, d1: Vec3) -> Vec3 {
+        u.cos() * d0 + u.sin() * d1
+    }
+
+    fn point_r(&self, radial: Vec3, uv: Uv) -> Vec3 {
         let (u, v) = uv;
         match *self {
             Surface::Plane {
@@ -97,61 +102,56 @@ impl Surface {
                 v_dir,
                 ..
             } => origin + u * u_dir + v * v_dir,
-            Surface::Cylinder { base, axis, radius, ref_dir: _ } => {
-                base + radius * (u.cos() * d0 + u.sin() * d1) + v * axis
-            }
+            Surface::Cylinder { base, axis, radius, .. } => base + radius * radial + v * axis,
             Surface::Cone {
                 apex,
                 axis,
                 half_angle,
-                ref_dir: _,
+                ..
             } => {
                 let r = v.abs() * half_angle.tan();
-                apex + v * axis + r * (u.cos() * d0 + u.sin() * d1)
+                apex + v * axis + r * radial
             }
             Surface::Torus {
                 center,
                 axis,
                 major_r,
                 minor_r,
-                ref_dir: _,
-            } => {
-                let radial = u.cos() * d0 + u.sin() * d1;
-                center + (major_r + minor_r * v.cos()) * radial + minor_r * v.sin() * axis
-            }
-            Surface::Sphere { center, axis, radius, ref_dir: _ } => {
-                let radial = u.cos() * d0 + u.sin() * d1;
+                ..
+            } => center + (major_r + minor_r * v.cos()) * radial + minor_r * v.sin() * axis,
+            Surface::Sphere { center, axis, radius, .. } => {
                 center + radius * (v.sin() * radial + v.cos() * axis)
             }
         }
     }
 
-    fn normal_f(&self, uv: Uv, d0: Vec3, d1: Vec3) -> Vec3 {
-        let (u, v) = uv;
+    fn normal_r(&self, radial: Vec3, v: f32) -> Vec3 {
         match *self {
             Surface::Plane { normal, .. } => normal,
-            Surface::Cylinder { axis: _, ref_dir: _, .. } => {
-                (u.cos() * d0 + u.sin() * d1).normalize()
-            }
-            Surface::Cone {
-                axis,
-                half_angle,
-                ref_dir: _,
-                ..
-            } => {
-                let radial = u.cos() * d0 + u.sin() * d1;
+            Surface::Cylinder { .. } => radial.normalize(),
+            Surface::Cone { axis, half_angle, .. } => {
                 let sgn = if v >= 0.0 { -1.0 } else { 1.0 };
                 (half_angle.cos() * radial + sgn * half_angle.sin() * axis).normalize()
             }
-            Surface::Torus { axis, ref_dir: _, .. } => {
-                let radial = u.cos() * d0 + u.sin() * d1;
-                (v.cos() * radial + v.sin() * axis).normalize()
-            }
-            Surface::Sphere { axis, ref_dir: _, .. } => {
-                let radial = u.cos() * d0 + u.sin() * d1;
-                (v.sin() * radial + v.cos() * axis).normalize()
-            }
+            Surface::Torus { axis, .. } => (v.cos() * radial + v.sin() * axis).normalize(),
+            Surface::Sphere { axis, .. } => (v.sin() * radial + v.cos() * axis).normalize(),
         }
+    }
+
+    fn normal_ignores_v(&self, v0: f32, v1: f32) -> bool {
+        match *self {
+            Surface::Plane { .. } | Surface::Cylinder { .. } => true,
+            Surface::Cone { .. } => (v0 >= 0.0) == (v1 >= 0.0),
+            Surface::Torus { .. } | Surface::Sphere { .. } => false,
+        }
+    }
+
+    fn point_f(&self, uv: Uv, d0: Vec3, d1: Vec3) -> Vec3 {
+        self.point_r(Surface::radial_at(uv.0, d0, d1), uv)
+    }
+
+    fn normal_f(&self, uv: Uv, d0: Vec3, d1: Vec3) -> Vec3 {
+        self.normal_r(Surface::radial_at(uv.0, d0, d1), uv.1)
     }
 
     pub fn signed_distance(&self, p: Vec3) -> f32 {
@@ -314,6 +314,26 @@ impl Prepared {
     #[inline]
     pub fn project(&self, p: Vec3) -> Uv {
         self.surface.project_f(p, self.d0, self.d1)
+    }
+
+    #[inline]
+    pub fn radial(&self, u: f32) -> Vec3 {
+        Surface::radial_at(u, self.d0, self.d1)
+    }
+
+    #[inline]
+    pub fn point_at(&self, radial: Vec3, uv: Uv) -> Vec3 {
+        self.surface.point_r(radial, uv)
+    }
+
+    #[inline]
+    pub fn normal_at(&self, radial: Vec3, v: f32) -> Vec3 {
+        self.surface.normal_r(radial, v)
+    }
+
+    #[inline]
+    pub fn normal_ignores_v(&self, v0: f32, v1: f32) -> bool {
+        self.surface.normal_ignores_v(v0, v1)
     }
 }
 

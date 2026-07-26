@@ -77,10 +77,12 @@ struct Scratch {
     uv: Vec<Vec2>,
     nrm: Vec<Vec3>,
     spans: Vec<(usize, usize)>,
+    keys: Vec<(i64, i64, i64)>,
     tris: Vec<[usize; 3]>,
     planar: crate::kernel::planar::Planar,
     u_i: Vec<f32>,
     v_j: Vec<f32>,
+    radial: Vec<Vec3>,
     grid: Vec<Vec3>,
     gnrm: Vec<Vec3>,
 }
@@ -106,6 +108,9 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
     let es = EdgeSamples::build(solid, arc_segs_per_quarter);
 
     let mut out = Tessellation::default();
+    let est = 2 * es.pts.len();
+    out.tris.reserve(est);
+    out.face_of_tri.reserve(est);
     let mut sc = Scratch::default();
     let diag = std::env::var("TESS_DIAG").is_ok();
     let now = || std::time::Instant::now();
@@ -174,12 +179,11 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
         // edges are still paired against its neighbours -- discarding it on
         // area alone punches a three-edge slit in the mesh, which is what a
         // staircase polyomino's cavity floor used to do.
-        let pts3 = &sc.pts3;
-        sc.tris.retain(|&[a, b, c]| {
-            let (ka, kb, kc) =
-                (weld_key(pts3[a]), weld_key(pts3[b]), weld_key(pts3[c]));
-            ka != kb && kb != kc && ka != kc
-        });
+        sc.keys.clear();
+        sc.keys.extend(sc.pts3.iter().map(|p| weld_key(*p)));
+        let keys = &sc.keys;
+        sc.tris
+            .retain(|&[a, b, c]| keys[a] != keys[b] && keys[b] != keys[c] && keys[a] != keys[c]);
         if let (Some(t0), Some(t1), Some(t2)) = (t0, t1, t2) {
             SAMPLE_NS.with(|c| c.set(c.get() + (t1 - t0).as_nanos() as u64));
             TRI_NS.with(|c| c.set(c.get() + (t2 - t1).as_nanos() as u64));
@@ -239,16 +243,6 @@ fn tess_grid_face(
 
     let prep = face.surface.prepare();
     let s = &prep;
-    let uv0a = s.project(at(e0, 0));
-    let uv0b = s.project(at(e0, m - 1));
-    if (uv0a.1 - uv0b.1).abs() > 1e-4 || (uv0a.0 - uv0b.0).abs() < 1e-4 {
-        return false;
-    }
-    let uv1a = s.project(at(e1, 0));
-    let uv1b = s.project(at(e1, n - 1));
-    if (uv1a.0 - uv1b.0).abs() > 1e-4 {
-        return false;
-    }
 
     let unwrap = |vals: &mut [f32]| {
         for k in 1..vals.len() {
@@ -260,15 +254,45 @@ fn tess_grid_face(
             }
         }
     };
+
     sc.u_i.clear();
+    let (mut v_lo, mut v_hi) = (0.0f32, 0.0f32);
+    for i in 0..m {
+        let (u, v) = s.project(at(e0, i));
+        if i == 0 {
+            v_lo = v;
+        } else if i == m - 1 {
+            v_hi = v;
+        }
+        sc.u_i.push(u);
+    }
+    if (v_lo - v_hi).abs() > 1e-4 || (sc.u_i[0] - sc.u_i[m - 1]).abs() < 1e-4 {
+        return false;
+    }
+
     sc.v_j.clear();
-    sc.u_i.extend((0..m).map(|i| s.project(at(e0, i)).0));
-    sc.v_j.extend((0..n).map(|j| s.project(at(e1, j)).1));
+    let (mut u_lo, mut u_hi) = (0.0f32, 0.0f32);
+    for j in 0..n {
+        let (u, v) = s.project(at(e1, j));
+        if j == 0 {
+            u_lo = u;
+        } else if j == n - 1 {
+            u_hi = u;
+        }
+        sc.v_j.push(v);
+    }
+    if (u_lo - u_hi).abs() > 1e-4 {
+        return false;
+    }
     unwrap(&mut sc.u_i);
     if matches!(face.surface, Surface::Torus { .. } | Surface::Sphere { .. }) {
         unwrap(&mut sc.v_j);
     }
     let (u_i, v_j) = (&sc.u_i, &sc.v_j);
+
+    sc.radial.clear();
+    sc.radial.extend((0..m).map(|i| prep.radial(u_i[i])));
+    let radial = &sc.radial;
 
     sc.grid.clear();
     sc.grid.resize(m * n, Vec3::ZERO);
@@ -283,15 +307,22 @@ fn tess_grid_face(
             } else if i == 0 {
                 at(e3, n - 1 - j)
             } else {
-                s.point((u_i[i], v_j[j]))
+                s.point_at(radial[i], (u_i[i], v_j[j]))
             };
         }
     }
     sc.gnrm.clear();
-    sc.gnrm.reserve(m * n);
-    for i in 0..m {
-        for j in 0..n {
-            sc.gnrm.push(prep.normal((u_i[i], v_j[j])) * sign);
+    sc.gnrm.resize(m * n, Vec3::ZERO);
+    if prep.normal_ignores_v(v_j[0], v_j[n - 1]) {
+        for i in 0..m {
+            let nrm = prep.normal_at(radial[i], v_j[0]) * sign;
+            sc.gnrm[i * n..i * n + n].fill(nrm);
+        }
+    } else {
+        for (i, &r) in radial.iter().enumerate() {
+            for (j, &v) in v_j.iter().enumerate() {
+                sc.gnrm[i * n + j] = prep.normal_at(r, v) * sign;
+            }
         }
     }
     let du = u_i[m - 1] - u_i[0];

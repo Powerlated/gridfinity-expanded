@@ -97,7 +97,11 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   direction); the `*_z` convenience constructors (`cylinder_z`, `cone_z`, `torus_z`,
   `Curve::circle_z`) cover the common +Z case, and everything stays closed-form. Each surface has
   `point`/`normal`/`project(uv)`; partial surfaces set `ref_dir` to their arc start so `project`
-  angles stay wrap-free.
+  angles stay wrap-free. `u` enters a rotational surface only as `cos u · d0 + sin u · d1`, so
+  `Prepared` also exposes that `radial` plus `point_at`/`normal_at` taking it pre-computed —
+  `point`/`normal` are now thin wrappers over those, which keeps the two forms from drifting.
+  `normal_ignores_v` says when a whole grid column shares one normal (every cylinder; a cone,
+  whose normal depends on `v` only through its sign, which cannot change within a face).
 - **`topo.rs`** — the B-rep: `Vertex`/`Edge`/`Loop`/`Face`/`Solid`. **Not** half-edge with
   next/prev pointers — loops are explicit ordered `(EdgeId, forward)` lists, edges are shared.
   Storage is **flat CSR, not nested `Vec`s**: the `Solid` holds one `loop_edges` arena plus a
@@ -114,6 +118,19 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   When a mesh leaks but `validate` passes, run `audit` first — it pins the failure to a
   specific edge/face if the B-rep is at fault, and rules the B-rep out otherwise (pointing at
   the tessellator).
+  **Local rewrites:** `Builder::resume(solid, seed)` continues on top of an existing solid's
+  vertex/edge arenas, keeping every id valid, and interns *only* the faces flagged in `seed` —
+  the ones the caller means to re-emit. Everything else is re-filed by `copy_face`, which copies
+  a face's loop spans verbatim. That is what makes a blend cost its own neighbourhood instead of
+  the whole model (see `fillet.rs`); interning the whole solid in `resume` would cost exactly
+  what rebuilding it did. Two gotchas, both load-bearing: `resume` must re-derive each edge's
+  index key **the way the constructor that made it did** — `line` averages the two vertex
+  positions, and evaluating the curve at mid-parameter instead is the same point in exact
+  arithmetic but can land one weld quantum away in `f32`, which silently duplicates the edge and
+  shows up as `edge N used fwd=1 bwd=0`. And a resumed builder strands the edges it replaced, so
+  it must finish through `build_compact` (not `build`) to drop and renumber them. **Plain `build`
+  must never compact:** callers pick blend and chamfer edges by id *before* building, and
+  renumbering would silently repoint those selections at other edges.
 - **`sketch.rs`** — 2D profiles as closed loops of `Line`/`Arc` segments (`rectangle`,
   `rounded_rect`, `circle`). Corner radii are real arcs. Outer loops CCW.
 - **`build.rs`** — features. Three primitives write into a shared `Builder`: `ring` (profile at a
@@ -133,8 +150,15 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   the runout face's loop where its sharp corner was. The runout face is found by adjacency,
   skipping faces coplanar with the blended pair (a coplanar neighbour continues the surface rather
   than terminating the blend). Three or more blended edges at a vertex still needs a spherical
-  corner patch → `Err`. The partial-height inner wall's top ramp is built this way. The whole
-  solid is rebuilt through a fresh `Builder` and `validate()`d. Gotcha: when re-emitting an arc
+  corner patch → `Err`. The partial-height inner wall's top ramp is built this way. The rebuild is
+  **local**: an edge changes if it is blended or if either endpoint moves, a face changes if it
+  names such an edge, and everything else is re-filed verbatim through `Builder::resume`/
+  `copy_face`. This is sound because an edge's endpoints are the same seen from either side, so
+  the two faces sharing a changed edge always agree that they changed and the untouched remainder
+  stays internally consistent. It matters because a blend touches almost nothing: a floor fillet
+  on a 370-cell bin moves **219 of 9889 faces**, and rebuilding all of them was ~90% of
+  `fillet_edges`. The result still goes through a full `validate()` — the manifold gate is not
+  narrowed to the neighbourhood, only the *work* is. Gotcha: when re-emitting an arc
   reversed, the angle range must be swapped too — `Builder::arc` trusts that its first vertex sits
   at the first angle.
   `fillet_edges` is all-or-nothing, so `fillet_best_effort` wraps it for callers that would rather
@@ -185,6 +209,14 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   whenever their results must weld to each other. `split_regions` exposes the classified pieces with
   caller-supplied provenance tags, which is how the inner-wall planner names contact runs without
   ever comparing coordinates.
+  Both sweeps are all-pairs over segments, so both **reject a pair on its bounding boxes** before
+  solving it — the boxes are grown by `BOX_TOL`, which must stay above the 1e-3 that `on_seg`
+  accepts, or a real crossing gets pruned and the boolean silently loses a cut. A `debug_assert`
+  in each sweep re-solves every rejected pair and fails if it finds one, so debug builds and the
+  fuzzer verify the prune continuously; that guard is the reason to trust it, since the failure
+  mode is wrong topology rather than a crash. `loops_within(a, b, limit)` is the clearance
+  predicate: callers wanting a verdict must use it rather than thresholding `min_loop_distance`,
+  whose only early exit is an exact zero and which therefore always paid the full `|a|·|b|`.
   **Coincident boundary runs are classified explicitly**, not by the inside/outside point test: where
   the two boundaries run together the midpoint lies exactly *on* the other boundary, where even–odd
   is undefined. Those pieces go to `on_same`/`on_opposite` by relative traversal direction (A's copy
@@ -312,6 +344,33 @@ That instrumentation drove a churn-first data-oriented pass: a `Solid` is now fl
 `ef[e]` slices) instead of a `Vec` per edge; and `fillet`/`chamfer`'s `rebuild_loop` takes that
 `edge_faces` as a borrow rather than recomputing it once per face. Together those cut a default
 rebuild's allocation churn ~77% (fillet_edges ~92%).
+
+A second pass went after *work* rather than churn. The scaling harness is `tests/scale.rs`
+(`scale_report` for the cost curve, `scale_features` for what the optional features cost,
+`scale_profile` for the per-metric table at `SCALE_WH=48x48`, `tess_bench` for the tessellator
+alone — all `#[ignore]`d tools, like `fuzz.rs`). Four changes, biggest first:
+
+- **`fillet_edges` rebuilds only the faces the blend touches** (see `topo.rs`/`fillet.rs` above).
+  `Builder::vertex` went 112836 calls → 25452 and `Builder::face` 19994 (≈2× over-emission) →
+  10324 on a 370-cell bin. Emitting each blend patch through `face_from` off the stack rather than
+  `Loop`/`face`, which heap-allocated three `Vec`s per patch, took a 1476-cell blend 19.4 → 12.2ms.
+- **`region2d` rejects segment pairs on bounding boxes** before the exact solve, and
+  `island_clears` asks `loops_within` (a threshold predicate that stops at the first close pair)
+  instead of minimising with `min_loop_distance`. That function went 3.96ms → 64µs on a 660-cell
+  bin, and `plan_piece` 11.7 → 4.8ms. These sweeps were the last quadratics in the pipeline.
+- **The tessellator** got the `u`-dependent trig hoisted out of its inner loop, four duplicated
+  `project` calls per grid face removed, one weld key per boundary point instead of three per
+  triangle, and a pre-sized output buffer: 16.2 → 12.4ms on a 660-cell bin.
+
+**Measure the tessellator with `tess_bench`, not a single rebuild.** The first two tessellator
+changes above were initially recorded here as null results because single-shot timing put them
+inside its noise; best-of-25 resolves them as ~1.08×. The remaining cost there is not
+compute — it is the boundary-sample gather and writing 120724 × 72-byte `Tri`s (~8.7 MB), so look
+at the output format before optimising further.
+
+`perf_counters_see_a_real_build` needs an inner wall that *crosses* the compartment boundary. With
+box rejection in place a free-standing wall yields no crossing pair at all, so `seg_seg_points`
+legitimately never gets called and the metric never fires.
 
 `debugger.rs` is the construction debugger (right panel, toggled from the params panel). It calls
 `gridfinity::program(&p)` to get the model's op list, caches per-prefix face counts for display,
