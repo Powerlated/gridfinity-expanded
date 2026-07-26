@@ -107,6 +107,43 @@ mod tests {
         solid.validate().expect("manifold");
     }
 
+    #[test]
+    fn a_torus_section_lies_on_both_the_torus_and_the_cutting_plane() {
+        use crate::kernel::geom::Curve;
+        use crate::kernel::math::Vec3;
+        let center = Vec3::new(3.0, -2.0, 5.0);
+        let (major, minor) = (4.0f32, 1.5f32);
+        for &offset in &[0.0f32, 1.0, -2.5, 3.9, 5.4] {
+            let curve = Curve::torus_section(center, Vec3::Z, Vec3::X, offset, major, minor, 1.0);
+            for i in 0..=64 {
+                let t = -std::f32::consts::PI + 2.0 * std::f32::consts::PI * (i as f32 / 64.0);
+                if !Curve::torus_section_exists(major, minor, offset, t) {
+                    continue;
+                }
+                let p = curve.point(t) - center;
+                assert!((p.x - offset).abs() < 1e-4, "offset {offset} t {t}: x {}", p.x);
+                let radial = (p.x * p.x + p.y * p.y).sqrt() - major;
+                let on_torus = radial * radial + p.z * p.z - minor * minor;
+                assert!(on_torus.abs() < 1e-3, "offset {offset} t {t}: torus residual {on_torus}");
+            }
+        }
+    }
+
+    #[test]
+    fn both_torus_section_branches_are_mirror_images_across_the_plane_normal() {
+        use crate::kernel::geom::Curve;
+        use crate::kernel::math::Vec3;
+        let c = Vec3::ZERO;
+        let pos = Curve::torus_section(c, Vec3::Z, Vec3::X, 1.0, 4.0, 1.5, 1.0);
+        let neg = Curve::torus_section(c, Vec3::Z, Vec3::X, 1.0, 4.0, 1.5, -1.0);
+        for i in 0..16 {
+            let t = i as f32 * 0.3;
+            let (a, b) = (pos.point(t), neg.point(t));
+            assert!((a.x - b.x).abs() < 1e-5 && (a.z - b.z).abs() < 1e-5);
+            assert!((a.y + b.y).abs() < 1e-5, "branches must mirror in y");
+        }
+    }
+
     fn signed_volume(mesh: &Mesh) -> f64 {
         let mut vol = 0.0f64;
         for [a, b, c] in mesh.triangles() {

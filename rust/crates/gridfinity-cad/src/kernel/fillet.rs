@@ -667,6 +667,10 @@ fn rebuild_loop(
                     let (t0, t1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
                     b.ellipse(vs, ve, center, ea, eb, t0, t1)
                 }
+                Curve::TorusSection { .. } => {
+                    let (t0, t1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
+                    b.torus_section(vs, ve, ed.curve, t0, t1)
+                }
             };
             items.push(Emitted { edge: eid, start, end_v, end });
         }
@@ -723,6 +727,10 @@ fn emit_curv(b: &mut Builder, start: Vec3, end: Vec3, ce: CurvEdge) -> (EdgeId, 
         Curve::Ellipse { center, a: ea, b: eb } => {
             let (t0, t1) = if forward() { (ce.t0, ce.t1) } else { (ce.t1, ce.t0) };
             b.ellipse(vs, ve, center, ea, eb, t0, t1)
+        }
+        Curve::TorusSection { .. } => {
+            let (t0, t1) = if forward() { (ce.t0, ce.t1) } else { (ce.t1, ce.t0) };
+            b.torus_section(vs, ve, ce.curve, t0, t1)
         }
     }
 }

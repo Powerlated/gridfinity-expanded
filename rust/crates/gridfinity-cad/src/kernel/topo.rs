@@ -43,7 +43,7 @@ impl Edge {
     pub fn seg_count(&self, arc_segs_per_quarter: usize) -> usize {
         match self.curve {
             Curve::Line { .. } => 1,
-            Curve::Circle { .. } | Curve::Ellipse { .. } => {
+            Curve::Circle { .. } | Curve::Ellipse { .. } | Curve::TorusSection { .. } => {
                 let sweep = (self.t1 - self.t0).abs();
                 ((sweep / (std::f32::consts::PI / 2.0)) * arc_segs_per_quarter as f32)
                     .ceil()
@@ -388,6 +388,24 @@ impl Builder {
         t1: f32,
     ) -> (EdgeId, bool) {
         let curve = Curve::Ellipse { center, a: ea, b: eb };
+        let mid = curve.point((t0 + t1) * 0.5);
+        self.edge_between(a, b, mid, || Edge {
+            curve,
+            t0,
+            t1,
+            v0: a,
+            v1: b,
+        })
+    }
+
+    pub fn torus_section(
+        &mut self,
+        a: VertexId,
+        b: VertexId,
+        curve: Curve,
+        t0: f32,
+        t1: f32,
+    ) -> (EdgeId, bool) {
         let mid = curve.point((t0 + t1) * 0.5);
         self.edge_between(a, b, mid, || Edge {
             curve,

@@ -84,6 +84,7 @@ fn curve_kind(c: &Curve) -> &'static str {
         Curve::Line { .. } => "Line",
         Curve::Circle { .. } => "Circle",
         Curve::Ellipse { .. } => "Ellipse",
+        Curve::TorusSection { .. } => "TorusSection",
     }
 }
 

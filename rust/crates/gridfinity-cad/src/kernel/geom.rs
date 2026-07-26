@@ -355,6 +355,15 @@ pub enum Curve {
         ref_dir: Vec3,
     },
     Ellipse { center: Vec3, a: Vec3, b: Vec3 },
+    TorusSection {
+        center: Vec3,
+        axis: Vec3,
+        ref_dir: Vec3,
+        major: f32,
+        minor: f32,
+        offset: f32,
+        branch: f32,
+    },
 }
 
 impl Curve {
@@ -382,6 +391,38 @@ impl Curve {
                 center + radius * (t.cos() * d0 + t.sin() * d1)
             }
             Curve::Ellipse { center, a, b } => center + t.cos() * a + t.sin() * b,
+            Curve::TorusSection { center, axis, ref_dir, major, minor, offset, branch } => {
+                let (d0, d1) = radial_frame(axis, ref_dir);
+                let rad = major + minor * t.cos();
+                let cos_u = (offset / rad).clamp(-1.0, 1.0);
+                let sin_u = branch * (1.0 - cos_u * cos_u).max(0.0).sqrt();
+                center + rad * (cos_u * d0 + sin_u * d1) + minor * t.sin() * axis
+            }
         }
+    }
+
+    pub fn torus_section(
+        center: Vec3,
+        axis: Vec3,
+        plane_normal: Vec3,
+        plane_offset: f32,
+        major: f32,
+        minor: f32,
+        branch: f32,
+    ) -> Curve {
+        Curve::TorusSection {
+            center,
+            axis: axis.normalize(),
+            ref_dir: plane_normal.normalize(),
+            major,
+            minor,
+            offset: plane_offset,
+            branch: branch.signum(),
+        }
+    }
+
+    pub fn torus_section_exists(major: f32, minor: f32, offset: f32, t: f32) -> bool {
+        let rad = major + minor * t.cos();
+        rad > 0.0 && offset.abs() <= rad
     }
 }

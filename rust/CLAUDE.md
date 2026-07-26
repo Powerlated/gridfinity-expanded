@@ -103,7 +103,12 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
 (All paths below are under `src/kernel/` unless noted.)
 
 - **`geom.rs`** — analytic `Surface` (`Plane`/`Cylinder`/`Cone`/`Torus`/`Sphere`) and `Curve`
-  (`Line`/`Circle`). Every radial surface and `Circle` carries an explicit `axis` (arbitrary
+  (`Line`/`Circle`/`Ellipse`/`TorusSection`). `TorusSection` is a torus cut by a plane **parallel to
+  its axis** — implicitly a quartic, which is why a plane split through a floor-fillet corner blend
+  used to be inexpressible. It is not solved numerically: fixing the minor angle `t` fixes the ring
+  radius `major + minor·cos t`, hence `cos u = offset / rad`, so the section parameterises exactly
+  in `t` with `branch = ±1` picking the half. `torus_section_exists` reports where `|offset| <= rad`
+  bounds the domain; outside it the section simply does not exist and the caller must not sample. Every radial surface and `Circle` carries an explicit `axis` (arbitrary
   direction); the `*_z` convenience constructors (`cylinder_z`, `cone_z`, `torus_z`,
   `Curve::circle_z`) cover the common +Z case, and everything stays closed-form. Each surface has
   `point`/`normal`/`project(uv)`; partial surfaces set `ref_dir` to their arc start so `project`
