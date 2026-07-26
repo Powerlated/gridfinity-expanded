@@ -1,4 +1,5 @@
 
+#[cfg(test)]
 use crate::MESH_STRIDE;
 use gridfinity_cad::gridfinity::{self, Params};
 use gridfinity_cad::layout::GridCell;
@@ -7,6 +8,8 @@ use gridfinity_cad::tessellate;
 pub const W: usize = 64;
 pub const H: usize = 48;
 pub const FPS: f64 = 30.0;
+
+pub const PIPELINE_DEPTH: usize = 3;
 
 const PITCH: f32 = gridfinity::GRID_PITCH;
 
@@ -79,6 +82,7 @@ fn emit(solid: &gridfinity_cad::kernel::topo::Solid, verts: &mut Vec<f32>) -> us
     src.len() / (6 * 3)
 }
 
+#[cfg(test)]
 pub fn build_frame(frame: usize) -> (Vec<f32>, usize) {
     let f = &FRAMES[frame * FRAME_BYTES..(frame + 1) * FRAME_BYTES];
     let p = cell_params();
@@ -102,7 +106,7 @@ pub fn build_frame(frame: usize) -> (Vec<f32>, usize) {
     (verts, tris)
 }
 
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -113,27 +117,50 @@ pub struct FrameResult {
     pub build_secs: f64,
 }
 
+enum Piece {
+    Solid(Box<gridfinity_cad::kernel::topo::Solid>),
+    End { frame: usize, started: Instant },
+}
+
+const PIECE_QUEUE: usize = 4;
+
 pub struct Worker {
     req: Option<Sender<usize>>,
     res: Receiver<FrameResult>,
-    handle: Option<JoinHandle<()>>,
+    build: Option<JoinHandle<()>>,
+    tess: Option<JoinHandle<()>>,
 }
 
 impl Worker {
     pub fn spawn() -> Worker {
         let (req_tx, req_rx) = channel::<usize>();
+        let (piece_tx, piece_rx) = sync_channel::<Piece>(PIECE_QUEUE);
         let (res_tx, res_rx) = channel::<FrameResult>();
-        let handle = std::thread::spawn(move || {
-            while let Ok(frame) = req_rx.recv() {
-                let t = Instant::now();
-                let (verts, tris) = build_frame(frame);
-                let build_secs = t.elapsed().as_secs_f64();
-                if res_tx.send(FrameResult { frame, verts, tris, build_secs }).is_err() {
-                    break;
+
+        let build = std::thread::spawn(move || build_loop(&req_rx, &piece_tx));
+        let tess = std::thread::spawn(move || {
+            let mut verts: Vec<f32> = Vec::new();
+            let mut tris = 0usize;
+            while let Ok(msg) = piece_rx.recv() {
+                match msg {
+                    Piece::Solid(s) => tris += emit(&s, &mut verts),
+                    Piece::End { frame, started } => {
+                        let r = FrameResult {
+                            frame,
+                            verts: std::mem::take(&mut verts),
+                            tris,
+                            build_secs: started.elapsed().as_secs_f64(),
+                        };
+                        tris = 0;
+                        if res_tx.send(r).is_err() {
+                            return;
+                        }
+                    }
                 }
             }
         });
-        Worker { req: Some(req_tx), res: res_rx, handle: Some(handle) }
+
+        Worker { req: Some(req_tx), res: res_rx, build: Some(build), tess: Some(tess) }
     }
 
     pub fn request(&self, frame: usize) {
@@ -142,20 +169,55 @@ impl Worker {
         }
     }
 
-    pub fn try_recv(&self) -> Option<FrameResult> {
+    pub fn try_recv(&self) -> Option<(FrameResult, usize)> {
         let mut last = None;
+        let mut seen = 0usize;
         while let Ok(r) = self.res.try_recv() {
             last = Some(r);
+            seen += 1;
         }
-        last
+        last.map(|r| (r, seen))
     }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
         self.req = None;
-        if let Some(h) = self.handle.take() {
+        if let Some(h) = self.build.take() {
             let _ = h.join();
+        }
+        if let Some(h) = self.tess.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+fn build_loop(req: &Receiver<usize>, out: &SyncSender<Piece>) {
+    while let Ok(frame) = req.recv() {
+        let started = Instant::now();
+        let f = &FRAMES[frame * FRAME_BYTES..(frame + 1) * FRAME_BYTES];
+        let p = cell_params();
+        for cells in components(f) {
+            match gridfinity::build_piece(&p, &cells, &cells, None) {
+                Ok(solid) => {
+                    if out.send(Piece::Solid(Box::new(solid))).is_err() {
+                        return;
+                    }
+                }
+                Err(_) => {
+                    for c in &cells {
+                        let one = [*c];
+                        if let Ok(s) = gridfinity::build_piece(&p, &one, &one, None) {
+                            if out.send(Piece::Solid(Box::new(s))).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if out.send(Piece::End { frame, started }).is_err() {
+            return;
         }
     }
 }
@@ -164,6 +226,30 @@ impl Drop for Worker {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn pipelined_worker_matches_serial_build() {
+        let n = frame_count();
+        let probes = [n / 7, n / 3, n / 2, (n * 3) / 4];
+        let w = Worker::spawn();
+        for f in probes {
+            let (want_verts, want_tris) = build_frame(f);
+            w.request(f);
+            let mut got = None;
+            for _ in 0..2000 {
+                if let Some((r, _)) = w.try_recv() {
+                    got = Some(r);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let got = got.unwrap_or_else(|| panic!("frame {f} never came back"));
+            assert_eq!(got.frame, f);
+            assert_eq!(got.tris, want_tris, "frame {f} triangle count");
+            assert_eq!(got.verts.len(), want_verts.len(), "frame {f} vertex payload");
+            assert!(got.verts == want_verts, "frame {f} geometry differs from the serial build");
+        }
+    }
 
     #[test]
     fn frames_decode_and_build() {
@@ -515,8 +601,62 @@ mod tests {
             tris += tc;
         }
         println!(
-            "built {tris} triangles in {secs:.3}s = {:.2}M tri/s",
-            tris as f64 / secs / 1e6
+            "serial: {tris} triangles in {secs:.3}s = {:.2}M tri/s, {:.1} ms/frame",
+            tris as f64 / secs / 1e6,
+            secs * 1e3 / (n as f64 / 37.0)
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn phase_split() {
+        let n = frame_count();
+        let p = cell_params();
+        let (mut bs, mut ts) = (0.0f64, 0.0f64);
+        for frame in (0..n).step_by(37) {
+            let f = &FRAMES[frame * FRAME_BYTES..(frame + 1) * FRAME_BYTES];
+            for cells in components(f) {
+                let t0 = Instant::now();
+                let Ok(solid) = gridfinity::build_piece(&p, &cells, &cells, None) else { continue };
+                bs += t0.elapsed().as_secs_f64();
+                let t1 = Instant::now();
+                let mut v = Vec::new();
+                emit(&solid, &mut v);
+                ts += t1.elapsed().as_secs_f64();
+            }
+        }
+        println!("badapple split: build {bs:.3}s tess {ts:.3}s -> tess is {:.1}% ; pipeline ceiling {:.2}x",
+            100.0*ts/(bs+ts), (bs+ts)/bs.max(ts));
+    }
+
+    #[test]
+    #[ignore]
+    fn throughput_pipelined() {
+        let n = frame_count();
+        let depth: usize =
+            std::env::var("INFLIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        let list: Vec<usize> = (0..n).step_by(37).collect();
+        let w = Worker::spawn();
+        let t = Instant::now();
+        let mut next = 0usize;
+        let mut done = 0usize;
+        while done < list.len() {
+            while next < list.len() && next - done < depth {
+                w.request(list[next]);
+                next += 1;
+            }
+            if let Some((r, _)) = w.try_recv() {
+                let at = list.iter().position(|&f| f == r.frame).unwrap();
+                done = at + 1;
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+        let secs = t.elapsed().as_secs_f64();
+        println!(
+            "pipelined(depth={depth}): {} frames in {secs:.3}s = {:.1} ms/frame",
+            list.len(),
+            secs * 1e3 / list.len() as f64
         );
     }
 }

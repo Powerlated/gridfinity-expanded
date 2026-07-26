@@ -418,6 +418,22 @@ per-scope allocation table; use it to confirm churn has not regressed, not to hu
 box rejection in place a free-standing wall yields no crossing pair at all, so `seg_seg_points`
 legitimately never gets called and the metric never fires.
 
+`badapple.rs` plays a 64x48 silhouette clip as bins, and its `Worker` is a **two-stage pipeline**:
+a builder thread turns each frame's connected components into `Solid`s and streams them over a
+depth-4 `sync_channel` to a tessellating thread, which accumulates the frame's vertices and emits a
+`FrameResult`. Channel ordering does the synchronisation -- the `Piece::End` marker cannot overtake
+the pieces before it, so no counting is needed. `Solid` is already `Send`, so this needed no kernel
+change, and `pipelined_worker_matches_serial_build` asserts the pipeline reproduces the serial
+`build_frame` vertex-for-vertex in the same order.
+**The depth is the whole story.** Tessellation is only 29% of a frame at these parameters
+(`height_units: 2`, no floor fillet, `arc_segs_per_quarter: 1`), so the ceiling is 1.41x, and with a
+single frame in flight the pipeline drains at every frame boundary and *loses* ~8% to channel
+overhead. `PIPELINE_DEPTH` frames in flight is what buys the overlap: measured 39.9 ms/frame serial,
+43.3 at depth 1, 35.0 at depth 3. Raising the depth costs up to that many frames of display lag and
+builds frames that a late `try_recv` may discard, so do not raise it without re-measuring.
+`Worker::try_recv` returns how many results it collapsed, because the caller tracks frames in flight
+and silently dropping one desynchronises that count into a spin.
+
 `debugger.rs` is the construction debugger (right panel, toggled from the params panel). It calls
 `gridfinity::program(&p)` to get the model's op list, caches per-prefix face counts for display,
 and rebuilds the solid via `program::run(&prog, |i| enabled[i])` whenever the user steps or

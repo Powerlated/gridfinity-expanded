@@ -162,7 +162,8 @@ struct App {
 struct BadApple {
     worker: badapple::Worker,
     frame: usize,
-    requested: Option<usize>,
+    inflight: usize,
+    last_requested: Option<usize>,
     epoch: f64,
     looping: bool,
     tri_rate: f64,
@@ -238,7 +239,8 @@ impl App {
         self.badapple = Some(BadApple {
             worker: badapple::Worker::spawn(),
             frame: usize::MAX,
-            requested: None,
+            inflight: 0,
+            last_requested: None,
             epoch: time,
             looping: true,
             tri_rate: 0.0,
@@ -269,9 +271,9 @@ impl App {
             }
         }
 
-        if let Some(r) = self.badapple.as_ref().unwrap().worker.try_recv() {
+        if let Some((r, seen)) = self.badapple.as_ref().unwrap().worker.try_recv() {
             let ba = self.badapple.as_mut().unwrap();
-            ba.requested = None;
+            ba.inflight = ba.inflight.saturating_sub(seen);
             ba.frame = r.frame;
             ba.tris = r.tris;
             ba.build_secs = r.build_secs;
@@ -286,9 +288,13 @@ impl App {
         let ba = self.badapple.as_mut().unwrap();
         let elapsed = (time - ba.epoch).max(0.0);
         let target = ((elapsed * badapple::FPS) as usize).min(n - 1);
-        if ba.requested.is_none() && target != ba.frame {
+        if ba.inflight < badapple::PIPELINE_DEPTH
+            && target != ba.frame
+            && ba.last_requested != Some(target)
+        {
             ba.worker.request(target);
-            ba.requested = Some(target);
+            ba.last_requested = Some(target);
+            ba.inflight += 1;
         }
         true
     }
@@ -414,7 +420,8 @@ impl App {
         });
         if let Some(ba) = &self.badapple {
             let n = badapple::frame_count();
-            ui.label(format!("frame {}/{}  ·  {} tris", ba.frame + 1, n, ba.tris));
+            let shown = if ba.frame == usize::MAX { 0 } else { ba.frame + 1 };
+            ui.label(format!("frame {shown}/{n}  ·  {} tris", ba.tris));
             ui.label(
                 egui::RichText::new(format!("{:.2} M triangles/sec", ba.tri_rate / 1e6))
                     .strong()
