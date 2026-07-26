@@ -87,6 +87,7 @@ struct Scratch {
     u_i: Vec<f32>,
     v_j: Vec<f32>,
     grid: Vec<Vec3>,
+    gnrm: Vec<Vec3>,
 }
 
 pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
@@ -107,16 +108,24 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
         sc.nrm.clear();
         sc.spans.clear();
 
+        let prep = face.surface.prepare();
+        let flat_normal = match face.surface {
+            crate::kernel::geom::Surface::Plane { normal, .. } => Some(normal * sign),
+            _ => None,
+        };
         for lp in solid.face_loops(fi) {
             let start = sc.pts3.len();
             for &(e, fwd) in lp {
                 let samples = es.get(e);
                 for k in 0..samples.len() - 1 {
                     let p = if fwd { samples[k] } else { samples[samples.len() - 1 - k] };
-                    let p_uv = face.surface.project(p);
+                    let p_uv = prep.project(p);
                     sc.pts3.push(p);
                     sc.uv.push(Vec2::new(p_uv.0, p_uv.1));
-                    sc.nrm.push(face.surface.normal(p_uv) * sign);
+                    sc.nrm.push(match flat_normal {
+                        Some(n) => n,
+                        None => prep.normal(p_uv) * sign,
+                    });
                 }
             }
             sc.spans.push((start, sc.pts3.len()));
@@ -291,7 +300,8 @@ fn tess_grid_face(
         return false;
     }
 
-    let s = &face.surface;
+    let prep = face.surface.prepare();
+    let s = &prep;
     let uv0a = s.project(at(e0, 0));
     let uv0b = s.project(at(e0, m - 1));
     if (uv0a.1 - uv0b.1).abs() > 1e-4 || (uv0a.0 - uv0b.0).abs() < 1e-4 {
@@ -318,7 +328,7 @@ fn tess_grid_face(
     sc.u_i.extend((0..m).map(|i| s.project(at(e0, i)).0));
     sc.v_j.extend((0..n).map(|j| s.project(at(e1, j)).1));
     unwrap(&mut sc.u_i);
-    if matches!(s, Surface::Torus { .. } | Surface::Sphere { .. }) {
+    if matches!(face.surface, Surface::Torus { .. } | Surface::Sphere { .. }) {
         unwrap(&mut sc.v_j);
     }
     let (u_i, v_j) = (&sc.u_i, &sc.v_j);
@@ -340,8 +350,13 @@ fn tess_grid_face(
             };
         }
     }
-    let nrm_at = |i: usize, j: usize| face.surface.normal((u_i[i], v_j[j])) * sign;
-
+    sc.gnrm.clear();
+    sc.gnrm.reserve(m * n);
+    for i in 0..m {
+        for j in 0..n {
+            sc.gnrm.push(prep.normal((u_i[i], v_j[j])) * sign);
+        }
+    }
     let du = u_i[m - 1] - u_i[0];
     let dv = v_j[n - 1] - v_j[0];
     let flip = du * dv * face.surface.uv_orientation() * sign < 0.0;
@@ -351,6 +366,7 @@ fn tess_grid_face(
     out.face_of_tri.reserve(count);
     let mut emit = |a: (usize, usize), b: (usize, usize), c: (usize, usize)| {
         let g = |q: (usize, usize)| sc.grid[q.0 * n + q.1];
+        let nrm_at = |i: usize, j: usize| sc.gnrm[i * n + j];
         let (pa, pb, pc) = if flip { (g(a), g(c), g(b)) } else { (g(a), g(b), g(c)) };
         let (na, nb, nc) = if flip {
             (nrm_at(a.0, a.1), nrm_at(c.0, c.1), nrm_at(b.0, b.1))

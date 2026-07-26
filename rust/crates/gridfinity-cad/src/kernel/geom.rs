@@ -88,7 +88,7 @@ impl Surface {
         Surface::Sphere { center, axis: Vec3::Z, radius, ref_dir: Vec3::X }
     }
 
-    pub fn point(&self, uv: Uv) -> Vec3 {
+    fn point_f(&self, uv: Uv, d0: Vec3, d1: Vec3) -> Vec3 {
         let (u, v) = uv;
         match *self {
             Surface::Plane {
@@ -97,17 +97,15 @@ impl Surface {
                 v_dir,
                 ..
             } => origin + u * u_dir + v * v_dir,
-            Surface::Cylinder { base, axis, radius, ref_dir } => {
-                let (d0, d1) = radial_frame(axis, ref_dir);
+            Surface::Cylinder { base, axis, radius, ref_dir: _ } => {
                 base + radius * (u.cos() * d0 + u.sin() * d1) + v * axis
             }
             Surface::Cone {
                 apex,
                 axis,
                 half_angle,
-                ref_dir,
+                ref_dir: _,
             } => {
-                let (d0, d1) = radial_frame(axis, ref_dir);
                 let r = v.abs() * half_angle.tan();
                 apex + v * axis + r * (u.cos() * d0 + u.sin() * d1)
             }
@@ -116,46 +114,40 @@ impl Surface {
                 axis,
                 major_r,
                 minor_r,
-                ref_dir,
+                ref_dir: _,
             } => {
-                let (d0, d1) = radial_frame(axis, ref_dir);
                 let radial = u.cos() * d0 + u.sin() * d1;
                 center + (major_r + minor_r * v.cos()) * radial + minor_r * v.sin() * axis
             }
-            Surface::Sphere { center, axis, radius, ref_dir } => {
-                let (d0, d1) = radial_frame(axis, ref_dir);
+            Surface::Sphere { center, axis, radius, ref_dir: _ } => {
                 let radial = u.cos() * d0 + u.sin() * d1;
                 center + radius * (v.sin() * radial + v.cos() * axis)
             }
         }
     }
 
-    pub fn normal(&self, uv: Uv) -> Vec3 {
+    fn normal_f(&self, uv: Uv, d0: Vec3, d1: Vec3) -> Vec3 {
         let (u, v) = uv;
         match *self {
             Surface::Plane { normal, .. } => normal,
-            Surface::Cylinder { axis, ref_dir, .. } => {
-                let (d0, d1) = radial_frame(axis, ref_dir);
+            Surface::Cylinder { axis: _, ref_dir: _, .. } => {
                 (u.cos() * d0 + u.sin() * d1).normalize()
             }
             Surface::Cone {
                 axis,
                 half_angle,
-                ref_dir,
+                ref_dir: _,
                 ..
             } => {
-                let (d0, d1) = radial_frame(axis, ref_dir);
                 let radial = u.cos() * d0 + u.sin() * d1;
                 let sgn = if v >= 0.0 { -1.0 } else { 1.0 };
                 (half_angle.cos() * radial + sgn * half_angle.sin() * axis).normalize()
             }
-            Surface::Torus { axis, ref_dir, .. } => {
-                let (d0, d1) = radial_frame(axis, ref_dir);
+            Surface::Torus { axis, ref_dir: _, .. } => {
                 let radial = u.cos() * d0 + u.sin() * d1;
                 (v.cos() * radial + v.sin() * axis).normalize()
             }
-            Surface::Sphere { axis, ref_dir, .. } => {
-                let (d0, d1) = radial_frame(axis, ref_dir);
+            Surface::Sphere { axis, ref_dir: _, .. } => {
                 let radial = u.cos() * d0 + u.sin() * d1;
                 (v.sin() * radial + v.cos() * axis).normalize()
             }
@@ -226,7 +218,7 @@ impl Surface {
         }
     }
 
-    pub fn project(&self, p: Vec3) -> Uv {
+    fn project_f(&self, p: Vec3, d0: Vec3, d1: Vec3) -> Uv {
         match *self {
             Surface::Plane {
                 origin,
@@ -237,14 +229,12 @@ impl Surface {
                 let d = p - origin;
                 (d.dot(u_dir), d.dot(v_dir))
             }
-            Surface::Cylinder { base, axis, ref_dir, .. } => {
-                let (d0, d1) = radial_frame(axis, ref_dir);
+            Surface::Cylinder { base, axis, ref_dir: _, .. } => {
                 let rel = p - base;
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
                 (u, rel.dot(axis))
             }
-            Surface::Cone { apex, axis, ref_dir, .. } => {
-                let (d0, d1) = radial_frame(axis, ref_dir);
+            Surface::Cone { apex, axis, ref_dir: _, .. } => {
                 let rel = p - apex;
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
                 (u, rel.dot(axis))
@@ -253,10 +243,9 @@ impl Surface {
                 center,
                 axis,
                 major_r,
-                ref_dir,
+                ref_dir: _,
                 ..
             } => {
-                let (d0, d1) = radial_frame(axis, ref_dir);
                 let rel = p - center;
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
                 let radial = u.cos() * d0 + u.sin() * d1;
@@ -264,14 +253,67 @@ impl Surface {
                 let v = wrap_angle(rel.dot(axis).atan2(ring));
                 (u, v)
             }
-            Surface::Sphere { center, axis, radius, ref_dir } => {
-                let (d0, d1) = radial_frame(axis, ref_dir);
+            Surface::Sphere { center, axis, radius, ref_dir: _ } => {
                 let rel = (p - center) / radius;
                 let v = rel.dot(axis).clamp(-1.0, 1.0).acos();
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
                 (u, v)
             }
         }
+    }
+}
+
+impl Surface {
+    pub fn frame(&self) -> (Vec3, Vec3) {
+        match *self {
+            Surface::Plane { .. } => (Vec3::ZERO, Vec3::ZERO),
+            Surface::Cylinder { axis, ref_dir, .. }
+            | Surface::Cone { axis, ref_dir, .. }
+            | Surface::Torus { axis, ref_dir, .. }
+            | Surface::Sphere { axis, ref_dir, .. } => radial_frame(axis, ref_dir),
+        }
+    }
+
+    pub fn prepare(&self) -> Prepared {
+        let (d0, d1) = self.frame();
+        Prepared { surface: *self, d0, d1 }
+    }
+
+    pub fn point(&self, uv: Uv) -> Vec3 {
+        let (d0, d1) = self.frame();
+        self.point_f(uv, d0, d1)
+    }
+
+    pub fn normal(&self, uv: Uv) -> Vec3 {
+        let (d0, d1) = self.frame();
+        self.normal_f(uv, d0, d1)
+    }
+
+    pub fn project(&self, p: Vec3) -> Uv {
+        let (d0, d1) = self.frame();
+        self.project_f(p, d0, d1)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Prepared {
+    pub surface: Surface,
+    d0: Vec3,
+    d1: Vec3,
+}
+
+impl Prepared {
+    #[inline]
+    pub fn point(&self, uv: Uv) -> Vec3 {
+        self.surface.point_f(uv, self.d0, self.d1)
+    }
+    #[inline]
+    pub fn normal(&self, uv: Uv) -> Vec3 {
+        self.surface.normal_f(uv, self.d0, self.d1)
+    }
+    #[inline]
+    pub fn project(&self, p: Vec3) -> Uv {
+        self.surface.project_f(p, self.d0, self.d1)
     }
 }
 
