@@ -13,7 +13,9 @@ use crate::kernel::program::{
     run_all,
 };
 use crate::kernel::slab::{Op as SlabOp, Slab, SlabOpts, plan_bands};
-use crate::kernel::sketch::{Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop};
+use crate::kernel::sketch::{
+    Aabb, Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop, segs_bbox,
+};
 use crate::kernel::topo::{Builder, Loop, Solid};
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
@@ -1988,10 +1990,18 @@ fn stitch_loops_2d(free: Vec<Seg>) -> Vec<(Vec<Seg>, Vec<Vec<Seg>>)> {
         return Vec::new();
     }
     let n = loops.len();
+    let bbox: Vec<Aabb> = loops.iter().map(|l| segs_bbox(l)).collect();
+    let mut by_area: Vec<usize> = (0..n).collect();
+    by_area.sort_unstable_by(|&a, &b| bbox[b].area().total_cmp(&bbox[a].area()));
     let containers: Vec<Vec<usize>> = (0..n)
         .map(|i| {
-            (0..n)
-                .filter(|&j| j != i && point_in_segs(loops[i][0].start(), &loops[j]))
+            let pt = loops[i][0].start();
+            let a_i = bbox[i].area();
+            by_area
+                .iter()
+                .copied()
+                .take_while(|&j| bbox[j].area() >= a_i)
+                .filter(|&j| j != i && bbox[j].contains(pt) && point_in_segs(pt, &loops[j]))
                 .collect()
         })
         .collect();

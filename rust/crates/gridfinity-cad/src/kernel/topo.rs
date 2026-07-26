@@ -22,17 +22,22 @@ pub struct Edge {
 
 impl Edge {
     pub fn sample(&self, forward: bool, n: usize) -> Vec<Vec3> {
+        let mut out = Vec::with_capacity(n + 1);
+        self.sample_into(forward, n, &mut out);
+        out
+    }
+
+    pub fn sample_into(&self, forward: bool, n: usize, out: &mut Vec<Vec3>) {
         let (a, b) = if forward {
             (self.t0, self.t1)
         } else {
             (self.t1, self.t0)
         };
-        (0..=n)
-            .map(|i| {
-                let t = a + (b - a) * (i as f32 / n as f32);
-                self.curve.point(t)
-            })
-            .collect()
+        out.reserve(n + 1);
+        for i in 0..=n {
+            let t = a + (b - a) * (i as f32 / n as f32);
+            out.push(self.curve.point(t));
+        }
     }
 
     pub fn seg_count(&self, arc_segs_per_quarter: usize) -> usize {

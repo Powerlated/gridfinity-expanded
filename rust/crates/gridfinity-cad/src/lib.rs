@@ -1000,4 +1000,54 @@ mod audit_tests {
         let tess = tessellate(&solid, 6);
         assert!(tessellation_leaks(&tess).is_empty(), "default bin should tessellate closed");
     }
+
+    /// Multi-cell polyomino bins at `arc_segs_per_quarter = 1`, the shape and
+    /// resolution the Bad Apple stress test drives. Coarse arcs put most planar
+    /// faces on the small-polygon fast path in `triangulate`, and reentrant
+    /// corners exercise the holes-and-chords path, so this is where a
+    /// tessellator regression would surface first.
+    #[test]
+    fn polyomino_bins_tessellate_closed_at_coarse_resolution() {
+        use crate::layout::GridCell;
+        let p = gridfinity::Params {
+            height_units: 2,
+            floor_fillet: 0.0,
+            magnet_holes: false,
+            screw_holes: false,
+            ..gridfinity::Params::default()
+        };
+        let cell = |x: i32, y: i32| GridCell { x, y };
+        let shapes: Vec<(&str, Vec<GridCell>)> = vec![
+            ("single", vec![cell(0, 0)]),
+            ("domino", vec![cell(0, 0), cell(1, 0)]),
+            ("L", vec![cell(0, 0), cell(0, 1), cell(1, 0)]),
+            ("S", vec![cell(0, 0), cell(1, 0), cell(1, 1), cell(2, 1)]),
+            ("T", vec![cell(0, 0), cell(1, 0), cell(2, 0), cell(1, 1)]),
+            ("plus", vec![cell(1, 0), cell(0, 1), cell(1, 1), cell(2, 1), cell(1, 2)]),
+            (
+                "square3x3",
+                (0..3).flat_map(|x| (0..3).map(move |y| cell(x, y))).collect(),
+            ),
+            (
+                "U",
+                vec![
+                    cell(0, 0),
+                    cell(0, 1),
+                    cell(0, 2),
+                    cell(2, 0),
+                    cell(2, 1),
+                    cell(2, 2),
+                    cell(1, 0),
+                ],
+            ),
+        ];
+        for (name, cells) in shapes {
+            let solid = gridfinity::build_piece(&p, &cells, &cells, None)
+                .unwrap_or_else(|e| panic!("{name} failed to build: {e:?}"));
+            assert!(solid.validate().is_ok(), "{name} is not a manifold solid");
+            let tess = tessellate(&solid, 1);
+            let leaks = tessellation_leaks(&tess);
+            assert!(leaks.is_empty(), "{name} leaked {} edges", leaks.len());
+        }
+    }
 }

@@ -154,6 +154,59 @@ pub fn loop_area(segs: &[Seg]) -> f32 {
     s / 2.0
 }
 
+const MAX_ARC_STOPS: usize = 8;
+
+#[derive(Clone, Copy, PartialEq)]
+pub struct Aabb {
+    pub min: Vec2,
+    pub max: Vec2,
+}
+
+impl Aabb {
+    pub const EMPTY: Aabb =
+        Aabb { min: Vec2::new(f32::INFINITY, f32::INFINITY), max: Vec2::new(f32::NEG_INFINITY, f32::NEG_INFINITY) };
+
+    #[inline]
+    pub fn contains(&self, p: Vec2) -> bool {
+        p.x >= self.min.x && p.x <= self.max.x && p.y >= self.min.y && p.y <= self.max.y
+    }
+
+    #[inline]
+    pub fn area(&self) -> f32 {
+        ((self.max.x - self.min.x) * (self.max.y - self.min.y)).max(0.0)
+    }
+
+    #[inline]
+    pub fn union(self, o: Aabb) -> Aabb {
+        Aabb { min: self.min.min(o.min), max: self.max.max(o.max) }
+    }
+}
+
+impl Seg {
+    pub fn bbox(&self) -> Aabb {
+        match *self {
+            Seg::Line { a, b } => Aabb { min: a.min(b), max: a.max(b) },
+            Seg::Arc { a, b, center, radius, a0, a1 } => {
+                let mut bb = Aabb { min: a.min(b), max: a.max(b) };
+                let (lo, hi) = (a0.min(a1), a0.max(a1));
+                let q = PI / 2.0;
+                let k0 = (lo / q).ceil() as i32;
+                let k1 = (hi / q).floor() as i32;
+                for k in k0..=k1 {
+                    let t = k as f32 * q;
+                    let p = center + Vec2::new(t.cos(), t.sin()) * radius;
+                    bb = bb.union(Aabb { min: p, max: p });
+                }
+                bb
+            }
+        }
+    }
+}
+
+pub fn segs_bbox(segs: &[Seg]) -> Aabb {
+    segs.iter().fold(Aabb::EMPTY, |acc, s| acc.union(s.bbox()))
+}
+
 pub fn point_in_segs(pt: Vec2, segs: &[Seg]) -> bool {
     crate::kernel::perf::count(crate::kernel::perf::Metric::PointInSegs);
     let mut inside = false;
@@ -173,13 +226,26 @@ pub fn point_in_segs(pt: Vec2, segs: &[Seg]) -> bool {
                 let (lo, hi) = (a0.min(a1), a0.max(a1));
                 let k0 = ((lo - PI / 2.0) / PI).floor() as i32 + 1;
                 let k1 = ((hi - PI / 2.0) / PI).ceil() as i32 - 1;
-                let mut stops: Vec<f32> = (k0..=k1).map(|k| PI / 2.0 + k as f32 * PI).collect();
+                debug_assert!(
+                    k1 - k0 < MAX_ARC_STOPS as i32,
+                    "arc spans more than 2pi: a0={a0} a1={a1}"
+                );
+                let mut buf = [0.0f32; MAX_ARC_STOPS];
+                let mut n = 0;
+                for k in k0..=k1 {
+                    if n == MAX_ARC_STOPS {
+                        break;
+                    }
+                    buf[n] = PI / 2.0 + k as f32 * PI;
+                    n += 1;
+                }
+                let stops = &mut buf[..n];
                 if a1 < a0 {
                     stops.reverse();
                 }
                 let mut t_prev = a0;
                 let mut p_prev = a;
-                for t in stops.into_iter().chain(std::iter::once(a1)) {
+                for t in stops.iter().copied().chain(std::iter::once(a1)) {
                     let p = if t == a1 {
                         b
                     } else {
@@ -245,5 +311,89 @@ mod tests {
     fn ordinary_rounded_rect_keeps_all_eight_segments() {
         let sk = Sketch::rounded_rect(0.0, 0.0, 40.0, 30.0, 5.0);
         assert_eq!(sk.loops[0].len(), 8);
+    }
+
+    fn brute_bbox(s: &Seg) -> Aabb {
+        let mut bb = Aabb::EMPTY;
+        for i in 0..=2048 {
+            let t = i as f32 / 2048.0;
+            let p = match *s {
+                Seg::Line { a, b } => a + (b - a) * t,
+                Seg::Arc { center, radius, a0, a1, .. } => {
+                    let ang = a0 + (a1 - a0) * t;
+                    center + Vec2::new(ang.cos(), ang.sin()) * radius
+                }
+            };
+            bb = bb.union(Aabb { min: p, max: p });
+        }
+        bb
+    }
+
+    /// The bbox must be tight, not merely conservative: `stitch_loops_2d`
+    /// orders containment candidates by bbox area, which is only sound when a
+    /// containing loop's box really does enclose the contained one's.
+    #[test]
+    fn arc_bbox_is_tight_against_dense_sampling() {
+        let c = Vec2::new(3.0, -2.0);
+        let r = 7.0;
+        for k in 0..24 {
+            let a0 = k as f32 * 0.31 - 3.0;
+            for span in [0.4, 1.2, PI, 4.0, 2.0 * PI, -1.2, -4.0] {
+                let a1 = a0 + span;
+                let seg = Seg::Arc {
+                    a: c + Vec2::new(a0.cos(), a0.sin()) * r,
+                    b: c + Vec2::new(a1.cos(), a1.sin()) * r,
+                    center: c,
+                    radius: r,
+                    a0,
+                    a1,
+                };
+                let (got, want) = (seg.bbox(), brute_bbox(&seg));
+                let tol = 1e-2;
+                assert!(
+                    got.min.x <= want.min.x + tol
+                        && got.min.y <= want.min.y + tol
+                        && got.max.x >= want.max.x - tol
+                        && got.max.y >= want.max.y - tol,
+                    "bbox does not contain arc a0={a0} span={span}"
+                );
+                assert!(
+                    got.min.x >= want.min.x - tol
+                        && got.min.y >= want.min.y - tol
+                        && got.max.x <= want.max.x + tol
+                        && got.max.y <= want.max.y + tol,
+                    "bbox is loose for a0={a0} span={span}"
+                );
+            }
+        }
+    }
+
+    /// A loop's box encloses any loop inside it, so sorting by area cannot skip
+    /// a real container.
+    #[test]
+    fn containment_implies_bbox_area_ordering() {
+        let outer = Sketch::rounded_rect(0.0, 0.0, 40.0, 30.0, 5.0).loops[0].clone();
+        let inner = Sketch::circle(10.0, 10.0, 3.0).loops[0].clone();
+        let (bo, bi) = (segs_bbox(&outer), segs_bbox(&inner));
+        assert!(point_in_segs(inner[0].start(), &outer));
+        assert!(bo.area() > bi.area());
+        assert!(bo.contains(inner[0].start()));
+    }
+
+    /// The arc branch of `point_in_segs` used to heap-allocate its stop list on
+    /// every call; the fixed buffer must give identical answers.
+    #[test]
+    fn point_in_circle_matches_radius_test() {
+        let circle = Sketch::circle(1.0, 2.0, 5.0).loops[0].clone();
+        for i in -12..12 {
+            for j in -12..12 {
+                let p = Vec2::new(1.0 + i as f32 * 0.7, 2.0 + j as f32 * 0.7);
+                let want = (p - Vec2::new(1.0, 2.0)).length() < 5.0;
+                if ((p - Vec2::new(1.0, 2.0)).length() - 5.0).abs() < 1e-3 {
+                    continue;
+                }
+                assert_eq!(point_in_segs(p, &circle), want, "at {p:?}");
+            }
+        }
     }
 }
