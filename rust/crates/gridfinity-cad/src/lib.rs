@@ -30,6 +30,12 @@ mod tests {
     use crate::kernel::sketch::Sketch;
     use std::collections::HashMap;
 
+    static PERF_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn perf_guard() -> std::sync::MutexGuard<'static, ()> {
+        PERF_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn assert_watertight(mesh: &Mesh) {
         let mut dir: HashMap<(u32, u32), i32> = HashMap::new();
         for t in mesh.indices.chunks_exact(3) {
@@ -77,6 +83,36 @@ mod tests {
             indices.push(id);
         }
         assert_watertight(&Mesh { positions, indices });
+    }
+
+    #[test]
+    fn a_point_computed_twice_across_a_weld_cell_boundary_interns_once() {
+        let mut b = crate::kernel::topo::Builder::new();
+        let a = b.vertex(kernel::math::Vec3::new(40.55, 57.819447, 8.2));
+        let c = b.vertex(kernel::math::Vec3::new(40.549995, 57.81945, 8.2));
+        assert_eq!(a, c, "f32 drift across a weld cell boundary must not split a vertex");
+    }
+
+    #[test]
+    fn a_partial_height_wall_leaving_the_footprint_stays_manifold() {
+        let p = gridfinity::Params {
+            bins: vec![LogicalBin {
+                cells: cells(&[(0, 0), (0, 1), (1, 0)]),
+                ..Default::default()
+            }],
+            inner_walls: vec![gridfinity::InnerWall {
+                x1: 80.5,
+                y1: 26.0,
+                x2: 3.0,
+                y2: 95.0,
+                width: 5.6,
+                height: Some(6.5),
+            }],
+            ..gridfinity::Params::default()
+        };
+        let bin = &p.bins[0];
+        let solid = gridfinity::build_piece(&p, &bin.cells, &bin.cells, None).expect("builds");
+        solid.validate().expect("manifold");
     }
 
     fn signed_volume(mesh: &Mesh) -> f64 {
@@ -814,8 +850,7 @@ mod tests {
     #[test]
     fn perf_counters_see_a_real_build() {
         use crate::kernel::perf::{self, Metric};
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = perf_guard();
 
         let p = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {
@@ -846,9 +881,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "reporting: SCALE_WH=48x48 cargo test -p gridfinity-cad alloc_report -- --ignored --nocapture"]
     fn alloc_report() {
         use crate::kernel::perf;
+        let _g = perf_guard();
         let (w, h) = match std::env::var("SCALE_WH") {
             Ok(s) => {
                 let mut it = s.split('x').map(|v| v.parse::<i32>().unwrap());
@@ -914,9 +949,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "reporting: cargo test -p gridfinity-cad perf_report -- --ignored --nocapture"]
     fn perf_report() {
         use crate::kernel::perf;
+        let _g = perf_guard();
         let p = gridfinity::Params {
             inner_walls: vec![
                 gridfinity::InnerWall { x1: 22.0, y1: 30.0, x2: 62.0, y2: 55.0, width: 2.4, height: None },

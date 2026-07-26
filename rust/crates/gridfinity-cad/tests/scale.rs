@@ -41,7 +41,6 @@ fn blob_phase(w: i32, h: i32, phase: f32) -> Vec<GridCell> {
 }
 
 #[test]
-#[ignore]
 fn pipeline_bench() {
     use std::sync::mpsc::sync_channel;
     let (w, h) = match std::env::var("SCALE_WH") {
@@ -132,7 +131,6 @@ fn time_one(w: i32, h: i32) {
 }
 
 #[test]
-#[ignore]
 fn tess_bench() {
     let (bw, bh) = match std::env::var("SCALE_WH") {
         Ok(s) => {
@@ -165,7 +163,6 @@ fn tess_bench() {
 }
 
 #[test]
-#[ignore]
 fn build_bench() {
     let (w, h) = match std::env::var("SCALE_WH") {
         Ok(s) => {
@@ -187,7 +184,6 @@ fn build_bench() {
 }
 
 #[test]
-#[ignore]
 fn plan_bench() {
     let (w, h) = match std::env::var("SCALE_WH") {
         Ok(s) => {
@@ -209,7 +205,6 @@ fn plan_bench() {
 }
 
 #[test]
-#[ignore]
 fn scale_report() {
     println!();
     for (w, h) in [(2, 2), (4, 4), (6, 6), (8, 8), (12, 12), (16, 16), (24, 24), (32, 32)] {
@@ -218,7 +213,6 @@ fn scale_report() {
 }
 
 #[test]
-#[ignore]
 fn scale_features() {
     let variants: [(&str, Params); 4] = [
         ("default (h3, fillet 3.0, rc 2.5)", Params::default()),
@@ -259,7 +253,6 @@ fn scale_features() {
 }
 
 #[test]
-#[ignore]
 fn scale_profile() {
     let (w, h) = match std::env::var("SCALE_WH") {
         Ok(s) => {

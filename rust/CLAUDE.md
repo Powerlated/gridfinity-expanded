@@ -57,15 +57,19 @@ cargo build --release
 
 # The geometry fuzzer (tests/fuzz.rs): random Params -> try_build -> validate -> audit
 # -> tessellation_leaks, with failures grouped by signature and each shrunk to a
-# paste-ready `Params` literal. Both profiles are #[ignore]d — they are tools, not gates.
-FUZZ_CASES=2000 cargo test -p gridfinity-cad --test fuzz -- --ignored --nocapture
-FUZZ_SEED=7 FUZZ_CASES=500 cargo test -p gridfinity-cad --test fuzz -- --ignored --nocapture
+# paste-ready `Params` literal. Nothing in this workspace is #[ignore]d any more: every test,
+# fuzzer, bench and report runs as a gate under a plain `cargo test --workspace`.
+FUZZ_CASES=2000 cargo test -p gridfinity-cad --test fuzz -- --nocapture
+FUZZ_SEED=7 FUZZ_CASES=500 cargo test -p gridfinity-cad --test fuzz -- --nocapture
 ```
 
 `fuzz_inner_walls` covers free-form inner walls (the divider/fillet work); `fuzz_params_broad`
-covers shape, height, thicknesses, holes, dividers, slope and mode. Baseline at the default seed
-is **36/150 failing, 6 distinct defects** — drop the `#[ignore]` and make it a gate once that
-reaches zero. A run is deterministic per seed, but adding a generator arm reshuffles the stream,
+covers shape, height, thicknesses, holes, dividers, slope and mode. `fuzz_inner_walls` is at
+**29/150 failing, 7 distinct defects** at the default seed and is **currently red**, as is
+`gridfinity-wasm`'s `opening_on_a_hole_boundary_stays_closed`. Those two are the whole of the
+workspace's known-failing surface; everything else is green. Run the suite with `--no-fail-fast`,
+since a failing binary otherwise hides the ones after it, and expect ~80s (the badapple benches
+dominate). A run is deterministic per seed, but adding a generator arm reshuffles the stream,
 so quote the *case literal* in a bug report, never "seed 7 case 412".
 
 The GUI is `windows_subsystem="windows"` in release, so it opens a window and blocks. To smoke-test
@@ -137,6 +141,18 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   it must finish through `build_compact` (not `build`) to drop and renumber them. **Plain `build`
   must never compact:** callers pick blend and chamfer edges by id *before* building, and
   renumbering would silently repoint those selections at other edges.
+**Vertex interning is straddle-aware.** `weld_key` rounds `p * WELD`, so two computations of the
+*same* point that differ by an f32 ulp can land either side of a cell boundary (observed:
+`57.819447` → 578194, `57.81945` → 578195) and intern as two vertices, which dangles every edge
+touching them and fails `validate`. `Builder::vertex` therefore checks, arithmetically and with no
+hashing, whether any coordinate sits within `STRADDLE_TOLERANCE_CELLS` of a boundary; only then does
+it probe the (at most 7) neighbouring cells and reuse a vertex within that tolerance. Points in a
+cell's interior — almost all of them — keep the original single-`entry` fast path. This is a
+**reconciliation at intern time, not the root fix**: the real defect is that two producers in the
+banded-cavity path derive the same wall corner through different arithmetic. It still costs ~10% of
+a 32x32 build (18.0 → 20.0ms, alternating A/B), which is the price of not having found those
+producers yet.
+
 - **`sketch.rs`** — 2D profiles as closed loops of `Line`/`Arc` segments (`rectangle`,
   `rounded_rect`, `circle`). Corner radii are real arcs. Outer loops CCW.
 - **`build.rs`** — features. Three primitives write into a shared `Builder`: `ring` (profile at a
@@ -347,7 +363,7 @@ includes the `seg_seg_points` beneath it — so the column does not sum to the w
 stack in a thread-local `Cell` — never a `Vec`, so pushing a scope can't re-enter the allocator);
 that attribution is *exclusive*, unlike the nesting time column, and the shortfall against the
 global total is unscoped construction churn. `perf_report` reports the **2nd** rebuild (the
-slider-drag case). `cargo test -p gridfinity-cad perf_report -- --ignored --nocapture` prints the
+slider-drag case). `cargo test -p gridfinity-cad perf_report -- --nocapture` prints the
 table from the terminal.
 
 That instrumentation drove a churn-first data-oriented pass: a `Solid` is now flat CSR arenas
@@ -360,7 +376,7 @@ rebuild's allocation churn ~77% (fillet_edges ~92%).
 A second pass went after *work* rather than churn. The scaling harness is `tests/scale.rs`
 (`scale_report` for the cost curve, `scale_features` for what the optional features cost,
 `scale_profile` for the per-metric table at `SCALE_WH=48x48`, `tess_bench` for the tessellator
-alone — all `#[ignore]`d tools, like `fuzz.rs`). Four changes, biggest first:
+alone). Four changes, biggest first:
 
 - **`fillet_edges` rebuilds only the faces the blend touches** (see `topo.rs`/`fillet.rs` above).
   `Builder::vertex` went 112836 calls → 25452 and `Builder::face` 19994 (≈2× over-emission) →
@@ -421,7 +437,7 @@ The lesson to keep: **chasing individual allocation sites here is not worth it.*
 alone makes 69474 of those allocations (47 per cell, over half the total), and the targeted fixes
 that removed hundreds of them all measured flat. The count is spread thin across `Vec<Seg>` loops,
 sketch wrappers and label `String`s, none of them a hotspot. `alloc_report`
-(`SCALE_WH=48x48 cargo test -p gridfinity-cad alloc_report -- --ignored --nocapture`) prints the
+(`SCALE_WH=48x48 cargo test -p gridfinity-cad alloc_report -- --nocapture`) prints the
 per-scope allocation table; use it to confirm churn has not regressed, not to hunt for sites.
 
 `perf_counters_see_a_real_build` needs an inner wall that *crosses* the compartment boundary. With

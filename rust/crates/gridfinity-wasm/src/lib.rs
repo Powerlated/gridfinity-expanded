@@ -328,7 +328,6 @@ mod tests {
         assert!(leaks.is_empty(), "unclosed output:\n  {}", leaks.join("\n  "));
     }
 
-    #[ignore = "open/seam rim assembly double-subtracts a hole an opening merged into the cavity"]
     #[test]
     fn opening_on_a_hole_boundary_stays_closed() {
         const RING: &str = r#""cells":[{"x":0,"y":0},{"x":1,"y":0},{"x":2,"y":0},

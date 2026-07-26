@@ -358,7 +358,6 @@ fn env_u64(key: &str, default: u64) -> u64 {
 }
 
 #[test]
-#[ignore = "known-failing: 6 open defects at the default seed"]
 fn fuzz_inner_walls() {
     let cases = env_u64("FUZZ_CASES", 150) as u32;
     let seed = env_u64("FUZZ_SEED", 0x9E37_79B9_7F4A_7C15);
@@ -367,7 +366,6 @@ fn fuzz_inner_walls() {
 }
 
 #[test]
-#[ignore = "exploratory: run on demand with FUZZ_CASES/FUZZ_SEED"]
 fn fuzz_params_broad() {
     let cases = env_u64("FUZZ_CASES", 400) as u32;
     let seed = env_u64("FUZZ_SEED", 0x9E37_79B9_7F4A_7C15);
