@@ -15,8 +15,8 @@ pub use kernel::topo::Solid;
 
 #[cfg(test)]
 #[global_allocator]
-static TEST_ALLOC: kernel::perf::CountingAlloc<std::alloc::System> =
-    kernel::perf::CountingAlloc::new(std::alloc::System);
+static TEST_ALLOC: kernel::perf::CountingAlloc<mimalloc::MiMalloc> =
+    kernel::perf::CountingAlloc::new(mimalloc::MiMalloc);
 
 #[cfg(test)]
 mod tests {
@@ -807,6 +807,74 @@ mod tests {
             let row = rows.iter().find(|r| r.name == want.name());
             assert!(row.is_some_and(|r| r.calls > 0), "{} never fired", want.name());
         }
+    }
+
+    #[test]
+    #[ignore = "reporting: SCALE_WH=48x48 cargo test -p gridfinity-cad alloc_report -- --ignored --nocapture"]
+    fn alloc_report() {
+        use crate::kernel::perf;
+        let (w, h) = match std::env::var("SCALE_WH") {
+            Ok(s) => {
+                let mut it = s.split('x').map(|v| v.parse::<i32>().unwrap());
+                (it.next().unwrap(), it.next().unwrap())
+            }
+            Err(_) => (32, 32),
+        };
+        let mut cells = Vec::new();
+        let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+        let r = (w.min(h) as f32) * 0.45;
+        for x in 0..w {
+            for y in 0..h {
+                let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                let wob = 1.0 + 0.18 * (dy * 0.9).sin() + 0.12 * (dx * 1.3).cos();
+                if (dx * dx + dy * dy).sqrt() <= r * wob {
+                    cells.push(layout::GridCell { x, y });
+                }
+            }
+        }
+        let n = cells.len();
+        let p = gridfinity::Params {
+            bins: vec![gridfinity::LogicalBin { cells, ..Default::default() }],
+            ..Default::default()
+        };
+        perf::set_enabled(true);
+        let _ = tessellate(&gridfinity::build(&p), 4);
+        perf::reset();
+        let t = std::time::Instant::now();
+        let solid = gridfinity::build(&p);
+        let tess = tessellate(&solid, 4);
+        let wall = t.elapsed();
+        perf::set_enabled(false);
+
+        println!(
+            "\n{w}x{h} blob: {n} cells -> {} faces, {} tris in {:?}\n",
+            solid.faces.len(),
+            tess.tris.len(),
+            wall
+        );
+        println!("{:<34} {:>10} {:>12} {:>12}", "metric", "calls", "churn kB", "allocs");
+        let mut rows = perf::snapshot();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.alloc_calls));
+        for r in &rows {
+            println!(
+                "{:<34} {:>10} {:>12} {:>12}",
+                r.name,
+                r.calls,
+                r.alloc_bytes / 1000,
+                r.alloc_calls
+            );
+        }
+        let a = perf::allocs();
+        let attributed: u64 = rows.iter().map(|r| r.alloc_bytes).sum();
+        let att_calls: u64 = rows.iter().map(|r| r.alloc_calls).sum();
+        println!(
+            "total allocs {} · churn {} kB · peak {} kB · unattributed {} allocs / {} kB",
+            a.count,
+            a.bytes / 1000,
+            a.peak_live_bytes / 1000,
+            a.count.saturating_sub(att_calls),
+            a.bytes.saturating_sub(attributed) / 1000,
+        );
     }
 
     #[test]

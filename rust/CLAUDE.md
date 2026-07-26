@@ -326,7 +326,9 @@ failing rather than panicking on the way out.
 solve, builder interning, blending, tessellation, slabs) backed by global relaxed atomics, plus a
 `CountingAlloc<A>` the *binary* installs as `#[global_allocator]` (a library must not choose the
 allocator for its dependents; the GUI installs it, and `lib.rs` installs it `cfg(test)` so
-`perf_report` reads churn headlessly). **Off by default** — every entry point starts with one
+`perf_report` reads churn headlessly). `A` is **mimalloc**, not `System` — see the allocator note
+below; `gridfinity-cad` keeps it as a dev-dependency only, target-gated away from wasm, so that
+benchmarks measure the allocator the shipping binary actually uses. **Off by default** — every entry point starts with one
 relaxed load, so an uninstrumented build pays a predictable branch and nothing else. `count()` for
 leaves too hot to time (`point_in_segs` runs millions of times; two `Instant::now()` calls would
 cost more than the function), `scope()` for everything else. **Timings nest** — `split_regions`
@@ -396,6 +398,21 @@ a rebuild. Not taken.
 **Always A/B by alternating** stash/unstash within one session, several rounds. A single
 before/after pair on this machine drifts enough to invent a 2.5ms improvement that a proper
 alternating run shows to be 0.5ms — that nearly shipped the `sketches` regression above.
+
+## The allocator is the thing to watch, not the allocation sites
+
+A 1476-cell rebuild makes **132794 allocations / 187 MB of churn**, averaging ~1.4 kB. On Windows'
+`System` allocator that was ~12.5 ms of a ~118 ms rebuild, and the expensive half was **free**, not
+`malloc` (13.4 ms vs 7.7 ms measured inside the allocator). Switching the binary's `CountingAlloc`
+to wrap **mimalloc** took a 1476-cell build 69.5 → 44.9 ms and tessellation 12.8 → 9.6 ms, three
+runs out of three — one line, and by a wide margin the largest single win in this file's history.
+
+The lesson to keep: **chasing individual allocation sites here is not worth it.** `plan: peg loop`
+alone makes 69474 of those allocations (47 per cell, over half the total), and the targeted fixes
+that removed hundreds of them all measured flat. The count is spread thin across `Vec<Seg>` loops,
+sketch wrappers and label `String`s, none of them a hotspot. `alloc_report`
+(`SCALE_WH=48x48 cargo test -p gridfinity-cad alloc_report -- --ignored --nocapture`) prints the
+per-scope allocation table; use it to confirm churn has not regressed, not to hunt for sites.
 
 `perf_counters_see_a_real_build` needs an inner wall that *crosses* the compartment boundary. With
 box rejection in place a free-standing wall yields no crossing pair at all, so `seg_seg_points`

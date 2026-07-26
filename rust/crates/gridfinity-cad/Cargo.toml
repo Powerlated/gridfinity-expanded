@@ -13,6 +13,11 @@ serde = ["dep:serde"]
 
 [dependencies]
 glam = "0.29"
-# Robust, pure-Rust ear-cutting for the final planar-face-with-holes
-# triangulation only. The analytic B-rep kernel itself is hand-rolled.
 serde = { version = "1", features = ["derive"], optional = true }
+
+# Benchmarks and `perf_report` must see the allocator the shipping binary uses,
+# or they measure a bottleneck production does not have. Not a real dependency:
+# the library never picks an allocator for its dependents, and wasm cannot build
+# this one.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+mimalloc = "0.1"

@@ -1,3 +1,6 @@
+#[global_allocator]
+static MI: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 
 use gridfinity_cad::gridfinity::{LogicalBin, Params, try_build};
 use gridfinity_cad::kernel::tess::tessellate;

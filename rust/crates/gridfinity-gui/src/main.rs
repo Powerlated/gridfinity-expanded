@@ -10,8 +10,8 @@ mod wireframe;
 use eframe::egui;
 
 #[global_allocator]
-static ALLOC: gridfinity_cad::kernel::perf::CountingAlloc<std::alloc::System> =
-    gridfinity_cad::kernel::perf::CountingAlloc::new(std::alloc::System);
+static ALLOC: gridfinity_cad::kernel::perf::CountingAlloc<mimalloc::MiMalloc> =
+    gridfinity_cad::kernel::perf::CountingAlloc::new(mimalloc::MiMalloc);
 use debugger::Debugger;
 use editor::{BIN_COLORS, Editor, Tool};
 use gridfinity_cad::gridfinity::{self, BinSlope, LogicalBin, Mode, Params, SlopeDir};
