@@ -23,6 +23,80 @@ fn blob(w: i32, h: i32) -> Vec<GridCell> {
     cells
 }
 
+fn blob_phase(w: i32, h: i32, phase: f32) -> Vec<GridCell> {
+    let mut cells = Vec::new();
+    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+    let r = (w.min(h) as f32) * 0.45;
+    for x in 0..w {
+        for y in 0..h {
+            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+            let wob =
+                1.0 + 0.18 * (dy * 0.9 + phase).sin() + 0.12 * (dx * 1.3 + phase).cos();
+            if (dx * dx + dy * dy).sqrt() <= r * wob {
+                cells.push(GridCell { x, y });
+            }
+        }
+    }
+    cells
+}
+
+#[test]
+#[ignore]
+fn pipeline_bench() {
+    use std::sync::mpsc::sync_channel;
+    let (w, h) = match std::env::var("SCALE_WH") {
+        Ok(s) => {
+            let mut it = s.split('x').map(|v| v.parse().unwrap());
+            (it.next().unwrap(), it.next().unwrap())
+        }
+        Err(_) => (32, 32),
+    };
+    const FRAMES: usize = 12;
+    let frames: Vec<Params> = (0..FRAMES)
+        .map(|i| params_for(blob_phase(w, h, i as f32 * 0.7), Params::default()))
+        .collect();
+
+    let mut serial = f64::INFINITY;
+    for _ in 0..3 {
+        let t = Instant::now();
+        let mut acc = 0usize;
+        for p in &frames {
+            let s = try_build(p).expect("build");
+            acc += tessellate(&s, 4).tris.len();
+        }
+        serial = serial.min(t.elapsed().as_secs_f64() * 1e3);
+        std::hint::black_box(acc);
+    }
+
+    let mut piped = f64::INFINITY;
+    for _ in 0..3 {
+        let t = Instant::now();
+        let (tx, rx) = sync_channel::<gridfinity_cad::Solid>(1);
+        let fs = frames.clone();
+        let builder = std::thread::spawn(move || {
+            for p in &fs {
+                if tx.send(try_build(p).expect("build")).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut acc = 0usize;
+        for s in rx {
+            acc += tessellate(&s, 4).tris.len();
+        }
+        builder.join().unwrap();
+        piped = piped.min(t.elapsed().as_secs_f64() * 1e3);
+        std::hint::black_box(acc);
+    }
+
+    println!(
+        "\n{w}x{h} x{FRAMES} frames: serial {serial:.1}ms ({:.1}ms/frame) | pipelined {piped:.1}ms ({:.1}ms/frame) = {:.2}x",
+        serial / FRAMES as f64,
+        piped / FRAMES as f64,
+        serial / piped
+    );
+}
+
 fn params_for(cells: Vec<GridCell>, base: Params) -> Params {
     Params { bins: vec![LogicalBin { cells, ..Default::default() }], ..base }
 }
@@ -60,7 +134,14 @@ fn time_one(w: i32, h: i32) {
 #[test]
 #[ignore]
 fn tess_bench() {
-    let p = params_for(blob(32, 32), Params::default());
+    let (bw, bh) = match std::env::var("SCALE_WH") {
+        Ok(s) => {
+            let mut it = s.split('x').map(|v| v.parse().unwrap());
+            (it.next().unwrap(), it.next().unwrap())
+        }
+        Err(_) => (32, 32),
+    };
+    let p = params_for(blob(bw, bh), Params::default());
     let solid = try_build(&p).expect("build");
     let mut best = f64::INFINITY;
     let mut tris = 0;
