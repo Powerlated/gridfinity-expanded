@@ -13,7 +13,6 @@ import type {
   GenerateGeometryResponse,
 } from '../lib/types';
 
-const DEBOUNCE_MS = 300;
 const MAX_POOL_SIZE = 4;
 
 export interface GeometryState {
@@ -49,9 +48,21 @@ export function useBinGeometry(design: Design): GeometryState {
   const workersRef = useRef<Worker[]>([]);
   const revisionRef = useRef(0);
   const pendingRef = useRef<PendingGeneration | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestRef = useRef({ design, parameters });
+  const runningRef = useRef(false);
+  const dirtyRef = useRef(false);
+  const startRef = useRef<() => void>(() => undefined);
+  const settleRef = useRef<() => void>(() => undefined);
+  latestRef.current = { design, parameters };
+  settleRef.current = () => {
+    runningRef.current = false;
+    if (!dirtyRef.current) return;
+    dirtyRef.current = false;
+    startRef.current();
+  };
 
   useEffect(() => {
+    const settle = () => settleRef.current();
     const fail = () => {
       pendingRef.current = null;
       setState((current) => ({
@@ -59,6 +70,7 @@ export function useBinGeometry(design: Design): GeometryState {
         generating: false,
         error: 'Geometry generation failed.',
       }));
+      settle();
     };
     const workers = Array.from({ length: poolSize() }, () => {
       const worker = new Worker(
@@ -89,6 +101,7 @@ export function useBinGeometry(design: Design): GeometryState {
           generating: false,
           error: null,
         });
+        settle();
       };
       worker.onerror = fail;
       return worker;
@@ -100,66 +113,75 @@ export function useBinGeometry(design: Design): GeometryState {
     };
   }, []);
 
-  useEffect(() => {
+  startRef.current = () => {
+    const { design: current, parameters: currentParameters } = latestRef.current;
     const revision = ++revisionRef.current;
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
-      void (async () => {
-        setState((current) => ({ ...current, generating: true, error: null }));
-        if (parameters.length === 0) {
-          pendingRef.current = null;
-          setState({ bins: [], design, generating: false, error: null });
-          return;
+    runningRef.current = true;
+    void (async () => {
+      setState((previous) => ({ ...previous, generating: true, error: null }));
+      if (currentParameters.length === 0) {
+        pendingRef.current = null;
+        setState({ bins: [], design: current, generating: false, error: null });
+        settleRef.current();
+        return;
+      }
+
+      const lookups = await Promise.all(currentParameters.map(async (bin) => {
+        try {
+          const key = await geometryCacheKey(bin);
+          return { bin, key, cached: await readCachedBin(key, bin.binId) };
+        } catch {
+          return { bin, key: null, cached: null };
         }
+      }));
+      if (revision !== revisionRef.current) {
+        settleRef.current();
+        return;
+      }
 
-        const lookups = await Promise.all(parameters.map(async (bin) => {
-          try {
-            const key = await geometryCacheKey(bin);
-            return { bin, key, cached: await readCachedBin(key, bin.binId) };
-          } catch {
-            return { bin, key: null, cached: null };
-          }
-        }));
-        if (revision !== revisionRef.current) return;
+      const binsById = new Map<string, Bin>();
+      const cacheKeysByBinId = new Map<string, string>();
+      const missing: BinParameters[] = [];
+      for (const lookup of lookups) {
+        if (lookup.key) cacheKeysByBinId.set(lookup.bin.binId, lookup.key);
+        if (lookup.cached) binsById.set(lookup.bin.binId, lookup.cached);
+        else missing.push(lookup.bin);
+      }
 
-        const binsById = new Map<string, Bin>();
-        const cacheKeysByBinId = new Map<string, string>();
-        const missing: BinParameters[] = [];
-        for (const lookup of lookups) {
-          if (lookup.key) cacheKeysByBinId.set(lookup.bin.binId, lookup.key);
-          if (lookup.cached) binsById.set(lookup.bin.binId, lookup.cached);
-          else missing.push(lookup.bin);
-        }
-
-        if (missing.length === 0) {
-          pendingRef.current = null;
-          setState({
-            bins: parameters.map((bin) => binsById.get(bin.binId)!),
-            design,
-            generating: false,
-            error: null,
-          });
-          return;
-        }
-
-        pendingRef.current = {
-          revision,
-          design,
-          binIds: parameters.map((bin) => bin.binId),
-          binsById,
-          cacheKeysByBinId,
-          remaining: missing.length,
-        };
-        const workers = workersRef.current;
-        missing.forEach((bin, index) => {
-          const request: GenerateGeometryRequest = { revision, bins: [bin] };
-          workers[index % workers.length]?.postMessage(request);
+      if (missing.length === 0) {
+        pendingRef.current = null;
+        setState({
+          bins: currentParameters.map((bin) => binsById.get(bin.binId)!),
+          design: current,
+          generating: false,
+          error: null,
         });
-      })();
-    }, DEBOUNCE_MS);
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
+        settleRef.current();
+        return;
+      }
+
+      pendingRef.current = {
+        revision,
+        design: current,
+        binIds: currentParameters.map((bin) => bin.binId),
+        binsById,
+        cacheKeysByBinId,
+        remaining: missing.length,
+      };
+      const workers = workersRef.current;
+      missing.forEach((bin, index) => {
+        const request: GenerateGeometryRequest = { revision, bins: [bin] };
+        workers[index % workers.length]?.postMessage(request);
+      });
+    })();
+  };
+
+  useEffect(() => {
+    if (runningRef.current) {
+      dirtyRef.current = true;
+      return;
+    }
+    startRef.current();
   }, [design, parameters]);
 
   return state;
