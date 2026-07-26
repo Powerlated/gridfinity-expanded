@@ -33,6 +33,12 @@ Explicitly still allowed, because they sit *at or after* the tessellation bounda
 
 - `planar.rs`, called from `tess.rs`, for final planar-face-with-holes triangulation only.
 - `weld_triangles`, `to_stl_binary`, `flat_vertices`, bounds — export and GL upload.
+- `Tessellation::welded_render_buffer` — the web app's single buffer for both preview and STL. It
+  is `render_buffer` (position + analytic normal per vertex, unindexed) with positions snapped to
+  the `weld_key` representative and weld-degenerate triangles dropped, so it is watertight under
+  exact comparison the way `to_mesh` is. This is a *quantisation at the tessellation boundary*, not
+  mesh repair: nothing reads it back, and the raw `render_buffer` (unwelded, per-face samples) must
+  not be exported — it leaks.
 - Mesh-based *verification* in tests (`assert_watertight`, `signed_volume`): checking the analytic
   result, never producing it.
 
@@ -302,9 +308,13 @@ This project pins **egui/eframe/egui_glow 0.35, which is a redesigned API**, not
 - Scroll delta is `input.smooth_scroll_delta` (no `raw_scroll_delta`).
 - `NativeOptions` still has `depth_buffer`/`renderer`/`viewport` like mainstream.
 
-`viewport.rs` renders the mesh with one glow shader (smooth shading from analytic vertex normals)
-via `egui::PaintCallback` + `egui_glow::CallbackFn`, inside a scissored depth-cleared, back-face
-culled draw that restores GL state. Back-face culling relies on the engine's outward winding (see
+`viewport.rs` is a thin egui adapter over the shared `gridfinity-render` crate: it hands the
+crate's `Renderer` (mesh + line programs, smooth shading from analytic vertex normals) an
+`egui::PaintCallback` + `egui_glow::CallbackFn`, inside a scissored depth-cleared, back-face culled
+draw that restores GL state. The web app drives the identical `Renderer` and the identical
+`append_smooth_shaded` staging from `gridfinity-wasm`'s `Viewer`; the shading path is shared, and
+the two consumers differ only in what they upload (the GUI adds a wireframe pass and the `bad`
+flag; the web app adds per-bin colour and preview offsets). Back-face culling relies on the engine's outward winding (see
 the `meshes_have_outward_consistent_winding` test). `main.rs` binds `Params` to widgets, regenerates
 (build → tessellate → upload VBO) on change, and exports STL via `rfd` + `Mesh::to_stl_binary`.
 

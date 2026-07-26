@@ -13,7 +13,7 @@ self.onmessage = async (event: MessageEvent<GenerateGeometryRequest>) => {
     const bins = generateGeometry(kernel, parameters);
     const response: GenerateGeometryResponse = { ok: true, revision, bins };
     const transfer = bins.flatMap((bin) =>
-      bin.pieces.map((piece) => piece.triangles.buffer as ArrayBuffer));
+      bin.pieces.map((piece) => piece.vertices.buffer as ArrayBuffer));
     self.postMessage(response, transfer);
   } catch {
     const response: GenerateGeometryResponse = {

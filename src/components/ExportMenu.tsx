@@ -17,7 +17,7 @@ export function ExportMenu({ bins, generating }: Props) {
 
   function downloadAll() {
     printables.forEach((printable, index) => {
-      setTimeout(() => downloadStl(printable.triangles, printable.name), index * DOWNLOAD_SPACING_MS);
+      setTimeout(() => downloadStl(printable.vertices, printable.name), index * DOWNLOAD_SPACING_MS);
     });
   }
 
@@ -25,7 +25,7 @@ export function ExportMenu({ bins, generating }: Props) {
     return (
       <Button
         disabled={disabled}
-        onClick={() => printables[0] && downloadStl(printables[0].triangles, printables[0].name)}
+        onClick={() => printables[0] && downloadStl(printables[0].vertices, printables[0].name)}
         title={disabled ? 'Waiting for geometry…' : 'Download STL file'}
       >
         Export STL
@@ -48,7 +48,7 @@ export function ExportMenu({ bins, generating }: Props) {
         {printables.map((printable, index) => (
           <Menu.Item
             key={`${printable.name}:${index}`}
-            onClick={() => downloadStl(printable.triangles, printable.name)}
+            onClick={() => downloadStl(printable.vertices, printable.name)}
           >
             {printable.name}
           </Menu.Item>

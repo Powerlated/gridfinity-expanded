@@ -17,6 +17,6 @@ export function toPrintableObjects(bins: Bin[]): PrintableObject[] {
   return bins.flatMap((bin) =>
     bin.pieces.map((piece, pieceIndex) => ({
       name: partFilename(bin.binId, bins.length, pieceIndex, bin.pieces.length),
-      triangles: piece.triangles,
+      vertices: piece.vertices,
     })));
 }

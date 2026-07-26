@@ -1,6 +1,6 @@
 use glam::Vec3;
 use glow::HasContext;
-use gridfinity_render::{Camera, Renderer, append_flat_shaded, bounds_of, color_of};
+use gridfinity_render::{Camera, Renderer, append_smooth_shaded, bounds_of, color_of};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{HtmlCanvasElement, WebGl2RenderingContext};
@@ -42,10 +42,10 @@ impl Viewer {
         self.staged.clear();
     }
 
-    pub fn add_piece(&mut self, soup: &[f32], offset_x: f32, offset_y: f32, rgb: u32) {
-        append_flat_shaded(
+    pub fn add_piece(&mut self, vertices: &[f32], offset_x: f32, offset_y: f32, rgb: u32) {
+        append_smooth_shaded(
             &mut self.staged,
-            soup,
+            vertices,
             Vec3::new(offset_x, offset_y, 0.0),
             color_of(rgb),
             false,

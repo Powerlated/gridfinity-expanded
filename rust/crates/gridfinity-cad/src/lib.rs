@@ -45,6 +45,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_welded_render_buffer_carries_the_welded_mesh_positions_and_analytic_normals() {
+        let s = Sketch::rounded_rect(0.0, 0.0, 40.0, 30.0, 5.0);
+        let tess = tessellate(&extrude(&s, 0.0, 7.0), 8);
+        let mesh = tess.to_mesh();
+        let welded: std::collections::HashSet<(i64, i64, i64)> = mesh
+            .positions
+            .iter()
+            .map(|&p| kernel::math::weld_key(p))
+            .collect();
+
+        let buffer = tess.welded_render_buffer();
+        assert_eq!(buffer.len(), mesh.indices.len() * 6);
+        for v in buffer.chunks_exact(6) {
+            let p = kernel::math::Vec3::new(v[0], v[1], v[2]);
+            assert!(welded.contains(&kernel::math::weld_key(p)), "{p:?} is not a welded position");
+            assert!((kernel::math::Vec3::new(v[3], v[4], v[5]).length() - 1.0).abs() < 1e-3);
+        }
+
+        let mut positions: Vec<kernel::math::Vec3> = Vec::new();
+        let mut index: HashMap<(i64, i64, i64), u32> = HashMap::new();
+        let mut indices: Vec<u32> = Vec::new();
+        for v in buffer.chunks_exact(6) {
+            let p = kernel::math::Vec3::new(v[0], v[1], v[2]);
+            let next = positions.len() as u32;
+            let id = *index.entry(kernel::math::weld_key(p)).or_insert_with(|| {
+                positions.push(p);
+                next
+            });
+            indices.push(id);
+        }
+        assert_watertight(&Mesh { positions, indices });
+    }
+
     fn signed_volume(mesh: &Mesh) -> f64 {
         let mut vol = 0.0f64;
         for [a, b, c] in mesh.triangles() {

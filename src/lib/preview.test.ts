@@ -20,8 +20,8 @@ const design: Design = {
 const bins: Bin[] = [{
   binId: 'bin-1',
   pieces: [
-    { triangles: new Float32Array(9), cells: [{ x: 0, y: 0 }] },
-    { triangles: new Float32Array(9), cells: [{ x: 1, y: 0 }, { x: 2, y: 0 }] },
+    { vertices: new Float32Array(18), cells: [{ x: 0, y: 0 }] },
+    { vertices: new Float32Array(18), cells: [{ x: 1, y: 0 }, { x: 2, y: 0 }] },
   ],
 }];
 
@@ -38,7 +38,7 @@ describe('preview layout', () => {
   it('leaves uncut bins at their model position', () => {
     const single: Bin[] = [{
       binId: 'bin-1',
-      pieces: [{ triangles: new Float32Array(9), cells: [{ x: 0, y: 0 }] }],
+      pieces: [{ vertices: new Float32Array(18), cells: [{ x: 0, y: 0 }] }],
     }];
     expect(previewLayout(single, design)[0].previewOffset).toEqual({ x: 0, y: 0 });
     expect(previewLayout(single, null)[0].previewOffset).toEqual({ x: 0, y: 0 });
@@ -60,8 +60,8 @@ describe('preview layout', () => {
     const horizontalBins: Bin[] = [{
       binId: 'bin-1',
       pieces: [
-        { triangles: new Float32Array(9), cells: [{ x: 0, y: 1 }] },
-        { triangles: new Float32Array(9), cells: [{ x: 0, y: 0 }] },
+        { vertices: new Float32Array(18), cells: [{ x: 0, y: 1 }] },
+        { vertices: new Float32Array(18), cells: [{ x: 0, y: 0 }] },
       ],
     }];
 

@@ -7,7 +7,7 @@ export interface PreviewPiece {
   binId: string;
   /** 0-based piece index within its bin, for stable mesh naming. */
   pieceIndex: number;
-  triangles: Float32Array;
+  vertices: Float32Array;
   previewOffset: Point2;
 }
 
@@ -42,7 +42,7 @@ export function previewLayout(bins: Bin[], design: Design | null): PreviewPiece[
     return bin.pieces.map((piece, pieceIndex) => ({
       binId: bin.binId,
       pieceIndex,
-      triangles: piece.triangles,
+      vertices: piece.vertices,
       previewOffset: previewOffsetFor(piece.cells, cuts, bin.pieces.length),
     }));
   });

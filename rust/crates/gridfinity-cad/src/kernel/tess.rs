@@ -31,6 +31,29 @@ impl Tessellation {
         out
     }
 
+    pub fn welded_render_buffer(&self) -> Vec<f32> {
+        let mut representative: std::collections::HashMap<(i64, i64, i64), Vec3> =
+            std::collections::HashMap::new();
+        for t in &self.tris {
+            for p in t.pos {
+                representative.entry(weld_key(p)).or_insert(p);
+            }
+        }
+        let mut out = Vec::with_capacity(self.tris.len() * 3 * 6);
+        for t in &self.tris {
+            let keys = t.pos.map(weld_key);
+            if keys[0] == keys[1] || keys[1] == keys[2] || keys[0] == keys[2] {
+                continue;
+            }
+            for i in 0..3 {
+                let p = representative[&keys[i]];
+                let n = t.nrm[i];
+                out.extend_from_slice(&[p.x, p.y, p.z, n.x, n.y, n.z]);
+            }
+        }
+        out
+    }
+
     pub fn bounds(&self) -> (Vec3, Vec3) {
         let mut min = Vec3::splat(f32::INFINITY);
         let mut max = Vec3::splat(f32::NEG_INFINITY);

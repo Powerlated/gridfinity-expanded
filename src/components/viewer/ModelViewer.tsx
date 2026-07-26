@@ -159,7 +159,7 @@ export function ModelViewer({
     viewer.begin_scene();
     for (const part of parts) {
       viewer.add_piece(
-        part.triangles,
+        part.vertices,
         part.previewOffset.x,
         part.previewOffset.y,
         hexToRgb(binColor(part.binId)),
@@ -178,7 +178,7 @@ export function ModelViewer({
       data-coordinate-orientation="generation-y-mirrored"
       data-default-camera-yaw={DEFAULT_CAMERA_YAW.toFixed(4)}
       data-face-orientation={FACE_ORIENTATION}
-      data-mesh-topology="flat-triangle-soup"
+      data-mesh-topology="welded-vertex-normals"
       data-renderer="rust-webgl2"
       data-preview-offsets={parts.map((part) =>
         `${part.previewOffset.x.toFixed(2)},${part.previewOffset.y.toFixed(2)}`).join(';')}

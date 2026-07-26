@@ -5,7 +5,7 @@ use gridfinity_cad::gridfinity::{
 use gridfinity_cad::layout::{GridCell, GridEdge};
 use gridfinity_cad::tessellate;
 use glam::Vec3;
-use gridfinity_render::{append_flat_shaded, color_of};
+use gridfinity_render::{append_smooth_shaded, color_of};
 use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
@@ -91,7 +91,7 @@ pub fn generate_geometry(bins: JsValue) -> Result<JsValue, JsValue> {
         for piece_cells in &bin.pieces {
             let solid = gridfinity::build_piece(&params, &bin.cells, piece_cells, None)
                 .map_err(|e| JsValue::from_str(&format!("bin {}: {e}", bin.bin_id)))?;
-            pieces.push(&piece_obj(&triangle_soup(&solid), piece_cells)?);
+            pieces.push(&piece_obj(&render_vertices(&solid, ARC_SEGMENTS_PER_QUARTER), piece_cells)?);
         }
 
         let obj = js_sys::Object::new();
@@ -123,17 +123,17 @@ pub fn badapple_frame_vertices(index: usize, rgb: u32) -> js_sys::Float32Array {
     let params = gridfinity_cad::badapple::cell_params();
     let color = color_of(rgb);
     let mut verts: Vec<f32> = Vec::new();
-    let mut stage = |soup: &[f32]| {
-        append_flat_shaded(&mut verts, soup, Vec3::ZERO, color, false);
+    let mut stage = |kernel: &[f32]| {
+        append_smooth_shaded(&mut verts, kernel, Vec3::ZERO, color, false);
     };
     for cells in gridfinity_cad::badapple::components(gridfinity_cad::badapple::frame(index)) {
         match gridfinity::build_piece(&params, &cells, &cells, None) {
-            Ok(solid) => stage(&frame_soup(&solid)),
+            Ok(solid) => stage(&render_vertices(&solid, 1)),
             Err(_) => {
                 for cell in &cells {
                     let one = [*cell];
                     if let Ok(solid) = gridfinity::build_piece(&params, &one, &one, None) {
-                        stage(&frame_soup(&solid));
+                        stage(&render_vertices(&solid, 1));
                     }
                 }
             }
@@ -142,29 +142,13 @@ pub fn badapple_frame_vertices(index: usize, rgb: u32) -> js_sys::Float32Array {
     js_sys::Float32Array::from(&verts[..])
 }
 
-fn frame_soup(solid: &gridfinity_cad::Solid) -> Vec<f32> {
-    let mesh = tessellate(solid, 1).to_mesh();
-    let mut out = Vec::with_capacity(mesh.indices.len() * 3);
-    for &i in &mesh.indices {
-        let p = mesh.positions[i as usize];
-        out.extend_from_slice(&[p.x, p.y, p.z]);
-    }
-    out
+fn render_vertices(solid: &gridfinity_cad::Solid, arc_segments: usize) -> Vec<f32> {
+    tessellate(solid, arc_segments).welded_render_buffer()
 }
 
-fn triangle_soup(solid: &gridfinity_cad::Solid) -> Vec<f32> {
-    let mesh = tessellate(solid, ARC_SEGMENTS_PER_QUARTER).to_mesh();
-    let mut out = Vec::with_capacity(mesh.indices.len() * 3);
-    for &i in &mesh.indices {
-        let p = mesh.positions[i as usize];
-        out.extend_from_slice(&[p.x, p.y, p.z]);
-    }
-    out
-}
-
-fn piece_obj(triangles: &[f32], cells: &[GridCell]) -> Result<JsValue, JsValue> {
+fn piece_obj(vertices: &[f32], cells: &[GridCell]) -> Result<JsValue, JsValue> {
     let o = js_sys::Object::new();
-    set(&o, "triangles", &js_sys::Float32Array::from(triangles))?;
+    set(&o, "vertices", &js_sys::Float32Array::from(vertices))?;
     set(&o, "cells", &serde_wasm_bindgen::to_value(cells).map_err(|e| JsValue::from_str(&e.to_string()))?)?;
     Ok(o.into())
 }
@@ -242,13 +226,26 @@ mod tests {
     }
 
     #[test]
-    fn emits_nine_floats_per_triangle() {
+    fn emits_whole_triangles_of_position_plus_normal_vertices() {
         let bin = &parse(ONE_CELL)[0];
         let solid =
             gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None).unwrap();
-        let soup = triangle_soup(&solid);
-        assert!(!soup.is_empty());
-        assert_eq!(soup.len() % 9, 0);
+        let verts = render_vertices(&solid, ARC_SEGMENTS_PER_QUARTER);
+        assert!(!verts.is_empty());
+        assert_eq!(verts.len() % (3 * gridfinity_render::KERNEL_STRIDE), 0);
+    }
+
+    #[test]
+    fn every_emitted_vertex_carries_a_unit_normal() {
+        let bin = &parse(ONE_CELL)[0];
+        let solid =
+            gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None).unwrap();
+        for v in render_vertices(&solid, ARC_SEGMENTS_PER_QUARTER)
+            .chunks_exact(gridfinity_render::KERNEL_STRIDE)
+        {
+            let n = Vec3::new(v[3], v[4], v[5]).length();
+            assert!((n - 1.0).abs() < 1e-3, "normal length {n} is not unit");
+        }
     }
 
     #[test]
@@ -269,11 +266,11 @@ mod tests {
         }
     }
 
-    fn unclosed_edges(soup: &[f32]) -> usize {
+    fn unclosed_edges(verts: &[f32]) -> usize {
         use std::collections::HashMap;
         let mut ids: HashMap<[u32; 3], u32> = HashMap::new();
         let mut vertex = Vec::new();
-        for p in soup.chunks_exact(3) {
+        for p in verts.chunks_exact(gridfinity_render::KERNEL_STRIDE) {
             let key = [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
             let next = ids.len() as u32;
             vertex.push(*ids.entry(key).or_insert(next));
@@ -289,12 +286,12 @@ mod tests {
     }
 
     #[test]
-    fn soup_is_closed_under_exact_position_welding() {
+    fn the_render_buffer_is_closed_under_exact_position_welding() {
         let bin = &parse(ONE_CELL)[0];
         let solid =
             gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None).unwrap();
-        let soup = triangle_soup(&solid);
-        assert_eq!(unclosed_edges(&soup), 0, "soup has unpaired edges");
+        let verts = render_vertices(&solid, ARC_SEGMENTS_PER_QUARTER);
+        assert_eq!(unclosed_edges(&verts), 0, "render buffer has unpaired edges");
     }
 
     #[test]
@@ -323,7 +320,7 @@ mod tests {
                 Ok(()) => "B-rep manifold".to_string(),
                 Err(e) => format!("B-REP INVALID: {e}"),
             };
-            let unpaired = unclosed_edges(&triangle_soup(&solid));
+            let unpaired = unclosed_edges(&render_vertices(&solid, ARC_SEGMENTS_PER_QUARTER));
             if unpaired != 0 {
                 leaks.push(format!("{name}: {unpaired} unpaired mesh edges, {brep}"));
             }
@@ -347,7 +344,7 @@ mod tests {
         let solid =
             gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None).unwrap();
         solid.validate().expect("B-rep stays manifold even while the mesh leaks");
-        assert_eq!(unclosed_edges(&triangle_soup(&solid)), 0, "rim leaks at the opening");
+        assert_eq!(unclosed_edges(&render_vertices(&solid, ARC_SEGMENTS_PER_QUARTER)), 0, "rim leaks at the opening");
     }
 
     #[test]

@@ -1,10 +1,11 @@
+import { RENDER_FLOATS_PER_TRIANGLE } from './types';
 import type { Bin, BinParameters, BinPiece, Cell } from './types';
 
 const DATABASE_NAME = 'gridfinity-geometry-cache';
 const DATABASE_VERSION = 1;
 const STORE_NAME = 'meshes';
 const LAST_ACCESS_INDEX = 'lastAccess';
-const CACHE_KEY_VERSION = 'geometry-cache-v1';
+const CACHE_KEY_VERSION = 'geometry-cache-v2';
 const MAX_CACHE_BYTES = 100 * 1024 * 1024;
 
 interface CachedGeometryRecord {
@@ -67,9 +68,9 @@ function isCell(value: unknown): value is Cell {
 function isPiece(value: unknown): value is BinPiece {
   if (!value || typeof value !== 'object') return false;
   const piece = value as Partial<BinPiece>;
-  return piece.triangles instanceof Float32Array &&
-    piece.triangles.length > 0 &&
-    piece.triangles.length % 9 === 0 &&
+  return piece.vertices instanceof Float32Array &&
+    piece.vertices.length > 0 &&
+    piece.vertices.length % RENDER_FLOATS_PER_TRIANGLE === 0 &&
     Array.isArray(piece.cells) &&
     piece.cells.every(isCell);
 }
@@ -88,7 +89,7 @@ function isRecord(value: unknown, key: string): value is CachedGeometryRecord {
 
 function approximateSize(pieces: BinPiece[]): number {
   return pieces.reduce((total, piece) =>
-    total + piece.triangles.byteLength + piece.cells.length * 16 + 64, 128);
+    total + piece.vertices.byteLength + piece.cells.length * 16 + 64, 128);
 }
 
 async function removeRecord(key: string): Promise<void> {

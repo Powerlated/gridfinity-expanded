@@ -1,3 +1,5 @@
+import { RENDER_FLOATS_PER_TRIANGLE, RENDER_VERTEX_STRIDE } from '../types';
+
 export function downloadBuffer(buffer: ArrayBuffer, filename: string, mimeType: string): void {
   const blob = new Blob([buffer], { type: mimeType });
   const url = URL.createObjectURL(blob);
@@ -8,18 +10,19 @@ export function downloadBuffer(buffer: ArrayBuffer, filename: string, mimeType: 
   URL.revokeObjectURL(url);
 }
 
-/** Serialize the exact generated triangle soup to binary STL. */
-export function trianglesToStl(triangles: Float32Array): ArrayBuffer {
-  const triangleCount = triangles.length / 9;
+export function verticesToStl(vertices: Float32Array): ArrayBuffer {
+  const triangleCount = vertices.length / RENDER_FLOATS_PER_TRIANGLE;
   const buffer = new ArrayBuffer(84 + triangleCount * 50);
   const view = new DataView(buffer);
   view.setUint32(80, triangleCount, true);
 
   let offset = 84;
-  for (let index = 0; index < triangles.length; index += 9) {
-    const ax = triangles[index], ay = triangles[index + 1], az = triangles[index + 2];
-    const bx = triangles[index + 3], by = triangles[index + 4], bz = triangles[index + 5];
-    const cx = triangles[index + 6], cy = triangles[index + 7], cz = triangles[index + 8];
+  for (let index = 0; index < vertices.length; index += RENDER_FLOATS_PER_TRIANGLE) {
+    const b = index + RENDER_VERTEX_STRIDE;
+    const c = index + 2 * RENDER_VERTEX_STRIDE;
+    const ax = vertices[index], ay = vertices[index + 1], az = vertices[index + 2];
+    const bx = vertices[b], by = vertices[b + 1], bz = vertices[b + 2];
+    const cx = vertices[c], cy = vertices[c + 1], cz = vertices[c + 2];
     const ux = bx - ax, uy = by - ay, uz = bz - az;
     const vx = cx - ax, vy = cy - ay, vz = cz - az;
     let nx = uy * vz - uz * vy;
@@ -33,8 +36,9 @@ export function trianglesToStl(triangles: Float32Array): ArrayBuffer {
     view.setFloat32(offset, nx, true);
     view.setFloat32(offset + 4, ny, true);
     view.setFloat32(offset + 8, nz, true);
-    for (let vertex = 0; vertex < 9; vertex++) {
-      view.setFloat32(offset + 12 + vertex * 4, triangles[index + vertex], true);
+    const corners = [ax, ay, az, bx, by, bz, cx, cy, cz];
+    for (let component = 0; component < corners.length; component++) {
+      view.setFloat32(offset + 12 + component * 4, corners[component], true);
     }
     view.setUint16(offset + 48, 0, true);
     offset += 50;
@@ -43,8 +47,8 @@ export function trianglesToStl(triangles: Float32Array): ArrayBuffer {
 }
 
 export function downloadStl(
-  triangles: Float32Array,
+  vertices: Float32Array,
   filename = 'gridfinity-bin.stl',
 ): void {
-  downloadBuffer(trianglesToStl(triangles), filename, 'model/stl');
+  downloadBuffer(verticesToStl(vertices), filename, 'model/stl');
 }

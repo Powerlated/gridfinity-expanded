@@ -84,9 +84,11 @@ export interface BinParameters {
   pieces: Cell[][];
 }
 
+export const RENDER_VERTEX_STRIDE = 6;
+export const RENDER_FLOATS_PER_TRIANGLE = 3 * RENDER_VERTEX_STRIDE;
+
 export interface BinPiece {
-  /** Global-coordinate flat triangle soup (9 floats per triangle). */
-  triangles: Float32Array;
+  vertices: Float32Array;
   /** Generation-coordinate footprint cells, echoed for viewer-side layout. */
   cells: Cell[];
 }
@@ -101,7 +103,7 @@ export interface Bin {
 export interface PrintableObject {
   /** Complete STL filename. */
   name: string;
-  triangles: Float32Array;
+  vertices: Float32Array;
 }
 
 export interface BedFitResult {
