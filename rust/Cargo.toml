@@ -15,3 +15,11 @@ license = "MIT"
 [profile.release]
 opt-level = 3
 lto = "off"
+codegen-units = 16
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
