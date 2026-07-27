@@ -221,17 +221,30 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   is what a diagonal lying along a boundary edge would break. Its tests assert the three properties
   that matter — exact area, full edge pairing, no dropped vertex — over rectilinear, many-hole,
   collinear-staircase and random inputs.
-- **`split.rs`** — the half-space trim that printer splits are being moved onto, so a split divides
-  the finished bin instead of each piece being authored from its own cell set (which is why a
-  divider seam currently yields two `wall_thickness + HALF_TOL` walls where the intact bin has one
-  centred `wall_thickness` strip). Its analytic pieces are in place: `side_of` classifies against
-  the plane with an `ON_PLANE` band; `curve_plane_params` returns where an edge crosses, closed form
-  for every `Curve` (line by ratio, circle/ellipse by `a·cos t + b·sin t = c`, and a `TorusSection`
-  never crosses because it already lies in the plane); `param_of` inverts a point back to its
-  parameter, also closed form, never by sampling; `connector_curve` asks `intersect_surfaces` for
-  the curve a straddling face contributes to the cut section. **Still to build:** walking each face's
-  loops to emit the kept runs, splicing the connectors in, and chaining those connectors into cap
-  loops (with containment grouping once a cut exposes more than one loop, as a bin's cavity will).
+- **`split.rs`** — `trim_half_space(solid, plane, keep)`, the operator printer splits are being
+  moved onto so a split divides the finished bin instead of each piece being authored from its own
+  cell set (which is why a divider seam currently yields two `wall_thickness + HALF_TOL` walls where
+  the intact bin has one centred `wall_thickness` strip). Every face is classified, straddling faces
+  are trimmed to their section curves, the gaps are closed with connectors along `face ∩ plane`, and
+  those connectors are chained into cap loops. All the analytic parts are closed form:
+  `curve_plane_params` (line by ratio, circle/ellipse by `a·cos t + b·sin t = c`, a `TorusSection`
+  never crosses since it already lies in the plane) and `param_of`, which inverts a point back to a
+  parameter — **never by sampling**, which is the numerical approximation the kernel forbids.
+  Two conventions are load-bearing and were each a bug first. The connector direction is
+  `winding_normal × discard_normal` using the **raw** surface normal, *not* the sense-flipped one:
+  `sense` flips only the normal and never the loop direction, so a cavity wall traverses like a
+  solid's and flipping here sends the connector the wrong way along the cut. And trimmed pieces must
+  take their end positions from the solid's **stored vertices**, not from `curve.point(t)` — the
+  same point in exact arithmetic, but an f32 ulp away, which duplicates the edge exactly as the
+  `resume` note above describes.
+  **Status: works for planar and cylindrical solids** — `cutting_a_box…` and
+  `cutting_a_rounded_prism…` assert both halves are manifold, mesh-closed and volume-conserving.
+  **It does not yet cut a bin.** The B-rep validates, but cap assembly is wrong: a bin's section at a
+  pitch line is a *U* (floor plus two walls, open at the rim), one loop, and the chaining yields two
+  and then treats one as a hole of the other, so shared edges are used twice (`audit` reports
+  `LoopContainment`, and the leaks all sit on the cut plane). Fix the chaining before re-enabling
+  fillets — with `floor_fillet`/`cavity_corner_radius`/holes off the same cut drops from 66 leaks to
+  exactly those 4.
 - **`program.rs`** — a model expressed as a **flat labelled list of ops** the kernel executes. A
   `Program` carries geometry (profiles, heights, `(seg, z)` blend selections) — never builder
   handles — so `run(prog, |i| bool)` can execute *any subset*: prefixes step through the

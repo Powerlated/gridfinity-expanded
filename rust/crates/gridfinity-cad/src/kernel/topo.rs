@@ -461,6 +461,11 @@ impl Builder {
         id
     }
 
+    pub fn directed_ends(&self, d: (EdgeId, bool)) -> (VertexId, VertexId) {
+        let e = self.edges[d.0];
+        if d.1 { (e.v0, e.v1) } else { (e.v1, e.v0) }
+    }
+
     pub fn edge(&self, id: EdgeId) -> Edge {
         self.edges[id]
     }
