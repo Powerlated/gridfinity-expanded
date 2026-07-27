@@ -45,9 +45,8 @@ impl Edge {
             Curve::Line { .. } => 1,
             Curve::Circle { .. } | Curve::Ellipse { .. } | Curve::TorusSection { .. } => {
                 let sweep = (self.t1 - self.t0).abs();
-                ((sweep / (std::f32::consts::PI / 2.0)) * arc_segs_per_quarter as f32)
-                    .ceil()
-                    .max(1.0) as usize
+                let exact = (sweep / (std::f32::consts::PI / 2.0)) * arc_segs_per_quarter as f32;
+                (exact - 1e-3).ceil().max(1.0) as usize
             }
         }
     }
@@ -124,6 +123,24 @@ impl Solid {
     pub fn face_loops(&self, fid: usize) -> impl Iterator<Item = &[(EdgeId, bool)]> {
         let f = &self.faces[fid];
         (f.loop0..f.loop0 + f.n_loops).map(move |lid| self.loop_slice(lid))
+    }
+
+    pub fn loop_ids(&self, fid: usize) -> std::ops::Range<u32> {
+        let f = &self.faces[fid];
+        f.loop0..f.loop0 + f.n_loops
+    }
+
+    pub fn loop_by_id(&self, lid: u32) -> &[(EdgeId, bool)] {
+        self.loop_slice(lid)
+    }
+
+    pub fn reverse_loop(&mut self, lid: u32) {
+        let s = self.loops[lid as usize] as usize;
+        let e = self.loops[lid as usize + 1] as usize;
+        self.loop_edges[s..e].reverse();
+        for d in &mut self.loop_edges[s..e] {
+            d.1 = !d.1;
+        }
     }
 
     pub fn inner_loops(&self, fid: usize) -> impl Iterator<Item = &[(EdgeId, bool)]> {
@@ -475,13 +492,15 @@ impl Builder {
     }
 
     pub fn build(self) -> Solid {
-        Solid {
+        let mut solid = Solid {
             verts: self.verts,
             edges: self.edges,
             loop_edges: self.loop_edges,
             loops: self.loops,
             faces: self.faces,
-        }
+        };
+        crate::kernel::orient::normalize(&mut solid);
+        solid
     }
 
     pub fn build_compact(self) -> Solid {

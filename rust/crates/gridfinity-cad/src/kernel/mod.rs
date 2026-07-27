@@ -8,6 +8,7 @@ pub mod hash;
 pub mod isect;
 pub mod math;
 pub mod mesh;
+pub mod orient;
 pub mod perf;
 pub mod planar;
 pub mod program;

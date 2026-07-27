@@ -213,12 +213,12 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
             RETAIN_NS.with(|c| c.set(c.get() + t2.elapsed().as_nanos() as u64));
         }
 
-        let mut uv_area = 0.0f32;
+        let mut vote = 0.0f32;
         for &[a, b, c] in &sc.tris {
-            uv_area += (sc.uv[b].x - sc.uv[a].x) * (sc.uv[c].y - sc.uv[a].y)
-                - (sc.uv[b].y - sc.uv[a].y) * (sc.uv[c].x - sc.uv[a].x);
+            let geo = (sc.pts3[b] - sc.pts3[a]).cross(sc.pts3[c] - sc.pts3[a]);
+            vote += geo.dot(sc.nrm[a] + sc.nrm[b] + sc.nrm[c]);
         }
-        let flip = uv_area * face.surface.uv_orientation() * sign < 0.0;
+        let flip = vote < 0.0;
 
         out.tris.reserve(sc.tris.len());
         out.face_of_tri.reserve(sc.tris.len());
@@ -244,6 +244,18 @@ fn tess_grid_face(
     sc: &mut Scratch,
     out: &mut Tessellation,
 ) -> bool {
+    (0..2).any(|rot| tess_grid_quad(solid, fid, es, sign, rot, sc, out))
+}
+
+fn tess_grid_quad(
+    solid: &crate::kernel::topo::Solid,
+    fid: usize,
+    es: &EdgeSamples,
+    sign: f32,
+    rot: usize,
+    sc: &mut Scratch,
+    out: &mut Tessellation,
+) -> bool {
     use crate::kernel::geom::Surface;
     let face = &solid.faces[fid];
     if matches!(face.surface, Surface::Plane { .. }) {
@@ -258,7 +270,12 @@ fn tess_grid_face(
         let s = es.get(e);
         if fwd { s[i] } else { s[s.len() - 1 - i] }
     };
-    let (e0, e1, e2, e3) = (outer[0], outer[1], outer[2], outer[3]);
+    let (e0, e1, e2, e3) = (
+        outer[rot],
+        outer[(rot + 1) % 4],
+        outer[(rot + 2) % 4],
+        outer[(rot + 3) % 4],
+    );
     let (m, n) = (es.get(e0.0).len(), es.get(e1.0).len());
     if es.get(e2.0).len() != m || es.get(e3.0).len() != n || m < 2 || n < 2 {
         return false;
@@ -348,9 +365,15 @@ fn tess_grid_face(
             }
         }
     }
-    let du = u_i[m - 1] - u_i[0];
-    let dv = v_j[n - 1] - v_j[0];
-    let flip = du * dv * face.surface.uv_orientation() * sign < 0.0;
+    let mut vote = 0.0f32;
+    for i in 0..m - 1 {
+        for j in 0..n - 1 {
+            let g = |a: usize, b: usize| sc.grid[a * n + b];
+            let quad = (g(i + 1, j) - g(i, j)).cross(g(i, j + 1) - g(i, j));
+            vote += quad.dot(sc.gnrm[i * n + j]);
+        }
+    }
+    let flip = vote < 0.0;
 
     let count = (m - 1) * (n - 1) * 2;
     out.tris.reserve(count);

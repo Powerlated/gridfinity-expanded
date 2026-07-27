@@ -2,9 +2,10 @@
 use crate::kernel::build::{loop_of, ring, wall_between};
 use crate::kernel::geom::Surface;
 use crate::layout::{
-    EdgeClass, EffectiveWalls, GridCell, GridEdge, Orientation, SplitLine, cell_edges,
-    classify_edge_in, effective_walls, partition_cells,
+    EdgeClass, EffectiveWalls, GridCell, GridEdge, GridFootprint, Orientation, SplitLine,
+    cell_edges, classify_edge_in, effective_walls, partition_cells,
 };
+use crate::kernel::split::{Side, side_of, trim_half_space};
 use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
 use crate::kernel::region2d::{chain_loops, loops_within, region_difference, split_regions};
@@ -261,10 +262,47 @@ pub fn build_piece(
     piece_cells: &[GridCell],
     slope: Option<BinSlope>,
 ) -> Result<Solid, String> {
-    let walls = effective_walls(piece_cells, bin_cells, &p.open_edges, &p.divider_edges);
+    let walls = effective_walls(bin_cells, bin_cells, &p.open_edges, &p.divider_edges);
     let mut prog = Program::default();
-    plan_piece(p, piece_cells, bin_cells, walls, slope, "piece", &mut prog);
-    run_all(&prog)
+    plan_piece(p, bin_cells, bin_cells, walls, slope, "piece", &mut prog);
+    let whole = run_all(&prog)?;
+    carve_to_cells(&whole, piece_cells)
+}
+
+fn carve_to_cells(whole: &Solid, piece_cells: &[GridCell]) -> Result<Solid, String> {
+    let Some(f) = GridFootprint::from_cells(piece_cells) else {
+        return Ok(whole.clone());
+    };
+    let mut solid = whole.clone();
+    for (lo, hi, axis) in [
+        (f.min_x, f.min_x + f.width_cells, Vec3::X),
+        (f.min_y, f.min_y + f.depth_cells, Vec3::Y),
+    ] {
+        let at_lo = lo as f32 * GRID_PITCH;
+        solid = trim_to(&solid, &Surface::plane(axis * at_lo, axis), Side::Positive)?;
+        let at_hi = hi as f32 * GRID_PITCH;
+        solid = trim_to(&solid, &Surface::plane(axis * at_hi, axis), Side::Negative)?;
+    }
+    Ok(solid)
+}
+
+fn trim_to(solid: &Solid, plane: &Surface, keep: Side) -> Result<Solid, String> {
+    let mut straddles = false;
+    let mut any_kept = false;
+    for v in &solid.verts {
+        match side_of(plane, v.point) {
+            Side::On => {}
+            s if s == keep => any_kept = true,
+            _ => straddles = true,
+        }
+    }
+    if !straddles {
+        return Ok(solid.clone());
+    }
+    if !any_kept {
+        return Err("a split line leaves one piece with no material".into());
+    }
+    trim_half_space(solid, plane, keep)
 }
 
 pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
@@ -289,12 +327,12 @@ pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
         } else {
             format!("gridfinity-bin-{}", ord + 1)
         };
+        let walls = effective_walls(&bin.cells, &bin.cells, &p.open_edges, &p.divider_edges);
+        let mut prog = Program::default();
+        plan_piece(p, &bin.cells, &bin.cells, walls, bin.slope, "piece", &mut prog);
+        let whole = run_all(&prog)?;
         for (i, part) in parts.iter().enumerate() {
-            let walls =
-                effective_walls(&part.cells, &bin.cells, &p.open_edges, &p.divider_edges);
-            let mut prog = Program::default();
-            plan_piece(p, &part.cells, &bin.cells, walls, bin.slope, "piece", &mut prog);
-            let solid = run_all(&prog)?;
+            let solid = carve_to_cells(&whole, &part.cells)?;
             let name = if parts.len() == 1 {
                 format!("{stem}.stl")
             } else {

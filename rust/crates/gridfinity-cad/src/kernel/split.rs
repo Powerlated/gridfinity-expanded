@@ -158,8 +158,9 @@ struct Chain {
     end: Vec3,
 }
 
-fn winding_normal(surface: &Surface, p: Vec3) -> Vec3 {
-    surface.normal(surface.project(p))
+fn winding_normal(surface: &Surface, sense: bool, p: Vec3) -> Vec3 {
+    let n = surface.normal(surface.project(p));
+    if sense { n } else { -n }
 }
 
 fn trim_loop(
@@ -248,7 +249,7 @@ fn trim_loop(
     Ok(Some(chains))
 }
 
-fn advance_along(curve: &Curve, from: Vec3, to: Vec3, dir: Vec3) -> Option<f32> {
+fn advance_along(curve: &Curve, from: Vec3, to: Vec3, dir: Vec3) -> Option<(f32, f32)> {
     let t_from = param_of(curve, from);
     let t_to = param_of(curve, to);
     if (curve.point(t_to) - to).length() > 1e-2 {
@@ -262,17 +263,18 @@ fn advance_along(curve: &Curve, from: Vec3, to: Vec3, dir: Vec3) -> Option<f32> 
     let sign = if tangent.dot(dir) > 0.0 { 1.0 } else { -1.0 };
     let mut delta = (t_to - t_from) * sign;
     if matches!(curve, Curve::Line { .. }) {
-        return (delta > ON_PLANE).then_some(delta);
+        return (delta > ON_PLANE).then_some((delta, delta * sign));
     }
     while delta <= ON_PLANE {
         delta += std::f32::consts::TAU;
     }
-    Some(delta)
+    Some((delta, delta * sign))
 }
 
 fn close_chains(
     b: &mut Builder,
     surface: &Surface,
+    sense: bool,
     plane: &Surface,
     discard_normal: Vec3,
     mut chains: Vec<Chain>,
@@ -281,20 +283,22 @@ fn close_chains(
     let mut loops: Vec<Vec<(EdgeId, bool)>> = Vec::new();
     while let Some(mut chain) = chains.pop() {
         loop {
-            let normal = winding_normal(surface, chain.end);
+            let normal = winding_normal(surface, sense, chain.end);
             let dir = normal.cross(discard_normal);
             if dir.length() < ON_PLANE {
                 return Err("cut is tangent to a face; no connector direction".into());
             }
             let dir = dir.normalize();
 
-            let mut best: Option<(Option<usize>, f32, Curve)> = None;
-            let consider = |target: Vec3, idx: Option<usize>, best: &mut Option<(Option<usize>, f32, Curve)>| {
+            let mut best: Option<(Option<usize>, f32, Curve, f32)> = None;
+            let consider = |target: Vec3,
+                            idx: Option<usize>,
+                            best: &mut Option<(Option<usize>, f32, Curve, f32)>| {
                 if let Some(curve) = connector_curve(surface, plane, chain.end, target)
-                    && let Some(delta) = advance_along(&curve, chain.end, target, dir)
-                    && best.as_ref().is_none_or(|(_, d, _)| delta < *d)
+                    && let Some((advance, signed)) = advance_along(&curve, chain.end, target, dir)
+                    && best.as_ref().is_none_or(|(_, d, _, _)| advance < *d)
                 {
-                    *best = Some((idx, delta, curve));
+                    *best = Some((idx, advance, curve, signed));
                 }
             };
             consider(chain.start, None, &mut best);
@@ -302,7 +306,7 @@ fn close_chains(
                 consider(chains[i].start, Some(i), &mut best);
             }
 
-            let Some((idx, _, curve)) = best else {
+            let Some((idx, _, curve, signed)) = best else {
                 return Err("no closed-form section curve for a face the cut crosses".into());
             };
             let target = match idx {
@@ -312,8 +316,8 @@ fn close_chains(
             let vs = b.vertex(chain.end);
             let ve = b.vertex(target);
             if vs != ve {
-                let edge =
-                    emit_edge(b, vs, ve, curve, param_of(&curve, chain.end), param_of(&curve, target));
+                let t0 = param_of(&curve, chain.end);
+                let edge = emit_edge(b, vs, ve, curve, t0, t0 + signed);
                 chain.edges.push(edge);
                 connectors.push(edge);
             }
@@ -375,6 +379,7 @@ pub fn trim_half_space(solid: &Solid, plane: &Surface, keep: Side) -> Result<Sol
         let closed = close_chains(
             &mut b,
             &face.surface,
+            face.sense,
             plane,
             discard_normal,
             cut_chains,
@@ -596,7 +601,11 @@ mod tests {
     use crate::kernel::tess::tessellate;
 
     fn volume(solid: &crate::kernel::topo::Solid) -> f64 {
-        let mesh = tessellate(solid, 12).to_mesh();
+        volume_at(solid, 12)
+    }
+
+    fn volume_at(solid: &crate::kernel::topo::Solid, segs: usize) -> f64 {
+        let mesh = tessellate(solid, segs).to_mesh();
         let mut v = 0.0f64;
         for [a, b, c] in mesh.triangles() {
             v += a.dot(b.cross(c)) as f64;
@@ -646,6 +655,48 @@ mod tests {
         assert_mesh_closed(&hi);
         let (vw, vl, vh) = (volume(&solid), volume(&lo), volume(&hi));
         assert!((vl + vh - vw).abs() < 1e-1, "{vl} + {vh} != {vw}");
+    }
+
+    #[test]
+    fn cutting_a_bin_gives_two_watertight_halves_that_conserve_volume() {
+        for cut in [21.0, 42.0, 50.0] {
+            let p = crate::gridfinity::Params::rect(2, 1);
+            let solid = crate::gridfinity::build(&p);
+            let plane = plane_x(cut);
+            let lo = trim_half_space(&solid, &plane, Side::Negative)
+                .unwrap_or_else(|e| panic!("x={cut} negative half: {e}"));
+            let hi = trim_half_space(&solid, &plane, Side::Positive)
+                .unwrap_or_else(|e| panic!("x={cut} positive half: {e}"));
+            lo.validate().expect("low half manifold");
+            hi.validate().expect("high half manifold");
+            assert_mesh_closed(&lo);
+            assert_mesh_closed(&hi);
+            let (vw, vl, vh) = (volume(&solid), volume(&lo), volume(&hi));
+            assert!(vl > 0.0 && vh > 0.0, "x={cut}: halves must have volume: {vl} {vh}");
+            assert!((vl + vh - vw).abs() < 0.05, "x={cut}: {vl} + {vh} != {vw}");
+        }
+    }
+
+    #[test]
+    fn a_cut_through_a_floor_fillet_keeps_the_blend_on_its_own_surface() {
+        let p = crate::gridfinity::Params::rect(2, 1);
+        let solid = crate::gridfinity::build(&p);
+        let plane = plane_x(21.0);
+        for keep in [Side::Negative, Side::Positive] {
+            let half = trim_half_space(&solid, &plane, keep).expect("half");
+            let tess = tessellate(&half, 24);
+            for (ti, tri) in tess.tris.iter().enumerate() {
+                let face = &half.faces[tess.face_of_tri[ti]];
+                let Surface::Cylinder { base, axis, radius, .. } = face.surface else { continue };
+                let c = (tri.pos[0] + tri.pos[1] + tri.pos[2]) / 3.0;
+                let v = c - base;
+                let d = (v - axis * v.dot(axis)).length();
+                assert!(
+                    (d - radius).abs() < 0.05,
+                    "a cylinder triangle sits {d} from the axis, not {radius}"
+                );
+            }
+        }
     }
 
     #[test]

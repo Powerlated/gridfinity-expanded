@@ -65,7 +65,7 @@ FUZZ_SEED=7 FUZZ_CASES=500 cargo test -p gridfinity-cad --test fuzz -- --nocaptu
 
 `fuzz_inner_walls` covers free-form inner walls (the divider/fillet work); `fuzz_params_broad`
 covers shape, height, thicknesses, holes, dividers, slope and mode. `fuzz_inner_walls` is at
-**29/150 failing, 7 distinct defects** at the default seed and is **currently red**, as is
+**27/150 failing, 5 distinct defects** at the default seed and is **currently red**, as is
 `gridfinity-wasm`'s `opening_on_a_hole_boundary_stays_closed`. Those two are the whole of the
 workspace's known-failing surface; everything else is green. Run the suite with `--no-fail-fast`,
 since a failing binary otherwise hides the ones after it, and expect ~80s (the badapple benches
@@ -127,7 +127,11 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   vertices and edges (edge key = sorted endpoints **+ welded midpoint**, so a circle's two
   semicircle arcs don't collapse into one edge) and flattens each face's loops into the arena. `Solid::validate()` enforces the
   manifold invariant: **every edge used exactly twice, once in each direction** — assert it in
-  tests after any construction change. `Solid::validate()` is the cheap topology check;
+  tests after any construction change. It is *not* the whole story: alternation holds just as well
+  for a consistently-inverted shell, so `Builder::build` additionally establishes the **orientation
+  invariant** via `orient::normalize` (see `orient.rs`). Loop directions off a built `Solid` are
+  therefore material-consistent and may be relied on; the modules that emit loops (`slab`,
+  `region2d`, `build`) still author in their own conventions and are re-wound at `build`. `Solid::validate()` is the cheap topology check;
   [`audit`](gridfinity_cad::audit) is the heavy *geometric* soundness checker that also confirms
   each edge's curve lands on its vertices and lies on every face surface that references it.
   When a mesh leaks but `validate` passes, run `audit` first — it pins the failure to a
@@ -199,8 +203,19 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   lets a compartment-splitting divider keep the fillet on the corners that *do* close.
 - **`tess.rs`** — analytic faces → triangles. **Watertight by construction:** each edge is sampled
   once (cached by `EdgeId`), so the two faces sharing it emit identical boundary points. Winding is
-  decided **once per face** (area-weighted vote against the analytic normal) — never per triangle,
-  or curved faces get inconsistent internal edges. Non-planar 4-sided faces whose loop follows
+  decided **once per face** (area-weighted vote of the emitted triangles' geometric normals against
+  the analytic ones) — never per triangle, or curved faces get inconsistent internal edges. That
+  vote is literal, not the `uv_area · uv_orientation · sign` proxy it used to be: the proxy assumes
+  a face's uv handedness is constant, which a **spindle torus** (floor-fillet blend, `major_r` <
+  `minor_r`) violates, and it silently inverted those faces once loop winding was normalised.
+  The structured-grid path tries **both edge rotations** when matching a quad's loop to its
+  iso-u/iso-v roles, since which of the four edges comes first depends on where the loop starts;
+  without the retry a normalised loop falls through to the planar path, which chords straight across
+  a curved patch (a floor-fillet blend came out 0.6 mm off its own cylinder).
+  `Edge::seg_count` subtracts a `1e-3` slack before `ceil`, so an arc whose sweep is a hair over an
+  exact multiple of a quarter — which a connector's `TAU`-wrapped advance always is — does not gain
+  a spurious segment. When it did, the two arcs bounding a trimmed patch disagreed on sample count
+  and the grid path rejected the face. Non-planar 4-sided faces whose loop follows
   iso-u/iso-v lines (cylinder walls, cone chamfers, blend patches) take a structured-grid path
   (cheaper, and gives quad strips a predictable diagonal); everything else, including planar-with-
   holes, goes to [`planar`](#planarrs). The only triangles dropped are ones a weld would collapse
@@ -223,7 +238,7 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   collinear-staircase and random inputs.
 - **`split.rs`** — `trim_half_space(solid, plane, keep)`, the operator printer splits are being
   moved onto so a split divides the finished bin instead of each piece being authored from its own
-  cell set (which is why a divider seam currently yields two `wall_thickness + HALF_TOL` walls where
+  cell set (which is why a divider seam used to yield two `wall_thickness + HALF_TOL` walls where
   the intact bin has one centred `wall_thickness` strip). Every face is classified, straddling faces
   are trimmed to their section curves, the gaps are closed with connectors along `face ∩ plane`, and
   those connectors are chained into cap loops. All the analytic parts are closed form:
@@ -231,20 +246,50 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   never crosses since it already lies in the plane) and `param_of`, which inverts a point back to a
   parameter — **never by sampling**, which is the numerical approximation the kernel forbids.
   Two conventions are load-bearing and were each a bug first. The connector direction is
-  `winding_normal × discard_normal` using the **raw** surface normal, *not* the sense-flipped one:
-  `sense` flips only the normal and never the loop direction, so a cavity wall traverses like a
-  solid's and flipping here sends the connector the wrong way along the cut. And trimmed pieces must
-  take their end positions from the solid's **stored vertices**, not from `curve.point(t)` — the
-  same point in exact arithmetic, but an f32 ulp away, which duplicates the edge exactly as the
-  `resume` note above describes.
-  **Status: works for planar and cylindrical solids** — `cutting_a_box…` and
-  `cutting_a_rounded_prism…` assert both halves are manifold, mesh-closed and volume-conserving.
-  **It does not yet cut a bin.** The B-rep validates, but cap assembly is wrong: a bin's section at a
-  pitch line is a *U* (floor plus two walls, open at the rim), one loop, and the chaining yields two
-  and then treats one as a hole of the other, so shared edges are used twice (`audit` reports
-  `LoopContainment`, and the leaks all sit on the cut plane). Fix the chaining before re-enabling
-  fillets — with `floor_fillet`/`cavity_corner_radius`/holes off the same cut drops from 66 leaks to
-  exactly those 4.
+  `winding_normal × discard_normal` using the face's **true outward** normal (raw normal flipped by
+  `sense`), which is well defined only because every loop now satisfies the orientation invariant
+  below — before that invariant existed this had to use the raw normal, and a cavity wall sent the
+  connector the wrong way. And trimmed pieces must take their end positions from the solid's
+  **stored vertices**, not from `curve.point(t)` — the same point in exact arithmetic, but an f32
+  ulp away, which duplicates the edge exactly as the `resume` note above describes.
+  A connector's arc is emitted as `(t0, t0 + signed_advance)`, never `(param_of(from),
+  param_of(to))`: `param_of` returns a principal value, so the raw pair can name the *other* way
+  round the circle. `advance_along` already computes the correct directed advance (wrapping by
+  `TAU` until positive), and that signed value is what the edge must be built from. Getting this
+  wrong put a floor-fillet blend's quarter-arc on the 3/4 path — same endpoints, wrong surface —
+  and cost 83 mm³ of double-counted material on a 2x1 bin.
+  **Status: cuts a bin.** `cutting_a_box…`, `cutting_a_rounded_prism…` and
+  `cutting_a_bin_gives_two_watertight_halves_that_conserve_volume` all assert both halves are
+  manifold, mesh-closed and volume-conserving; the bin case conserves volume to 0.003 mm³ with
+  floor fillets, cavity corner radii and holes all on, at every tessellation density.
+  `try_build_pieces` builds each logical bin **once** and carves each printable piece out of it
+  with `carve_piece`, so a split is a boolean applied last rather than each piece being authored
+  from its own cell set. `trim_to` first classifies the solid's vertices, so a split line that
+  misses a piece's material is a no-op rather than an error — an L-shaped bin needs that.
+  Seam walls are *not* special-cased any more: the whole bin is built with its dividers and then
+  cut, so a divider at a seam becomes a wall in both pieces and a plain seam cuts open, which is
+  what `split_seam_divider_walls_both_pieces` and `seam_edges_default_open` already asserted.
+- **`orient.rs`** — the **orientation invariant**: every loop is *material-consistent*, meaning that
+  walking it with the face's true outward normal keeps the face's material on the left (outer loops
+  positive, holes negative). `Builder::build` establishes it, so every solid the kernel hands out
+  satisfies it and `misoriented_loops` is empty. This is what makes a boolean expressible.
+  It was *not* true before: `region2d` emits its loops material-on-the-left in 2D, `slab`'s cavity
+  mode reuses that winding and flips only `Builder::face`'s `sense`, so a bin's whole cavity shell
+  — plus the rim face's inner loop that bounds it — traversed inverted relative to the outer shell.
+  Edge alternation still held (an inverted shell paired with an inverted hole loop alternates
+  fine), which is exactly why `validate` never caught it and why **propagation across shared edges
+  cannot detect it**: the material side has to be measured geometrically.
+  Two things make the measurement trustworthy. It uses the loop's **3D area vector** dotted with the
+  analytic normal, not a signed area in uv — `uv_orientation()` assumes the uv parameterisation's
+  handedness is constant over a face, and on the floor fillet's **spindle torus** (`major_r` 0.1 <
+  `minor_r` 2.4) the ring radius `major + minor·cos v` changes sign inside the face, so uv area
+  reports the wrong handedness. And the decision is made **per connected component of loops sharing
+  an edge, not per loop**: alternation forces the flip set to be closed under edge sharing, so a
+  component flips as a unit by an area-weighted vote. Deciding per loop instead strands any loop the
+  measurement skips (a full-2π loop on a whole cylinder has no meaningful area vector) on the wrong
+  side of its neighbours and breaks the manifold invariant — that was three fillet tests.
+  Normalising is pure re-winding: it never moves a vertex, and `normalising_changes_no_geometry`
+  pins that.
 - **`program.rs`** — a model expressed as a **flat labelled list of ops** the kernel executes. A
   `Program` carries geometry (profiles, heights, `(seg, z)` blend selections) — never builder
   handles — so `run(prog, |i| bool)` can execute *any subset*: prefixes step through the
@@ -296,7 +341,9 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   the cap at an interface the caller closes itself. **Gotcha:** `wall_seg`'s `outward` flips only
   the surface normal, never the loop direction, so a cavity's walls traverse exactly like a solid's
   — `slab::emit_cap` therefore keeps solid-mode winding and flips only `Builder::face`'s `sense`.
-  Using `build::cap` there instead would flip winding too and break the wall/cap pairing.
+  Using `build::cap` there instead would flip winding too and break the wall/cap pairing. That
+  stays true *during* emission; `Builder::build` then re-winds the finished cavity shell to satisfy
+  the orientation invariant (see `orient.rs`), which is a pure re-winding and changes no geometry.
   Both cavity builders are stacks now. `build_cavity_flat` is the compartment void minus one slab
   per island tower; `build_cavity_banded` is the same plus one slab per partial-height inner wall
   (floor → that wall's top). A wall reaching the loop boundary, one fully inside it and one
