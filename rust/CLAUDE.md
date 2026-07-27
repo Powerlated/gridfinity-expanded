@@ -50,15 +50,19 @@ reach for a mesh fallback.
 
 ```bash
 cargo build                      # build both crates
-cargo test -p gridfinity-cad     # engine unit tests (geometry correctness lives here)
-cargo test -p gridfinity-cad <name> -- --nocapture   # run one test, e.g. default_bin_is_valid_watertight_and_sized
+cargo test --release -p gridfinity-cad --lib   # the working gate: engine + model unit tests
+cargo test --release -p gridfinity-cad --lib <name> -- --nocapture   # one test, e.g. default_bin_is_valid_watertight_and_sized
+cargo test --release --workspace # full gate incl. fuzz/scale/gui benches -- slow, pre-PR only
 cargo run  -p gridfinity-gui     # launch the app (needs a display + OpenGL/glow)
 cargo build --release
 
 # The geometry fuzzer (tests/fuzz.rs): random Params -> try_build -> validate -> audit
 # -> tessellation_leaks, with failures grouped by signature and each shrunk to a
 # paste-ready `Params` literal. Nothing in this workspace is #[ignore]d any more: every test,
-# fuzzer, bench and report runs as a gate under a plain `cargo test --workspace`.
+# fuzzer, bench and report runs as a gate under `cargo test --release --workspace` -- which is a
+# deliberate pre-PR run, not the every-change one (see AGENTS.md, Validation). --release also
+# compiles out the region2d bounding-box debug_assert, so a change to either region sweep still
+# wants one debug-mode run.
 FUZZ_CASES=2000 cargo test -p gridfinity-cad --test fuzz -- --nocapture
 FUZZ_SEED=7 FUZZ_CASES=500 cargo test -p gridfinity-cad --test fuzz -- --nocapture
 ```
