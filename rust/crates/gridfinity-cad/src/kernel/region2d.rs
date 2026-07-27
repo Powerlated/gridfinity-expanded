@@ -8,6 +8,32 @@ const EPS: f32 = 1e-4;
 
 const BOX_TOL: f32 = 1e-2;
 
+static VERIFY_PRUNE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_verify_prune(on: bool) {
+    VERIFY_PRUNE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn verify_prune() -> bool {
+    VERIFY_PRUNE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn assert_prune_kept_every_crossing(a: &[&[Seg]], b: &[&[Seg]]) {
+    for al in a {
+        for aseg in al.iter() {
+            for bl in b {
+                for bseg in bl.iter() {
+                    if !boxes_meet(aseg.bbox(), bseg.bbox())
+                        && !seg_seg_points(aseg, bseg).is_empty()
+                    {
+                        panic!("box prune dropped a real crossing: {aseg:?} vs {bseg:?}");
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[inline]
 fn boxes_meet(x: Aabb, y: Aabb) -> bool {
     x.min.x - BOX_TOL <= y.max.x
@@ -43,6 +69,16 @@ fn coincident_with<'a>(loops: &'a [Vec<Seg>], piece: &Seg) -> Option<&'a Seg> {
 }
 
 pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> RegionSplit<T> {
+    if verify_prune() {
+        let strip = |r: &[Vec<(Seg, T)>]| -> Vec<Vec<Seg>> {
+            r.iter().map(|l| l.iter().map(|&(s, _)| s).collect()).collect()
+        };
+        let (sa, sb) = (strip(a), strip(b));
+        assert_prune_kept_every_crossing(
+            &sa.iter().map(|l| l.as_slice()).collect::<Vec<_>>(),
+            &sb.iter().map(|l| l.as_slice()).collect::<Vec<_>>(),
+        );
+    }
     let _perf = perf::scope(perf::Metric::SplitRegions);
     let mut a_cuts: Vec<Vec<Vec<(f32, Vec2)>>> =
         a.iter().map(|l| vec![Vec::new(); l.len()]).collect();
@@ -63,10 +99,6 @@ pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> Regio
                 }
                 for (bsi, (bseg, _)) in bl.iter().enumerate() {
                     if !boxes_meet(abox, b_boxes[bi][bsi]) {
-                        debug_assert!(
-                            seg_seg_points(aseg, bseg).is_empty(),
-                            "box prune dropped a real crossing"
-                        );
                         continue;
                     }
                     for pt in seg_seg_points(aseg, bseg) {
@@ -132,6 +164,15 @@ pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> Regio
 }
 
 pub fn presplit_regions(regions: &[Vec<Vec<Seg>>]) -> Vec<Vec<Vec<Seg>>> {
+    if verify_prune() {
+        for ri in 0..regions.len() {
+            for rj in ri + 1..regions.len() {
+                let a: Vec<&[Seg]> = regions[ri].iter().map(|l| l.as_slice()).collect();
+                let b: Vec<&[Seg]> = regions[rj].iter().map(|l| l.as_slice()).collect();
+                assert_prune_kept_every_crossing(&a, &b);
+            }
+        }
+    }
     let mut cuts: Vec<Vec<Vec<Vec<(f32, Vec2)>>>> = regions
         .iter()
         .map(|r| r.iter().map(|l| vec![Vec::new(); l.len()]).collect())
@@ -169,10 +210,6 @@ pub fn presplit_regions(regions: &[Vec<Vec<Seg>>]) -> Vec<Vec<Vec<Seg>>> {
                         }
                         for (sj, s2) in l2.iter().enumerate() {
                             if !boxes_meet(sbox, boxes[rj][lj][sj]) {
-                                debug_assert!(
-                                    seg_seg_points(s, s2).is_empty(),
-                                    "box prune dropped a real crossing"
-                                );
                                 continue;
                             }
                             for pt in seg_seg_points(s, s2) {
@@ -743,5 +780,72 @@ mod distance_tests {
         let island = Sketch::rounded_rect(0.0, 0.0, 10.0, 10.0, 2.0).loops[0].clone();
         let d = min_loop_distance(&island, &outer);
         assert!((d - 10.0).abs() < 1e-5, "want 15 - 5 = 10, got {d}");
+    }
+}
+
+#[cfg(test)]
+mod prune_verification {
+    use super::*;
+
+    static VERIFY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct Guard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            set_verify_prune(false);
+        }
+    }
+
+    fn verifying() -> Guard {
+        let held = VERIFY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_verify_prune(true);
+        Guard(held)
+    }
+
+    #[test]
+    fn a_real_build_keeps_every_crossing_the_boxes_pruned() {
+        let _g = verifying();
+        for p in [
+            crate::gridfinity::Params::rect(1, 1),
+            crate::gridfinity::Params::rect(3, 2),
+            crate::gridfinity::Params {
+                inner_walls: vec![crate::gridfinity::InnerWall {
+                    x1: 90.0,
+                    y1: 30.0,
+                    x2: 40.0,
+                    y2: 50.0,
+                    width: 3.0,
+                    height: None,
+                }],
+                ..crate::gridfinity::Params::default()
+            },
+        ] {
+            crate::gridfinity::build(&p);
+        }
+    }
+
+    #[test]
+    fn the_verification_pass_actually_runs_when_enabled() {
+        let _g = verifying();
+        let apart = |x: f32| {
+            vec![vec![vec![
+                Seg::Line { a: Vec2::new(x, 0.0), b: Vec2::new(x + 1.0, 0.0) },
+                Seg::Line { a: Vec2::new(x + 1.0, 0.0), b: Vec2::new(x + 1.0, 1.0) },
+                Seg::Line { a: Vec2::new(x + 1.0, 1.0), b: Vec2::new(x, 0.0) },
+            ]]]
+        };
+        let mut regions = apart(0.0);
+        regions.extend(apart(50.0));
+        presplit_regions(&regions);
+        assert!(verify_prune(), "the flag must still be set inside the scope");
+    }
+
+    #[test]
+    fn the_box_tolerance_stays_above_what_on_seg_accepts() {
+        assert!(
+            BOX_TOL > 1e-3,
+            "boxes are grown by BOX_TOL to cover the 1e-3 that on_seg accepts;              shrinking it below that prunes real crossings and the boolean loses a cut"
+        );
     }
 }

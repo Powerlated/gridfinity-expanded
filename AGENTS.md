@@ -54,7 +54,7 @@ Run the Rust suite for every print-affecting change: geometry, cut/part generati
 
 **Don't run the long targets by default.** `cargo test --release -p gridfinity-cad --lib` is the working gate; it covers the kernel and the model. Leave `--test fuzz` (150 generated bins), `--test scale` (the benches and cost-curve reports) and the `gridfinity-gui` binary's tests (the Bad Apple pipeline benches) for a deliberate pre-PR run or for CI, and say in the report that they were skipped. Run one of them by name when the change is in what it covers — `--test fuzz` for inner walls or blends, `--test scale` when a perf claim is being made.
 
-One consequence to keep in mind: `--release` compiles out `debug_assert!`, including `region2d`'s guard that re-solves every bounding-box-rejected segment pair. That guard's whole value is running continuously, and its failure mode is wrong topology rather than a crash, so a change to either region sweep wants at least one debug-mode run — `cargo test -p gridfinity-cad --lib region2d` is enough.
+`--release` compiles out `debug_assert!`, so nothing load-bearing may live in one. `region2d`'s box-prune guard used to, and is now a runtime-gated verification pass (`set_verify_prune`) that its own tests turn on, so it runs in release with the rest of the suite. Hold that line: a check worth having is worth running under the command everyone actually uses.
 
 Use Playwright for every browser-visible change. Locally, equivalent manual browser verification is acceptable if the report names the method. In CI there is no fallback: if classification requires Playwright, a browser-test failure fails the check.
 

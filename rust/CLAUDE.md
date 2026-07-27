@@ -60,9 +60,7 @@ cargo build --release
 # -> tessellation_leaks, with failures grouped by signature and each shrunk to a
 # paste-ready `Params` literal. Nothing in this workspace is #[ignore]d any more: every test,
 # fuzzer, bench and report runs as a gate under `cargo test --release --workspace` -- which is a
-# deliberate pre-PR run, not the every-change one (see AGENTS.md, Validation). --release also
-# compiles out the region2d bounding-box debug_assert, so a change to either region sweep still
-# wants one debug-mode run.
+# deliberate pre-PR run, not the every-change one (see AGENTS.md, Validation).
 FUZZ_CASES=2000 cargo test -p gridfinity-cad --test fuzz -- --nocapture
 FUZZ_SEED=7 FUZZ_CASES=500 cargo test -p gridfinity-cad --test fuzz -- --nocapture
 ```
@@ -314,10 +312,13 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   ever comparing coordinates.
   Both sweeps are all-pairs over segments, so both **reject a pair on its bounding boxes** before
   solving it — the boxes are grown by `BOX_TOL`, which must stay above the 1e-3 that `on_seg`
-  accepts, or a real crossing gets pruned and the boolean silently loses a cut. A `debug_assert`
-  in each sweep re-solves every rejected pair and fails if it finds one, so debug builds and the
-  fuzzer verify the prune continuously; that guard is the reason to trust it, since the failure
-  mode is wrong topology rather than a crash. `loops_within(a, b, limit)` is the clearance
+  accepts, or a real crossing gets pruned and the boolean silently loses a cut. A verification pass
+  in each sweep re-solves every rejected pair and fails if it finds one; that guard is the reason
+  to trust the prune, since the failure mode is wrong topology rather than a crash. It is gated on
+  `set_verify_prune`, a relaxed atomic checked **once per sweep** rather than once per pair, so it
+  costs a predictable branch when off and re-solves quadratically only when a test asks for it. It
+  was a `debug_assert!` per rejected pair until the suite moved to `--release`, which compiled it
+  out entirely — the reason it is a runtime flag is that a check nobody runs is not a check. `loops_within(a, b, limit)` is the clearance
   predicate: callers wanting a verdict must use it rather than thresholding `min_loop_distance`,
   whose only early exit is an exact zero and which therefore always paid the full `|a|·|b|`.
   **Coincident boundary runs are classified explicitly**, not by the inside/outside point test: where
