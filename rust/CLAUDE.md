@@ -264,9 +264,34 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   `cutting_a_bin_gives_two_watertight_halves_that_conserve_volume` all assert both halves are
   manifold, mesh-closed and volume-conserving; the bin case conserves volume to 0.003 mm³ with
   floor fillets, cavity corner radii and holes all on, at every tessellation density.
-  `try_build_pieces` builds each logical bin **once** and carves each printable piece out of it
-  with `carve_piece`, so a split is a boolean applied last rather than each piece being authored
-  from its own cell set. `trim_to` first classifies the solid's vertices, so a split line that
+  The operator is `trim(solid, &Cut)`; `trim_half_space` is the one-plane convenience over it. A
+  `Cut` is a list of oriented planes, each with the `discard_normal` pointing into the material it
+  removes, and it owns the three things that were previously hard-coded to a single plane:
+  classification (`Cut::side_of`, where `On` means *on the cut surface*, not on one plane),
+  crossings (`Cut::crossings`, tagging each parameter with the plane it crosses), and cap grouping
+  (caps are emitted per plane).
+  **Only the one-plane case works.** A multi-plane `Cut` fails in `close_chains` with "no
+  closed-form section curve for a face the cut crosses", because a connector advancing along plane
+  A must stop at the vertical edge where A meets plane B and continue there, and `close_chains`
+  only ever connects a chain end directly to another chain's start. Adding that — a connector that
+  terminates on a cut-surface edge rather than on a chain — is what a prism trim needs, and it is
+  the *only* thing missing; classification, crossings and per-plane caps are already general.
+  A split is a boolean applied last rather than each piece being authored from its own cell set.
+  `build_bin_solid` builds a logical bin once and `carve_to_cells` trims one printable piece out of
+  it; every caller pairs them that way and builds each bin **once** — `try_build_pieces` for the
+  GUI/STL path, `generate_geometry` for the web app, which carves all of a bin's pieces off the one
+  solid rather than rebuilding and re-filleting the bin per piece. `build_piece` is the
+  single-piece convenience that composes the two.
+  **`carve_to_cells` trims to the piece's *bounding box*, not its cell set**, so it is exact only
+  when pieces are grid slabs. `layout::partition_cells` (the GUI/STL path) guarantees that — it
+  groups cells by split-line chunk. The web app's `src/lib/cuts.ts` `partitionCells` does **not**:
+  it is a flood fill over severed edges, so a piece can be any connected polyomino and two pieces'
+  bounding boxes can overlap. When they do, the larger piece is carved to a box containing the
+  smaller one and their material is duplicated — measured on a 2x2 bin split into `{(1,0)}` and the
+  L-shaped `{(0,0),(0,1),(1,1)}`, the L came back as the *whole bin* and the two pieces summed to
+  125% of it. Reachable from the editor whenever a bin is concave or has an enclosed hole, since
+  `availableCuts` then yields partial runs (auto-cuts bisect KD-style and stay safe). The fix is
+  the prism trim above; until it lands this is a known defect, not a rounding tolerance. `trim_to` first classifies the solid's vertices, so a split line that
   misses a piece's material is a no-op rather than an error — an L-shaped bin needs that.
   Seam walls are *not* special-cased any more: the whole bin is built with its dividers and then
   cut, so a divider at a seam becomes a wall in both pieces and a plain seam cuts open, which is
@@ -409,9 +434,37 @@ This project pins **egui/eframe/egui_glow 0.35, which is a redesigned API**, not
 - `NativeOptions` still has `depth_buffer`/`renderer`/`viewport` like mainstream.
 
 `viewport.rs` is a thin egui adapter over the shared `gridfinity-render` crate: it hands the
-crate's `Renderer` (mesh + line programs, smooth shading from analytic vertex normals) an
-`egui::PaintCallback` + `egui_glow::CallbackFn`, inside a scissored depth-cleared, back-face culled
-draw that restores GL state. The web app drives the identical `Renderer` and the identical
+crate's `Renderer` an `egui::PaintCallback` + `egui_glow::CallbackFn` and passes the callback's
+**`Viewport` rect** (origin plus size in pixels), not an aspect ratio — the renderer needs the
+origin to confine its final blit to the central panel. `Renderer::paint` is now a multi-pass chain
+(shadow map, SSAO, planar reflection, an offscreen linear-HDR scene, bloom, tonemap resolve, FXAA);
+it captures the bound framebuffer and the scissor state up front, disables scissor for every
+offscreen pass, and restores both before the resolved image is drawn into the panel rect. The
+params panel owns a Low/Medium/High row that calls `Renderer::set_quality`; quality is a pinned
+setting with no frame-time adaptation, defaulting to `High`. Because the debugger compiles the same
+shader sources under `#version 330` while the web app uses `#version 300 es`, it will happily accept
+sources the browser rejects — a `const float` ahead of any precision qualifier compiled here for the
+whole of the renderer's development and failed on first contact with WebGL2. Smoke-test browser-facing
+shader changes with `npm run test:e2e`, not just by launching this binary.
+
+**The renderer claims its pipeline state rather than inheriting it** (`claim_pipeline_state`). egui
+hands a callback a context configured for its own UI — `BLEND` on with premultiplied separate
+functions, scissor on, cull and depth off — and re-runs `prepare_painting` afterwards, so nothing
+needs restoring for egui's sake; the hazard is entirely in the other direction. Inheriting `BLEND`
+turned the reflection's gaussian blur, the one pass writing alpha below 1 into a target that is
+never cleared, into an accumulation buffer that ghosted across frames in the debugger while the
+browser (where WebGL defaults blending off) looked correct. Blend, blend equation, stencil, polygon
+offset, dither, colour mask, front face, depth range and clear depth are all set explicitly per
+frame now, and `FRAMEBUFFER_SRGB` is disabled on native only — the enum does not exist in WebGL2 and
+touching it there is an `INVALID_ENUM`.
+
+**Upload before the paint callback is queued, not after.** `Panel::show` only *queues* the callback;
+it runs later, inside `paint_primitives`. `ui()` used to call `regenerate` after the central panel
+had been shown, so a frame that changed geometry drew the new mesh against the previous frame's
+camera snapshot — and since the debugger repaints on demand, that mismatched frame stayed on screen
+until the next input event. `regenerate`/`badapple_tick` now run before `CentralPanel::show`.
+
+The web app drives the identical `Renderer` and the identical
 `append_smooth_shaded` staging from `gridfinity-wasm`'s `Viewer`; the shading path is shared, and
 the two consumers differ only in what they upload (the GUI adds a wireframe pass and the `bad`
 flag; the web app adds per-bin colour and preview offsets). Back-face culling relies on the engine's outward winding (see
@@ -427,8 +480,9 @@ would take the window with it. `catch` also swaps in a silent panic hook for the
 message is shown in the UI and a slider dragged through a bad range would otherwise print a
 backtrace per frame. A failed bin gets **placeholder geometry** (one plain rounded box per cell, at
 the real footprint and height — featureless, so it can't be mistaken for a real build), and every
-vertex carries a `bad` flag as a 7th float (`MESH_STRIDE`; the kernel's `render_buffer` still emits
-6, and the GUI appends the flag). The fragment shader gives flagged vertices a pulsing red
+vertex carries a `bad` flag in the last of `MESH_STRIDE`'s ten floats (position, analytic normal,
+colour, flag — `MESH_STRIDE` is an alias of `gridfinity_render::VERTEX_STRIDE`, and
+`append_smooth_shaded` expands the kernel's six-float `render_buffer` into it). The fragment shader gives flagged vertices a pulsing red
 rim-lit glow, and `paint_error_banner` names the bin and prints why. Export refuses while any bin is
 failing rather than panicking on the way out.
 

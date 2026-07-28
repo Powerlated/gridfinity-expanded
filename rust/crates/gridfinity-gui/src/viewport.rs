@@ -2,7 +2,7 @@ use egui::Vec2 as EVec2;
 use glam::Vec3;
 use std::sync::Arc;
 
-pub use gridfinity_render::{Camera, Renderer};
+pub use gridfinity_render::{Camera, Quality, Renderer, Viewport};
 
 pub trait CameraExt {
     fn project(&self, p: Vec3, rect: egui::Rect) -> Option<egui::Pos2>;
@@ -28,10 +28,9 @@ pub fn callback(
     time: f32,
 ) -> egui::PaintCallback {
     let cb = egui_glow::CallbackFn::new(move |info, painter| {
-        let aspect = rect.width() / rect.height().max(1.0);
         let vp = info.viewport_in_pixels();
-        let viewport_px = (vp.width_px as f32, vp.height_px as f32);
-        renderer.lock().unwrap().paint(painter.gl(), &cam_snapshot, aspect, viewport_px, time);
+        let viewport = Viewport::new(vp.left_px, vp.from_bottom_px, vp.width_px, vp.height_px);
+        renderer.lock().unwrap().paint(painter.gl(), &cam_snapshot, viewport, time);
     });
     egui::PaintCallback { rect, callback: Arc::new(cb) }
 }

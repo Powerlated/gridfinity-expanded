@@ -24,6 +24,22 @@ export const MAX_GRID = 40;
 
 export type PanelSide = 'sidebar' | 'settings';
 
+export type RenderQuality = 'low' | 'medium' | 'high';
+
+export const DEFAULT_RENDER_QUALITY: RenderQuality = 'high';
+
+export const RENDER_QUALITY_INDEX: Record<RenderQuality, number> = {
+  low: 0,
+  medium: 1,
+  high: 2,
+};
+
+export function renderQualityFromIndex(index: number): RenderQuality {
+  const found = (Object.keys(RENDER_QUALITY_INDEX) as RenderQuality[])
+    .find((level) => RENDER_QUALITY_INDEX[level] === index);
+  return found ?? DEFAULT_RENDER_QUALITY;
+}
+
 const DEFAULT_PANEL_WIDTHS: Record<PanelSide, number> = {
   sidebar: 360,
   settings: 300,
@@ -109,6 +125,7 @@ interface AppState {
   gridCols: number;
   gridRows: number;
   panelWidths: Record<PanelSide, number>;
+  renderQuality: RenderQuality;
   selectBin: (id: string) => void;
   startNewBin: () => void;
   paintCell: (cell: Cell, targetBinId?: string) => void;
@@ -129,6 +146,7 @@ interface AppState {
   resetCuts: (binId: string) => void;
   setGridSize: (cols: number, rows: number) => void;
   setPanelWidth: (panel: PanelSide, width: number) => void;
+  setRenderQuality: (renderQuality: RenderQuality) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -137,6 +155,7 @@ export const useAppStore = create<AppState>((set) => ({
   gridCols: 7,
   gridRows: 7,
   panelWidths: DEFAULT_PANEL_WIDTHS,
+  renderQuality: DEFAULT_RENDER_QUALITY,
 
   selectBin: (id) => set({ selectedBinId: id }),
 
@@ -342,4 +361,6 @@ export const useAppStore = create<AppState>((set) => ({
       [panel]: Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, Math.round(width))),
     },
   })),
+
+  setRenderQuality: (renderQuality) => set({ renderQuality }),
 }));

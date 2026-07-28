@@ -59,9 +59,15 @@ impl Camera {
         self.target + self.distance * Vec3::new(cp * cy, cp * sy, sp)
     }
 
+    pub fn near_far(&self) -> (f32, f32) {
+        (
+            (self.distance * NEAR_FRACTION_OF_DISTANCE).max(MIN_NEAR),
+            self.distance * FAR_MULTIPLE_OF_DISTANCE,
+        )
+    }
+
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
-        let near = (self.distance * NEAR_FRACTION_OF_DISTANCE).max(MIN_NEAR);
-        let far = self.distance * FAR_MULTIPLE_OF_DISTANCE;
+        let (near, far) = self.near_far();
         let proj =
             Mat4::perspective_rh_gl(FOV_Y_DEGREES.to_radians(), aspect.max(0.01), near, far);
         proj * Mat4::look_at_rh(self.eye(), self.target, Vec3::Z)
@@ -127,6 +133,16 @@ mod tests {
             camera.zoom(-100_000.0);
         }
         assert_eq!(camera.distance, MAX_DISTANCE);
+    }
+
+    #[test]
+    fn the_near_plane_stays_ahead_of_the_eye_and_behind_the_far_plane() {
+        let mut camera = Camera::default();
+        for distance in [MIN_DISTANCE, 200.0, MAX_DISTANCE] {
+            camera.distance = distance;
+            let (near, far) = camera.near_far();
+            assert!(near >= MIN_NEAR && near < far, "near {near} far {far}");
+        }
     }
 
     #[test]

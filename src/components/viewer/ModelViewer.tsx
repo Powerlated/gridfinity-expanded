@@ -8,6 +8,7 @@ import type { PreviewPiece } from '../../lib/preview';
 import type { Bin, Design } from '../../lib/types';
 import type { BadAppleFeed } from '../../hooks/useBadApple';
 import { binColor } from '../sidebar/binColors';
+import { RENDER_QUALITY_INDEX, renderQualityFromIndex, useAppStore } from '../../store';
 
 const NO_PARTS: PreviewPiece[] = [];
 const CLEAR_COLOR = 0x1c1c21;
@@ -34,11 +35,15 @@ export function ModelViewer({
   const designParts = useMemo(() => previewLayout(bins, design), [bins, design]);
   const active = badApple?.active ?? false;
   const parts = active ? NO_PARTS : designParts;
+  const renderQuality = useAppStore((state) => state.renderQuality);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewerRef = useRef<Viewer | null>(null);
   const feedRef = useRef<BadAppleFeed | null>(null);
   const badAppleFramedRef = useRef(false);
+  const qualityRef = useRef(RENDER_QUALITY_INDEX[renderQuality]);
+  const publishedQualityRef = useRef<string | null>(null);
+  qualityRef.current = RENDER_QUALITY_INDEX[renderQuality];
   feedRef.current = active ? badApple : null;
   const [viewer, setViewer] = useState<Viewer | null>(null);
   const [kernelError, setKernelError] = useState<string | null>(null);
@@ -55,6 +60,7 @@ export function ModelViewer({
       .then((kernel) => {
         if (disposed) return;
         const created = createViewer(kernel, canvas, CLEAR_COLOR);
+        created.set_quality(qualityRef.current);
         viewerRef.current = created;
         setViewer(created);
 
@@ -93,6 +99,11 @@ export function ModelViewer({
               containerRef.current.dataset.badappleFrame = String(next.frame);
             }
           }
+          const level = renderQualityFromIndex(created.quality());
+          if (level !== publishedQualityRef.current && containerRef.current) {
+            publishedQualityRef.current = level;
+            containerRef.current.dataset.renderQuality = level;
+          }
           created.render(time / 1000);
         };
         frame = requestAnimationFrame(tick);
@@ -110,6 +121,10 @@ export function ModelViewer({
       setViewer(null);
     };
   }, []);
+
+  useEffect(() => {
+    viewer?.set_quality(RENDER_QUALITY_INDEX[renderQuality]);
+  }, [renderQuality, viewer]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -180,6 +195,7 @@ export function ModelViewer({
       data-face-orientation={FACE_ORIENTATION}
       data-mesh-topology="welded-vertex-normals"
       data-renderer="rust-webgl2"
+      data-render-quality-mode={renderQuality}
       data-preview-offsets={parts.map((part) =>
         `${part.previewOffset.x.toFixed(2)},${part.previewOffset.y.toFixed(2)}`).join(';')}
     >

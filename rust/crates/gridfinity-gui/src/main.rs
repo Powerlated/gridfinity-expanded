@@ -23,7 +23,7 @@ use gridfinity_cad::kernel::sketch::Sketch;
 use gridfinity_cad::kernel::topo::Solid;
 use gridfinity_cad::tessellate;
 use std::sync::{Arc, Mutex};
-use viewport::{Camera, CameraExt, Renderer};
+use viewport::{Camera, CameraExt, Quality, Renderer};
 
 const PREVIEW_RES: usize = 5;
 const EXPORT_RES: usize = 48;
@@ -154,6 +154,7 @@ struct App {
     gl: Arc<eframe::glow::Context>,
     renderer: Arc<Mutex<Renderer>>,
     camera: Camera,
+    quality: Quality,
     labels: Vec<wireframe::Label>,
     dirty: bool,
     program_dirty: bool,
@@ -189,6 +190,7 @@ impl App {
             gl,
             renderer,
             camera: Camera::default(),
+            quality: Quality::default(),
             labels: Vec::new(),
             dirty: true,
             program_dirty: true,
@@ -385,8 +387,6 @@ impl eframe::App for App {
             false
         };
 
-        egui::CentralPanel::default().show(ui, |ui| self.viewport(ui));
-
         if self.badapple.is_some() {
             let time = ui.input(|i| i.time);
             self.badapple_tick(time);
@@ -395,6 +395,8 @@ impl eframe::App for App {
             self.dirty = true;
             self.regenerate(false);
         }
+
+        egui::CentralPanel::default().show(ui, |ui| self.viewport(ui));
     }
 
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
@@ -452,6 +454,21 @@ impl App {
             if ui.checkbox(&mut shown, "Construction debugger").changed() {
                 self.debugger.set_shown(shown);
                 changed = true;
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Render");
+            let before = self.quality;
+            for (level, label) in [
+                (Quality::Low, "Low"),
+                (Quality::Medium, "Medium"),
+                (Quality::High, "High"),
+            ] {
+                ui.selectable_value(&mut self.quality, level, label);
+            }
+            if self.quality != before {
+                self.renderer.lock().unwrap().set_quality(self.quality);
             }
         });
 
@@ -640,7 +657,7 @@ impl App {
         let cam = self.camera;
         let renderer = self.renderer.clone();
         let time = ui.input(|i| i.time) as f32;
-        if !self.errors.is_empty() {
+        if !self.errors.is_empty() || self.renderer.lock().unwrap().is_accumulating() {
             ui.ctx().request_repaint();
         }
         ui.painter().add(viewport::callback(rect, renderer, cam, time));

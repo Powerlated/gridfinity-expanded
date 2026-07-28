@@ -1,6 +1,8 @@
 use glam::Vec3;
 use glow::HasContext;
-use gridfinity_render::{Camera, Renderer, append_smooth_shaded, bounds_of, color_of};
+use gridfinity_render::{
+    Camera, Quality, Renderer, Viewport, append_smooth_shaded, bounds_of, color_of,
+};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{HtmlCanvasElement, WebGl2RenderingContext};
@@ -104,15 +106,22 @@ impl Viewer {
         self.camera.look_down();
     }
 
+    pub fn set_quality(&mut self, level: i32) {
+        self.renderer.set_quality(Quality::from_index(level.max(0) as u32));
+    }
+
+    pub fn quality(&self) -> i32 {
+        self.renderer.quality().index() as i32
+    }
+
     pub fn render(&mut self, time: f32) {
         unsafe {
             self.gl.viewport(0, 0, self.width, self.height);
             self.gl.clear_color(self.clear.x, self.clear.y, self.clear.z, 1.0);
-            self.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
         }
-        let aspect = self.width as f32 / self.height as f32;
-        let viewport_px = (self.width as f32, self.height as f32);
-        self.renderer.paint(&self.gl, &self.camera, aspect, viewport_px, time);
+        let viewport = Viewport::new(0, 0, self.width, self.height);
+        self.renderer.paint(&self.gl, &self.camera, viewport, time);
     }
 
     pub fn destroy(&mut self) {
