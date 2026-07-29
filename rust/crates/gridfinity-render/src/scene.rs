@@ -218,6 +218,18 @@ mod tests {
     }
 
     #[test]
+    fn the_shadow_projection_is_bit_stable_for_fixed_bounds() {
+        let (min, max) = (Vec3::new(-40.0, -20.0, 0.0), Vec3::new(40.0, 20.0, 30.0));
+        let bits = |m: Mat4| m.to_cols_array().map(f32::to_bits);
+        assert_eq!(
+            bits(shadow_view_proj(min, max)),
+            bits(shadow_view_proj(min, max)),
+            "the renderer caches the shadow map against these bits, so a projection that \
+             is not reproducible would redraw it every frame and never say so",
+        );
+    }
+
+    #[test]
     fn a_degenerate_scene_still_has_a_usable_radius() {
         assert!(scene_radius(Vec3::ZERO, Vec3::ZERO) > 0.0);
         assert!(floor_radius(Vec3::ZERO, Vec3::ZERO) > 0.0);

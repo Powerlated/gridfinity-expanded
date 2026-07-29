@@ -16,6 +16,13 @@ const OCCLUSION_DEPTH_TOLERANCE_FRACTION: f32 = 0.02;
 const FXAA_SAMPLE_LIMIT: u32 = 1;
 
 #[derive(Clone, Copy, PartialEq)]
+struct ShadowKey {
+    geometry: u64,
+    target: u64,
+    view_proj: [u32; 16],
+}
+
+#[derive(Clone, Copy, PartialEq)]
 struct AccumulationKey {
     view_proj: [u32; 16],
     viewport: (i32, i32, i32, i32),
@@ -113,6 +120,7 @@ pub struct Renderer {
     accumulation: Target,
     accumulated: u32,
     accumulation_key: Option<AccumulationKey>,
+    shadow_key: Option<ShadowKey>,
     generation: u64,
     quality: Quality,
     hdr: bool,
@@ -152,6 +160,7 @@ impl Renderer {
             accumulation: Target::new(Attachments::Colour(colour_format)),
             accumulated: 0,
             accumulation_key: None,
+            shadow_key: None,
             generation: 0,
             quality: Quality::default(),
             hdr,
@@ -421,6 +430,14 @@ impl Renderer {
         if !self.shadow.ensure(device, size, size) {
             return false;
         }
+        let key = ShadowKey {
+            geometry: self.generation,
+            target: self.shadow.generation(),
+            view_proj: view_proj.to_cols_array().map(f32::to_bits),
+        };
+        if self.shadow_key == Some(key) {
+            return true;
+        }
         let Some(depth) = self.shadow.depth_view() else { return false };
         let Some(vertices) = self.vertices.as_ref() else { return false };
 
@@ -448,6 +465,8 @@ impl Renderer {
         pass.set_bind_group(0, &bind_group, &[]);
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.draw(0..self.vertex_count, 0..1);
+        drop(pass);
+        self.shadow_key = Some(key);
         true
     }
 
