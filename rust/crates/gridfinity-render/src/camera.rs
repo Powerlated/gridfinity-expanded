@@ -68,8 +68,7 @@ impl Camera {
 
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
         let (near, far) = self.near_far();
-        let proj =
-            Mat4::perspective_rh_gl(FOV_Y_DEGREES.to_radians(), aspect.max(0.01), near, far);
+        let proj = Mat4::perspective_rh(FOV_Y_DEGREES.to_radians(), aspect.max(0.01), near, far);
         proj * Mat4::look_at_rh(self.eye(), self.target, Vec3::Z)
     }
 

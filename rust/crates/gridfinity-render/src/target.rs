@@ -1,171 +1,99 @@
-use glow::HasContext;
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Attachments {
-    ColourDepth(u32),
-    Colour(u32),
+    ColourDepth(wgpu::TextureFormat),
+    Colour(wgpu::TextureFormat),
     ShadowDepth,
 }
 
 pub struct Target {
-    fbo: Option<glow::Framebuffer>,
-    colour: Option<glow::Texture>,
-    depth: Option<glow::Texture>,
     attachments: Attachments,
-    width: i32,
-    height: i32,
+    colour: Option<wgpu::TextureView>,
+    depth: Option<wgpu::TextureView>,
+    width: u32,
+    height: u32,
+    generation: u64,
 }
 
 impl Target {
     pub fn new(attachments: Attachments) -> Target {
-        Target { fbo: None, colour: None, depth: None, attachments, width: 0, height: 0 }
+        Target { attachments, colour: None, depth: None, width: 0, height: 0, generation: 0 }
     }
 
-    pub fn colour_texture(&self) -> Option<glow::Texture> {
-        self.colour
+    pub fn colour_view(&self) -> Option<&wgpu::TextureView> {
+        self.colour.as_ref()
     }
 
-    pub fn depth_texture(&self) -> Option<glow::Texture> {
-        self.depth
+    pub fn depth_view(&self) -> Option<&wgpu::TextureView> {
+        self.depth.as_ref()
     }
 
-    pub fn size(&self) -> (i32, i32) {
+    pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
 
-    pub fn ensure(&mut self, gl: &glow::Context, width: i32, height: i32) -> Option<glow::Framebuffer> {
-        let width = width.max(1);
-        let height = height.max(1);
-        if self.fbo.is_some() && self.width == width && self.height == height {
-            return self.fbo;
-        }
-        self.release(gl);
-        unsafe {
-            let fbo = gl.create_framebuffer().ok()?;
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-            match self.attachments {
-                Attachments::ColourDepth(format) => {
-                    self.colour = Some(colour_texture(gl, format, width, height)?);
-                    self.depth = Some(depth_texture(gl, width, height, false)?);
-                }
-                Attachments::Colour(format) => {
-                    self.colour = Some(colour_texture(gl, format, width, height)?);
-                }
-                Attachments::ShadowDepth => {
-                    self.depth = Some(depth_texture(gl, width, height, true)?);
-                }
-            }
-            if let Some(colour) = self.colour {
-                gl.framebuffer_texture_2d(
-                    glow::FRAMEBUFFER,
-                    glow::COLOR_ATTACHMENT0,
-                    glow::TEXTURE_2D,
-                    Some(colour),
-                    0,
-                );
-                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
-            } else {
-                gl.draw_buffers(&[glow::NONE]);
-                gl.read_buffer(glow::NONE);
-            }
-            if let Some(depth) = self.depth {
-                gl.framebuffer_texture_2d(
-                    glow::FRAMEBUFFER,
-                    glow::DEPTH_ATTACHMENT,
-                    glow::TEXTURE_2D,
-                    Some(depth),
-                    0,
-                );
-            }
-            let complete =
-                gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            if !complete {
-                self.fbo = Some(fbo);
-                self.release(gl);
-                return None;
-            }
-            self.fbo = Some(fbo);
-            self.width = width;
-            self.height = height;
-        }
-        self.fbo
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
-    pub fn release(&mut self, gl: &glow::Context) {
-        unsafe {
-            if let Some(fbo) = self.fbo.take() {
-                gl.delete_framebuffer(fbo);
+    pub fn ensure(&mut self, device: &wgpu::Device, width: i32, height: i32) -> bool {
+        let width = width.max(1) as u32;
+        let height = height.max(1) as u32;
+        if self.width == width && self.height == height && (self.colour.is_some() || self.depth.is_some()) {
+            return true;
+        }
+        self.colour = None;
+        self.depth = None;
+        match self.attachments {
+            Attachments::ColourDepth(format) => {
+                self.colour = Some(view(device, format, width, height));
+                self.depth = Some(view(device, DEPTH_FORMAT, width, height));
             }
-            if let Some(texture) = self.colour.take() {
-                gl.delete_texture(texture);
+            Attachments::Colour(format) => {
+                self.colour = Some(view(device, format, width, height));
             }
-            if let Some(texture) = self.depth.take() {
-                gl.delete_texture(texture);
+            Attachments::ShadowDepth => {
+                self.depth = Some(view(device, DEPTH_FORMAT, width, height));
             }
         }
+        self.width = width;
+        self.height = height;
+        self.generation = self.generation.wrapping_add(1);
+        true
+    }
+
+    pub fn release(&mut self) {
+        self.colour = None;
+        self.depth = None;
         self.width = 0;
         self.height = 0;
+        self.generation = self.generation.wrapping_add(1);
     }
 }
 
-unsafe fn colour_texture(
-    gl: &glow::Context,
-    format: u32,
-    width: i32,
-    height: i32,
-) -> Option<glow::Texture> {
-    unsafe {
-        let texture = gl.create_texture().ok()?;
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-        gl.tex_storage_2d(glow::TEXTURE_2D, 1, format, width, height);
-        set_filter(gl, glow::LINEAR);
-        gl.bind_texture(glow::TEXTURE_2D, None);
-        Some(texture)
-    }
+fn view(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
-unsafe fn depth_texture(
-    gl: &glow::Context,
-    width: i32,
-    height: i32,
-    comparison: bool,
-) -> Option<glow::Texture> {
-    unsafe {
-        let texture = gl.create_texture().ok()?;
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-        gl.tex_storage_2d(glow::TEXTURE_2D, 1, glow::DEPTH_COMPONENT24, width, height);
-        set_filter(gl, if comparison { glow::LINEAR } else { glow::NEAREST });
-        if comparison {
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_COMPARE_MODE,
-                glow::COMPARE_REF_TO_TEXTURE as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_COMPARE_FUNC,
-                glow::LEQUAL as i32,
-            );
-        }
-        gl.bind_texture(glow::TEXTURE_2D, None);
-        Some(texture)
-    }
-}
-
-unsafe fn set_filter(gl: &glow::Context, filter: u32) {
-    unsafe {
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter as i32);
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_WRAP_S,
-            glow::CLAMP_TO_EDGE as i32,
-        );
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_WRAP_T,
-            glow::CLAMP_TO_EDGE as i32,
-        );
-    }
+pub fn supports_float_colour(adapter: &wgpu::Adapter) -> bool {
+    let features = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float);
+    features.allowed_usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+        && features.flags.contains(wgpu::TextureFormatFeatureFlags::BLENDABLE)
+        && features.flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
 }

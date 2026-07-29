@@ -53,7 +53,7 @@ cargo build                      # build both crates
 cargo test --release -p gridfinity-cad --lib   # the working gate: engine + model unit tests
 cargo test --release -p gridfinity-cad --lib <name> -- --nocapture   # one test, e.g. default_bin_is_valid_watertight_and_sized
 cargo test --release --workspace # full gate incl. fuzz/scale/gui benches -- slow, pre-PR only
-cargo run  -p gridfinity-gui     # launch the app (needs a display + OpenGL/glow)
+cargo run  -p gridfinity-gui     # launch the app (needs a display + a wgpu backend)
 cargo build --release
 
 # The geometry fuzzer (tests/fuzz.rs): random Params -> try_build -> validate -> audit
@@ -84,7 +84,7 @@ Two crates (`Cargo.toml` = virtual workspace, edition 2024, resolver 3):
 
 - **`crates/gridfinity-cad`** — the engine library. One dependency: `glam` (math). Everything
   else, B-rep kernel and triangulator alike, is hand-rolled.
-- **`crates/gridfinity-gui`** — the eframe/egui/glow app. Depends on `gridfinity-cad`.
+- **`crates/gridfinity-gui`** — the eframe/egui/wgpu app. Depends on `gridfinity-cad`.
 
 Inside `gridfinity-cad`, the CAD engine lives in **`src/kernel/`** and the parametric model beside
 it in `src/`:
@@ -424,39 +424,28 @@ mode. (Open-edges are intentionally not implemented in the constructive model.)
 
 ## GUI notes (important API gotcha)
 
-This project pins **egui/eframe/egui_glow 0.35, which is a redesigned API**, not mainstream egui:
+This project pins **egui/eframe/egui-wgpu 0.35, which is a redesigned API**, not mainstream egui:
 
 - `eframe::App::ui(&mut self, ui: &mut egui::Ui, frame)` — you get a root **`Ui`**, not a `Context`
   (there is no `update(ctx, ...)`).
 - Panels are shown *inside* that root ui: `egui::Panel::left(id).show(ui, ...)` / `Panel::right` /
   `CentralPanel::default().show(ui, ...)`. There is **no `SidePanel`**.
 - Scroll delta is `input.smooth_scroll_delta` (no `raw_scroll_delta`).
-- `NativeOptions` still has `depth_buffer`/`renderer`/`viewport` like mainstream.
+- `NativeOptions` still has `renderer`/`viewport` like mainstream. **Leave `depth_buffer` at 0** —
+  every depth-tested pass is offscreen, and a depth attachment on egui's own pass makes the
+  depth-less blit pipeline incompatible with it, which is a `set_pipeline` validation panic.
 
-`viewport.rs` is a thin egui adapter over the shared `gridfinity-render` crate: it hands the
-crate's `Renderer` an `egui::PaintCallback` + `egui_glow::CallbackFn` and passes the callback's
-**`Viewport` rect** (origin plus size in pixels), not an aspect ratio — the renderer needs the
-origin to confine its final blit to the central panel. `Renderer::paint` is now a multi-pass chain
-(shadow map, SSAO, planar reflection, an offscreen linear-HDR scene, bloom, tonemap resolve, FXAA);
-it captures the bound framebuffer and the scissor state up front, disables scissor for every
-offscreen pass, and restores both before the resolved image is drawn into the panel rect. The
-params panel owns a Low/Medium/High row that calls `Renderer::set_quality`; quality is a pinned
-setting with no frame-time adaptation, defaulting to `High`. Because the debugger compiles the same
-shader sources under `#version 330` while the web app uses `#version 300 es`, it will happily accept
-sources the browser rejects — a `const float` ahead of any precision qualifier compiled here for the
-whole of the renderer's development and failed on first contact with WebGL2. Smoke-test browser-facing
-shader changes with `npm run test:e2e`, not just by launching this binary.
+`viewport.rs` is a thin egui adapter over the shared `gridfinity-render` crate. It implements
+`egui_wgpu::CallbackTrait`: `prepare` runs the whole offscreen chain and returns its command buffer,
+`paint` blits the finished image into egui's render pass. The callback carries the panel rect and
+converts it to pixels itself, so `prepare` and `paint` cannot disagree about the viewport — the
+renderer stores the viewport it presented and the blit reads it back. The params panel owns a
+Low/Medium/High row calling `Renderer::set_quality`; quality is pinned, defaulting to `High`.
 
-**The renderer claims its pipeline state rather than inheriting it** (`claim_pipeline_state`). egui
-hands a callback a context configured for its own UI — `BLEND` on with premultiplied separate
-functions, scissor on, cull and depth off — and re-runs `prepare_painting` afterwards, so nothing
-needs restoring for egui's sake; the hazard is entirely in the other direction. Inheriting `BLEND`
-turned the reflection's gaussian blur, the one pass writing alpha below 1 into a target that is
-never cleared, into an accumulation buffer that ghosted across frames in the debugger while the
-browser (where WebGL defaults blending off) looked correct. Blend, blend equation, stencil, polygon
-offset, dither, colour mask, front face, depth range and clear depth are all set explicitly per
-frame now, and `FRAMEBUFFER_SRGB` is disabled on native only — the enum does not exist in WebGL2 and
-touching it there is an `INVALID_ENUM`.
+Both consumers now compile the **same WGSL through naga**, so the class of bug where the debugger
+accepted a shader the browser rejected is gone. `cargo test -p gridfinity-render` parses and
+validates every module, which is where a shader error surfaces. Still smoke-test browser-facing
+changes with `npm run test:e2e` — validation does not catch a wrong picture.
 
 **Upload before the paint callback is queued, not after.** `Panel::show` only *queues* the callback;
 it runs later, inside `paint_primitives`. `ui()` used to call `regenerate` after the central panel
@@ -469,7 +458,7 @@ The web app drives the identical `Renderer` and the identical
 the two consumers differ only in what they upload (the GUI adds a wireframe pass and the `bad`
 flag; the web app adds per-bin colour and preview offsets). Back-face culling relies on the engine's outward winding (see
 the `meshes_have_outward_consistent_winding` test). `main.rs` binds `Params` to widgets, regenerates
-(build → tessellate → upload VBO) on change, and exports STL via `rfd` + `Mesh::to_stl_binary`.
+(build → tessellate → upload the vertex buffer) on change, and exports STL via `rfd` + `Mesh::to_stl_binary`.
 
 **Invalid geometry must never crash the app.** `main.rs` builds **one logical bin at a time**
 (`gridfinity::build_piece` per `Params::bins` entry, not one `build` over the layout), so a bin the
@@ -602,7 +591,7 @@ and silently dropping one desynchronises that count into a spin.
 `gridfinity::program(&p)` to get the model's op list, caches per-prefix face counts for display,
 and rebuilds the solid via `program::run(&prog, |i| enabled[i])` whenever the user steps or
 toggles. The App's `regenerate` switches between `gridfinity::build(&p)` (debug off) and the
-debugger's subset build (debug on) — both feed the same `tessellate` → VBO upload path.
+debugger's subset build (debug on) — both feed the same `tessellate` → vertex-buffer upload path.
 Its **Profile rebuilds** checkbox enables `perf` around one `build_solid` and shows wall time, the
 per-metric table (heaviest first, bar scaled to the heaviest row since the timings nest) and
 allocation count / churn / peak.

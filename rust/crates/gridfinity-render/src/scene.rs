@@ -108,14 +108,8 @@ pub fn shadow_view_proj(min: Vec3, max: Vec3) -> Mat4 {
     let distance = radius * SHADOW_DEPTH_MARGIN;
     let eye = centre + key_direction() * distance;
     let up = if key_direction().z.abs() > 0.99 { Vec3::Y } else { Vec3::Z };
-    let proj = Mat4::orthographic_rh_gl(
-        -radius,
-        radius,
-        -radius,
-        radius,
-        0.01,
-        distance + radius * 2.0,
-    );
+    let proj =
+        Mat4::orthographic_rh(-radius, radius, -radius, radius, 0.01, distance + radius * 2.0);
     proj * Mat4::look_at_rh(eye, centre, up)
 }
 
@@ -178,7 +172,7 @@ mod tests {
             let clip = view_proj * corner.extend(1.0);
             let ndc = clip.truncate() / clip.w;
             assert!(
-                ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 && ndc.z.abs() <= 1.0,
+                ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 && (0.0..=1.0).contains(&ndc.z),
                 "corner {corner:?} fell outside the shadow frustum at {ndc:?}",
             );
         }

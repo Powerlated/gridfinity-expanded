@@ -1,10 +1,12 @@
+pub mod arena;
 pub mod camera;
+pub mod pipelines;
 pub mod quality;
 pub mod renderer;
 pub mod scene;
-pub mod shader;
 pub mod shaders;
 pub mod target;
+pub mod uniforms;
 pub mod vertex;
 
 pub use camera::Camera;

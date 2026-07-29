@@ -1,6 +1,7 @@
 use egui::Vec2 as EVec2;
+use egui_wgpu::{CallbackTrait, ScreenDescriptor};
 use glam::Vec3;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub use gridfinity_render::{Camera, Quality, Renderer, Viewport};
 
@@ -21,16 +22,65 @@ impl CameraExt for Camera {
     }
 }
 
+#[derive(Clone)]
+pub struct Gpu {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub format: wgpu::TextureFormat,
+}
+
+struct ViewportCallback {
+    gpu: Gpu,
+    renderer: Arc<Mutex<Renderer>>,
+    rect: egui::Rect,
+    camera: Camera,
+    time: f32,
+}
+
+impl CallbackTrait for ViewportCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen: &ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
+        _resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let scale = screen.pixels_per_point;
+        let viewport = Viewport::new(
+            (self.rect.left() * scale).round() as i32,
+            (self.rect.top() * scale).round() as i32,
+            (self.rect.width() * scale).round() as i32,
+            (self.rect.height() * scale).round() as i32,
+        );
+        let mut renderer = self.renderer.lock().unwrap();
+        vec![renderer.prepare(device, queue, &self.camera, viewport, self.time)]
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        pass: &mut wgpu::RenderPass<'static>,
+        _resources: &egui_wgpu::CallbackResources,
+    ) {
+        self.renderer.lock().unwrap().blit(
+            &self.gpu.device,
+            &self.gpu.queue,
+            pass,
+            self.gpu.format,
+        );
+    }
+}
+
 pub fn callback(
     rect: egui::Rect,
-    renderer: Arc<std::sync::Mutex<Renderer>>,
+    gpu: Gpu,
+    renderer: Arc<Mutex<Renderer>>,
     cam_snapshot: Camera,
     time: f32,
 ) -> egui::PaintCallback {
-    let cb = egui_glow::CallbackFn::new(move |info, painter| {
-        let vp = info.viewport_in_pixels();
-        let viewport = Viewport::new(vp.left_px, vp.from_bottom_px, vp.width_px, vp.height_px);
-        renderer.lock().unwrap().paint(painter.gl(), &cam_snapshot, viewport, time);
-    });
-    egui::PaintCallback { rect, callback: Arc::new(cb) }
+    egui_wgpu::Callback::new_paint_callback(
+        rect,
+        ViewportCallback { gpu, renderer, rect, camera: cam_snapshot, time },
+    )
 }

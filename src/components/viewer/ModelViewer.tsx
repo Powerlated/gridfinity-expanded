@@ -57,9 +57,12 @@ export function ModelViewer({
     let observer: ResizeObserver | null = null;
 
     void initKernel(wasmUrl)
-      .then((kernel) => {
-        if (disposed) return;
-        const created = createViewer(kernel, canvas, CLEAR_COLOR);
+      .then((kernel) => createViewer(kernel, canvas, CLEAR_COLOR))
+      .then((created) => {
+        if (disposed) {
+          created.destroy();
+          return;
+        }
         created.set_quality(qualityRef.current);
         viewerRef.current = created;
         setViewer(created);

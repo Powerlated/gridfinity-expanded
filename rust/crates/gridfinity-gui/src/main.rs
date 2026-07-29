@@ -23,7 +23,7 @@ use gridfinity_cad::kernel::sketch::Sketch;
 use gridfinity_cad::kernel::topo::Solid;
 use gridfinity_cad::tessellate;
 use std::sync::{Arc, Mutex};
-use viewport::{Camera, CameraExt, Quality, Renderer};
+use viewport::{Camera, CameraExt, Gpu, Quality, Renderer};
 
 const PREVIEW_RES: usize = 5;
 const EXPORT_RES: usize = 48;
@@ -132,8 +132,7 @@ fn build_scene(p: &Params) -> (Vec<f32>, Vec<BinError>) {
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        depth_buffer: 24,
-        renderer: eframe::Renderer::Glow,
+        renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 760.0])
             .with_title("Gridfinity Parametric — analytic B-rep CAD"),
@@ -151,7 +150,7 @@ struct App {
     editor: Editor,
     debugger: Debugger,
     printer: PrinterProfile,
-    gl: Arc<eframe::glow::Context>,
+    gpu: Gpu,
     renderer: Arc<Mutex<Renderer>>,
     camera: Camera,
     quality: Quality,
@@ -178,16 +177,23 @@ struct BadApple {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> App {
-        let gl = cc.gl.clone().expect("this build requires the glow backend");
+        let state =
+            cc.wgpu_render_state.as_ref().expect("this build requires the wgpu backend");
+        let gpu = Gpu {
+            device: state.device.clone(),
+            queue: state.queue.clone(),
+            format: state.target_format,
+        };
         let renderer = Arc::new(Mutex::new(
-            Renderer::new(&gl).expect("the glow backend must compile the viewport shaders"),
+            Renderer::new(&gpu.device, &state.adapter)
+                .expect("the wgpu backend must build the viewport pipelines"),
         ));
         let mut app = App {
             params: Params::default(),
             editor: Editor::default(),
             debugger: Debugger::default(),
             printer: DEFAULT_PRINTER,
-            gl,
+            gpu,
             renderer,
             camera: Camera::default(),
             quality: Quality::default(),
@@ -233,8 +239,8 @@ impl App {
         self.labels = wf.labels;
 
         let mut r = self.renderer.lock().unwrap();
-        r.upload(&self.gl, &verts);
-        r.upload_lines(&self.gl, &wf.lines);
+        r.upload(&self.gpu.device, &self.gpu.queue, &verts);
+        r.upload_lines(&self.gpu.device, &self.gpu.queue, &wf.lines);
         drop(r);
         self.dirty = false;
     }
@@ -289,8 +295,8 @@ impl App {
             ba.tri_rate = if ba.tri_rate == 0.0 { inst } else { 0.85 * ba.tri_rate + 0.15 * inst };
             self.tri_count = r.tris;
             let mut rr = self.renderer.lock().unwrap();
-            rr.upload(&self.gl, &r.verts);
-            rr.upload_lines(&self.gl, &[]);
+            rr.upload(&self.gpu.device, &self.gpu.queue, &r.verts);
+            rr.upload_lines(&self.gpu.device, &self.gpu.queue, &[]);
         }
 
         let ba = self.badapple.as_mut().unwrap();
@@ -399,10 +405,8 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| self.viewport(ui));
     }
 
-    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
-        if let Some(gl) = gl {
-            self.renderer.lock().unwrap().destroy(gl);
-        }
+    fn on_exit(&mut self) {
+        self.renderer.lock().unwrap().destroy();
     }
 }
 
@@ -660,7 +664,7 @@ impl App {
         if !self.errors.is_empty() || self.renderer.lock().unwrap().is_accumulating() {
             ui.ctx().request_repaint();
         }
-        ui.painter().add(viewport::callback(rect, renderer, cam, time));
+        ui.painter().add(viewport::callback(rect, self.gpu.clone(), renderer, cam, time));
         self.paint_labels(ui, rect);
         self.paint_error_banner(ui, rect);
     }

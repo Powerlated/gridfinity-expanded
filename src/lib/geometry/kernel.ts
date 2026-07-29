@@ -24,6 +24,7 @@ import init, {
   badapple_fps,
   badapple_frame_count,
   badapple_frame_vertices,
+  create_viewer,
   generate_geometry,
 } from '../../wasm/gridfinity_wasm.js';
 import type { BadAppleClip, Bin, BinParameters } from '../types';
@@ -101,6 +102,6 @@ export function createViewer(
   _kernel: GeometryKernel,
   canvas: HTMLCanvasElement,
   clearRgb: number,
-): Viewer {
-  return new Viewer(canvas, clearRgb);
+): Promise<Viewer> {
+  return create_viewer(canvas, clearRgb);
 }
