@@ -49,7 +49,7 @@ pub const LAYER_HEIGHT: f32 = 0.2;
 pub const LAYER_RELIEF: f32 = 0.035;
 pub const LAYER_FACING_FADE: f32 = 0.10;
 pub const LAYER_SELF_SHADOW: f32 = 0.55;
-pub const LAYER_SPECULAR_SPREAD: f32 = 0.30;
+pub const LAYER_SHADING_HARMONICS: f32 = 3.0;
 
 pub const GI_BOUNCE_STRENGTH: f32 = 0.65;
 

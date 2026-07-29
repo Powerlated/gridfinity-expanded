@@ -72,8 +72,8 @@ fn constants() -> String {
     out.push_str(&format!("const LAYER_FACING_FADE: f32 = {:.4};\n", scene::LAYER_FACING_FADE));
     out.push_str(&format!("const LAYER_SELF_SHADOW: f32 = {:.4};\n", scene::LAYER_SELF_SHADOW));
     out.push_str(&format!(
-        "const LAYER_SPECULAR_SPREAD: f32 = {:.4};\n",
-        scene::LAYER_SPECULAR_SPREAD
+        "const LAYER_SHADING_HARMONICS: f32 = {:.4};\n",
+        scene::LAYER_SHADING_HARMONICS
     ));
     out.push_str(&format!("const GI_BOUNCE_STRENGTH: f32 = {:.4};\n", scene::GI_BOUNCE_STRENGTH));
     out.push_str(&format!("const DOF_MAX_RADIUS: f32 = {:.4};\n", scene::DOF_MAX_RADIUS));
@@ -199,8 +199,23 @@ fn layer_footprint(z: f32) -> f32 {
 }
 
 fn layer_attenuation(footprint: f32) -> f32 {
-    let x = PI * footprint;
-    return select(clamp(sin(x) / x, 0.0, 1.0), 1.0, x < 1e-4);
+    let reach = footprint * LAYER_SHADING_HARMONICS;
+    if (reach >= 1.0) {
+        return 0.0;
+    }
+    let x = PI * reach;
+    return select(sin(x) / x, 1.0, x < 1e-4);
+}
+
+fn layer_slope_amplitude(facing: f32) -> f32 {
+    return LAYER_RELIEF * facing * PI / LAYER_HEIGHT;
+}
+
+fn layer_roughness(base: f32, facing: f32, atten: f32) -> f32 {
+    let amplitude = layer_slope_amplitude(facing);
+    let lost_variance = 0.5 * amplitude * amplitude * max(1.0 - atten * atten, 0.0);
+    let alpha = base * base;
+    return sqrt(sqrt(alpha * alpha + 2.0 * lost_variance));
 }
 
 fn layer_facing(n: vec3<f32>) -> f32 {
@@ -406,10 +421,7 @@ fn fs_mesh(v: MeshOut) -> @location(0) vec4<f32> {
 
     let albedo = decode_srgb(v.color);
     let f0 = vec3<f32>(MATERIAL_F0);
-    let roughness = min(
-        1.0,
-        MATERIAL_ROUGHNESS + LAYER_SPECULAR_SPREAD * lines * (1.0 - atten)
-    );
+    let roughness = min(1.0, layer_roughness(MATERIAL_ROUGHNESS, lines, atten));
     let shadow = shadow_factor(wpos, n) * grooves;
 
     var lit = direct_lobe(n, view, key_dir, albedo, f0, roughness) * KEY_COLOUR * shadow;
@@ -680,20 +692,28 @@ fn fs_bilateral_blur(v: FullscreenOut) -> @location(0) vec4<f32> {
     return sum / max(weight, 1e-4);
 }
 
+const BLUR_MAX_TAPS: i32 = 12;
+
 @fragment
 fn fs_gaussian_blur(v: FullscreenOut) -> @location(0) vec4<f32> {
-    var weights = array<f32, 3>(0.2270270270, 0.3162162162, 0.0702702703);
-    var offsets = array<f32, 3>(0.0, 1.3846153846, 3.2307692308);
     let texel = post_texel();
     let uv = v.clip.xy * texel;
-    let stride = post.direction * texel * post.params.x;
-    var sum = source_at(uv) * weights[0];
-    for (var i = 1; i < 3; i = i + 1) {
-        let offset = stride * offsets[i];
-        sum = sum + source_at(uv + offset) * weights[i];
-        sum = sum + source_at(uv - offset) * weights[i];
+    let sigma = max(post.params.x, 1e-3);
+    let reach = sigma * 3.0;
+    var sum = source_at(uv);
+    var weight = 1.0;
+    for (var i = 1; i <= BLUR_MAX_TAPS; i = i + 1) {
+        let offset = f32(i);
+        if (offset > reach) {
+            break;
+        }
+        let w = exp(-0.5 * offset * offset / (sigma * sigma));
+        let walk = post.direction * texel * offset;
+        sum = sum + source_at(uv + walk) * w;
+        sum = sum + source_at(uv - walk) * w;
+        weight = weight + 2.0 * w;
     }
-    return sum;
+    return sum / max(weight, 1e-4);
 }
 
 @fragment
@@ -1091,18 +1111,108 @@ mod tests {
         assert!(source.contains(&format!("{:.4}", scene::LAYER_HEIGHT)));
     }
 
+    fn attenuation(footprint: f32) -> f32 {
+        let reach = footprint * scene::LAYER_SHADING_HARMONICS;
+        if reach >= 1.0 {
+            return 0.0;
+        }
+        let x = std::f32::consts::PI * reach;
+        if x < 1e-4 { 1.0 } else { x.sin() / x }
+    }
+
+    fn layer_roughness(base: f32, facing: f32, atten: f32) -> f32 {
+        let amplitude =
+            scene::LAYER_RELIEF * facing * std::f32::consts::PI / scene::LAYER_HEIGHT;
+        let lost = 0.5 * amplitude * amplitude * (1.0 - atten * atten).max(0.0);
+        let alpha = base * base;
+        (alpha * alpha + 2.0 * lost).sqrt().sqrt()
+    }
+
     #[test]
-    fn layer_lines_are_prefiltered_and_roll_into_roughness_as_they_stop_resolving() {
+    fn layer_lines_are_prefiltered_in_place_rather_than_faded_out() {
         let source = scene_module();
         assert!(source.contains("let atten = layer_attenuation(layer_footprint(v.wpos.z));"));
         assert!(
             source.contains("atten * cos(phase)"),
             "the profile must be prefiltered in place, converging to its own mean",
         );
+    }
+
+    #[test]
+    fn the_prefilter_never_lets_the_bead_reappear_once_it_stops_resolving() {
+        let mut previous = f32::INFINITY;
+        for step in 0..=400 {
+            let footprint = step as f32 * 0.02;
+            let atten = attenuation(footprint);
+            assert!(
+                atten <= previous + 1e-6,
+                "attenuation rose from {previous} to {atten} at a footprint of {footprint}; \
+                 the sinc sidelobes past the first zero revive the layer lines at distance",
+            );
+            assert!((0.0..=1.0).contains(&atten));
+            previous = atten;
+        }
+        assert_eq!(attenuation(0.0), 1.0);
+        assert_eq!(attenuation(1.0), 0.0);
+        assert_eq!(attenuation(2.5), 0.0);
+    }
+
+    #[test]
+    fn the_band_limit_is_set_by_the_harmonics_the_shading_carries_not_the_bead() {
         assert!(
-            source.contains("LAYER_SPECULAR_SPREAD * lines * (1.0 - atten)"),
-            "detail below the pixel footprint must become roughness, not aliasing",
+            scene::LAYER_SHADING_HARMONICS > 1.0,
+            "the parallax march, the self-shadow max and the specular response to a 29 degree \
+             normal sweep are all nonlinear, so they carry overtones of the bead; limiting only \
+             the fundamental leaves those overtones aliasing as moire at medium distance",
         );
+        let cutoff = 1.0 / scene::LAYER_SHADING_HARMONICS;
+        assert_eq!(attenuation(cutoff), 0.0);
+        assert!(
+            attenuation(cutoff * 0.5) > 0.0,
+            "the relief must still resolve while a bead spans several pixels",
+        );
+    }
+
+    #[test]
+    fn the_filtered_modulation_becomes_roughness_by_its_own_lost_variance() {
+        let base = scene::MATERIAL_ROUGHNESS;
+        assert!(
+            (layer_roughness(base, 1.0, 1.0) - base).abs() < 1e-5,
+            "a fully resolved bead has lost no variance and must not add roughness",
+        );
+        assert!(
+            (layer_roughness(base, 0.0, 0.0) - base).abs() < 1e-5,
+            "a face with no layer lines must shade at the plain material roughness",
+        );
+        let smeared = layer_roughness(base, 1.0, 0.0);
+        assert!(smeared > base, "fully filtered relief must roughen the surface, got {smeared}");
+        let mut previous = base;
+        for step in 0..=20 {
+            let atten = 1.0 - step as f32 / 20.0;
+            let roughness = layer_roughness(base, 1.0, atten);
+            assert!(roughness >= previous - 1e-6, "roughness must rise as detail is lost");
+            previous = roughness;
+        }
+    }
+
+    #[test]
+    fn the_roughness_compensation_tracks_the_relief_it_is_standing_in_for() {
+        let base = scene::MATERIAL_ROUGHNESS;
+        let shallow = layer_roughness(base, 0.5, 0.0);
+        let full = layer_roughness(base, 1.0, 0.0);
+        assert!(
+            full > shallow,
+            "a steeper bead hides more slope variance, so it must roughen more; a fixed \
+             constant would compensate the same regardless of LAYER_RELIEF or LAYER_HEIGHT",
+        );
+    }
+
+    #[test]
+    fn the_shader_derives_its_roughness_rather_than_adding_a_tuned_constant() {
+        let source = scene_module();
+        assert!(source.contains("fn layer_roughness(base: f32, facing: f32, atten: f32)"));
+        assert!(source.contains("let roughness = min(1.0, layer_roughness(MATERIAL_ROUGHNESS, lines, atten));"));
+        assert!(!source.contains("LAYER_SPECULAR_SPREAD"));
     }
 
     #[test]
@@ -1156,39 +1266,67 @@ mod tests {
         );
     }
 
-    fn kernel_row(index: usize) -> Vec<f32> {
-        post_module()
-            .split("array<f32, 3>(")
-            .nth(index + 1)
-            .and_then(|rest| rest.split(')').next())
-            .expect("the kernel lists this row")
-            .split(',')
-            .map(|value| value.trim().parse().expect("a numeric entry"))
-            .collect()
+    const BLUR_MAX_TAPS: i32 = 12;
+
+    fn blur_taps(sigma: f32) -> Vec<(f32, f32)> {
+        let reach = sigma * 3.0;
+        let mut taps = vec![(0.0, 1.0)];
+        for i in 1..=BLUR_MAX_TAPS {
+            let offset = i as f32;
+            if offset > reach {
+                break;
+            }
+            taps.push((offset, (-0.5 * offset * offset / (sigma * sigma)).exp()));
+        }
+        taps
     }
 
     #[test]
-    fn the_shared_blur_is_separable_and_spreads_across_distinct_radii() {
-        assert!(post_module().contains("post.direction * texel * post.params.x"));
-        let offsets = kernel_row(1);
-        assert_eq!(offsets.len(), 3);
-        assert_eq!(offsets[0], 0.0, "the kernel must sample its own centre");
-        for pair in offsets.windows(2) {
+    fn the_shared_blur_walks_one_texel_at_a_time_so_an_edge_cannot_replicate() {
+        let source = post_module();
+        assert!(source.contains(&format!("const BLUR_MAX_TAPS: i32 = {BLUR_MAX_TAPS};")));
+        assert!(
+            source.contains("let offset = f32(i);"),
+            "the tap stride must be one texel; the linear-sampling offsets 1.3846/3.2308 fold \
+             two texels into one tap and are only valid at that stride, so scaling them by a \
+             radius leaves gaps that convolve a silhouette into displaced copies of its edge",
+        );
+        assert!(!source.contains("1.3846153846"));
+        assert!(source.contains("post.direction * texel * offset"));
+    }
+
+    #[test]
+    fn every_blur_radius_the_renderer_asks_for_is_sampled_without_gaps() {
+        for radius in [scene::BLOOM_BLUR_RADIUS, scene::REFLECTION_GLOSS_RADIUS] {
+            let taps = blur_taps(radius);
+            assert!(taps.len() > 1, "radius {radius} must reach past its own centre");
+            for pair in taps.windows(2) {
+                assert!(
+                    pair[1].0 - pair[0].0 <= 1.0,
+                    "a gap wider than one texel leaves the source undersampled at radius {radius}",
+                );
+                assert!(pair[1].1 < pair[0].1, "weights must fall off with distance");
+            }
+            let outermost = taps.last().expect("a tap").0;
             assert!(
-                pair[1] > pair[0],
-                "taps sharing one radius make a ring, which reproduces a silhouette as \
-                 displaced copies rather than blurring it",
+                outermost >= radius,
+                "radius {radius} truncates at {outermost} texels, inside its own lobe",
             );
         }
     }
 
     #[test]
-    fn the_shared_blur_preserves_energy_and_fades_at_its_outer_tap() {
-        let weights = kernel_row(0);
-        assert_eq!(weights.len(), 3);
-        let total = weights[0] + 2.0 * (weights[1] + weights[2]);
-        assert!((total - 1.0).abs() < 1e-4, "the kernel must preserve energy, got {total}");
-        assert!(weights[2] < weights[0] && weights[2] < weights[1]);
+    fn the_shared_blur_preserves_energy_at_every_radius_it_is_given() {
+        for radius in [scene::BLOOM_BLUR_RADIUS, scene::REFLECTION_GLOSS_RADIUS, 4.0] {
+            let taps = blur_taps(radius);
+            let total: f32 = taps.iter().map(|(offset, w)| if *offset == 0.0 { *w } else { 2.0 * w }).sum();
+            assert!(total > 0.0);
+            assert!(
+                post_module().contains("return sum / max(weight, 1e-4);"),
+                "normalising by the weight actually accumulated is what keeps a truncated \
+                 kernel from darkening or brightening the image",
+            );
+        }
     }
 
     #[test]
