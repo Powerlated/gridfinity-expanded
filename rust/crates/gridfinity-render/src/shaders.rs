@@ -457,7 +457,7 @@ fn fs_floor(v: FloorOut) -> @location(0) vec4<f32> {
     let uv = screen_uv(v.clip.xy);
     let backdrop = backdrop_linear(uv);
     let radial = length(v.wpos.xy - scene.floor_plane.xy) / max(scene.floor_plane.w, 1e-3);
-    let presence = 1.0 - smoothstep(1.0 - FLOOR_FADE_FRACTION, 1.0, radial);
+    let presence = (1.0 - smoothstep(1.0 - FLOOR_FADE_FRACTION, 1.0, radial)) * scene.toggles.y;
     if (presence <= 0.0) {
         return scene_out(backdrop);
     }
@@ -474,14 +474,10 @@ fn fs_floor(v: FloorOut) -> @location(0) vec4<f32> {
     lit = lit + FLOOR_ALBEDO * env_irradiance(n);
 
     var radiance = env_radiance(reflect(-view, n), FLOOR_ROUGHNESS);
-    if (scene.toggles.y > 0.0) {
+    if (scene.toggles.z > 0.5) {
         let mirror = textureSampleLevel(t_screen, s_screen, uv, 0.0);
         let reflected = mirror.rgb / max(mirror.a, 1e-4);
-        let coverage = clamp(
-            mirror.a * REFLECTION_STRENGTH * scene.toggles.y,
-            0.0,
-            1.0
-        );
+        let coverage = clamp(mirror.a * REFLECTION_STRENGTH, 0.0, 1.0);
         radiance = mix(radiance, reflected, coverage);
     }
     lit = lit + ibl_specular(radiance, f0, FLOOR_ROUGHNESS, nv, 1.0);
@@ -726,13 +722,17 @@ fn circle_of_confusion(uv: vec2<f32>) -> f32 {
 }
 
 fn gather_defocus(uv: vec2<f32>, texel: vec2<f32>, coc: f32) -> vec3<f32> {
+    let centre_depth = view_depth(uv);
     var sum = source_at(uv).rgb;
     var weight = 1.0;
     for (var i = 1; i <= DOF_TAPS; i = i + 1) {
         let t = f32(i) / f32(DOF_TAPS);
         let angle = f32(i) * GOLDEN_ANGLE;
-        let at = uv + vec2<f32>(cos(angle), sin(angle)) * sqrt(t) * coc * texel;
-        let w = step(coc * 0.35, circle_of_confusion(at));
+        let reach = sqrt(t) * coc;
+        let at = uv + vec2<f32>(cos(angle), sin(angle)) * reach * texel;
+        let in_front = view_depth(at) < centre_depth;
+        let spreads_this_far = circle_of_confusion(at) >= reach;
+        let w = select(1.0, select(0.0, 1.0, spreads_this_far), in_front);
         sum = sum + source_at(at).rgb * w;
         weight = weight + w;
     }
@@ -744,7 +744,7 @@ fn fs_resolve(v: FullscreenOut) -> @location(0) vec4<f32> {
     let texel = post_texel();
     let uv = v.clip.xy * texel;
     var c = source_at(uv).rgb;
-    if (post.params.w > 0.0) {
+    if (post.params.w > 0.0 && depth_at(uv) < 1.0) {
         let coc = circle_of_confusion(uv);
         if (coc > 1.0) {
             c = gather_defocus(uv, texel, coc);
@@ -1212,6 +1212,27 @@ mod tests {
         );
         assert!(!source.contains("depth * 2.0 - 1.0"));
         assert!(source.contains("out.depth, 1.0)"));
+    }
+
+    #[test]
+    fn the_backdrop_is_never_defocused_so_it_cannot_gather_the_silhouette() {
+        assert!(
+            post_module().contains("post.params.w > 0.0 && depth_at(uv) < 1.0"),
+            "background pixels hold cleared depth, which reads as the far plane and \
+             saturates the circle of confusion into a halo around the model",
+        );
+    }
+
+    #[test]
+    fn a_nearer_defocus_tap_contributes_only_where_its_own_blur_reaches() {
+        let source = post_module();
+        assert!(source.contains("let in_front = view_depth(at) < centre_depth;"));
+        assert!(source.contains("let spreads_this_far = circle_of_confusion(at) >= reach;"));
+        assert!(
+            !source.contains("step(coc * 0.35, circle_of_confusion(at))"),
+            "comparing circle-of-confusion magnitudes passes a near foreground tap and a \
+             far background tap alike, which is what bled the model outward",
+        );
     }
 
     #[test]

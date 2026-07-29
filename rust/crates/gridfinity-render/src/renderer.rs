@@ -68,7 +68,7 @@ struct Frame {
     has_shadow: bool,
     has_occlusion: bool,
     has_reflection: bool,
-    reflection_weight: f32,
+    floor_presence: f32,
     near_far: (f32, f32),
     focus_distance: f32,
     aperture: f32,
@@ -245,8 +245,8 @@ impl Renderer {
             has_shadow: false,
             has_occlusion: false,
             has_reflection: false,
-            reflection_weight: if bounds.is_some() {
-                scene::reflection_weight(cam.pitch)
+            floor_presence: if bounds.is_some() {
+                scene::floor_presence(cam.pitch)
             } else {
                 0.0
             },
@@ -271,7 +271,7 @@ impl Renderer {
                 frame.has_shadow =
                     self.draw_shadow_map(device, queue, &mut encoder, level, frame.shadow_view_proj);
             }
-            if level.reflection() && frame.reflection_weight > 0.0 {
+            if level.reflection() && frame.floor_presence > 0.0 {
                 frame.has_reflection =
                     self.draw_reflection(device, queue, &mut encoder, &frame, offscreen);
             }
@@ -804,7 +804,8 @@ impl Renderer {
         let backdrop_offset = self.arenas.scene.push(queue, &backdrop);
 
         let mut floor = backdrop;
-        floor.toggles[1] = if frame.has_reflection { frame.reflection_weight } else { 0.0 };
+        floor.toggles[1] = frame.floor_presence;
+        floor.toggles[2] = if frame.has_reflection { 1.0 } else { 0.0 };
         let floor_offset = self.arenas.scene.push(queue, &floor);
 
         let mut mesh = backdrop;

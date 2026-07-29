@@ -21,9 +21,10 @@ pub const FLOOR_RADIUS_MULTIPLE: f32 = 7.0;
 pub const FLOOR_FADE_FRACTION: f32 = 0.35;
 
 pub const REFLECTION_STRENGTH: f32 = 0.85;
-pub const REFLECTION_FADE_START: f32 = 0.055;
-pub const REFLECTION_FADE_END: f32 = 0.44;
 pub const REFLECTION_GLOSS_RADIUS: f32 = 2.0;
+
+pub const FLOOR_GRAZING_FADE_START: f32 = 0.0;
+pub const FLOOR_GRAZING_FADE_END: f32 = 0.13;
 
 pub const CONTACT_SHADOW_STRENGTH: f32 = 0.82;
 pub const AMBIENT_OCCLUSION_STRENGTH: f32 = 0.85;
@@ -79,8 +80,9 @@ pub fn floor_centre(min: Vec3, max: Vec3) -> Vec3 {
     Vec3::new((min.x + max.x) * 0.5, (min.y + max.y) * 0.5, floor_height(min))
 }
 
-pub fn reflection_weight(pitch: f32) -> f32 {
-    let t = (pitch - REFLECTION_FADE_START) / (REFLECTION_FADE_END - REFLECTION_FADE_START);
+pub fn floor_presence(pitch: f32) -> f32 {
+    let t = (pitch - FLOOR_GRAZING_FADE_START)
+        / (FLOOR_GRAZING_FADE_END - FLOOR_GRAZING_FADE_START);
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -130,23 +132,33 @@ mod tests {
     }
 
     #[test]
-    fn the_reflection_is_gone_at_grazing_angles_and_full_when_looking_down() {
-        assert_eq!(reflection_weight(0.0), 0.0);
-        assert_eq!(reflection_weight(-1.0), 0.0);
-        assert_eq!(reflection_weight(REFLECTION_FADE_START), 0.0);
-        assert_eq!(reflection_weight(REFLECTION_FADE_END), 1.0);
-        assert_eq!(reflection_weight(1.5), 1.0);
+    fn the_floor_is_gone_at_eye_level_and_whole_once_the_camera_lifts() {
+        assert_eq!(floor_presence(0.0), 0.0);
+        assert_eq!(floor_presence(-1.0), 0.0);
+        assert_eq!(floor_presence(FLOOR_GRAZING_FADE_START), 0.0);
+        assert_eq!(floor_presence(FLOOR_GRAZING_FADE_END), 1.0);
+        assert_eq!(floor_presence(1.5), 1.0);
     }
 
     #[test]
-    fn the_reflection_fade_rises_monotonically_across_the_transition() {
+    fn the_floor_fade_rises_monotonically_across_the_transition() {
         let mut previous = -1.0;
         for step in 0..=40 {
             let pitch = step as f32 * 0.02;
-            let weight = reflection_weight(pitch);
+            let weight = floor_presence(pitch);
             assert!(weight >= previous, "fade must not dip at pitch {pitch}");
             previous = weight;
         }
+    }
+
+    #[test]
+    fn the_fade_is_confined_to_the_camera_almost_touching_the_floor() {
+        assert!(
+            FLOOR_GRAZING_FADE_END < 0.2,
+            "the floor must stay whole across the oblique angles where Fresnel makes \
+             the reflection strongest, or the fade hides the effect it exists to show",
+        );
+        assert_eq!(floor_presence(0.25), 1.0);
     }
 
     #[test]
