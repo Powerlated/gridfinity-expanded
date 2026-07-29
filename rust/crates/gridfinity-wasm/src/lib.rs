@@ -88,8 +88,11 @@ pub fn generate_geometry(bins: JsValue) -> Result<JsValue, JsValue> {
         let params = bin.to_params();
         let pieces = js_sys::Array::new();
 
+        let whole = gridfinity::build_bin_solid(&params, &bin.cells, None)
+            .map_err(|e| JsValue::from_str(&format!("bin {}: {e}", bin.bin_id)))?;
+
         for piece_cells in &bin.pieces {
-            let solid = gridfinity::build_piece(&params, &bin.cells, piece_cells, None)
+            let solid = gridfinity::carve_to_cells(&whole, piece_cells)
                 .map_err(|e| JsValue::from_str(&format!("bin {}: {e}", bin.bin_id)))?;
             pieces.push(&piece_obj(&render_vertices(&solid, ARC_SEGMENTS_PER_QUARTER), piece_cells)?);
         }

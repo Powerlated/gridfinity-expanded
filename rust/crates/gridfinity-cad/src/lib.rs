@@ -735,6 +735,30 @@ mod tests {
     }
 
     #[test]
+    fn a_staircase_piece_carves_to_its_cells_not_its_bounding_box() {
+        let p = gridfinity::Params {
+            bins: vec![LogicalBin {
+                cells: cells(&[(0, 0), (1, 0), (0, 1), (1, 1)]),
+                ..Default::default()
+            }],
+            ..gridfinity::Params::default()
+        };
+        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap();
+        let corner = gridfinity::carve_to_cells(&whole, &cells(&[(1, 0)])).unwrap();
+        let ell = gridfinity::carve_to_cells(&whole, &cells(&[(0, 0), (0, 1), (1, 1)])).unwrap();
+        for piece in [&corner, &ell] {
+            piece.validate().expect("manifold");
+            assert_watertight(&tessellate(piece, 6).to_mesh());
+        }
+        let vol = |s: &Solid| signed_volume(&tessellate(s, 6).to_mesh());
+        let (whole_v, sum) = (vol(&whole), vol(&corner) + vol(&ell));
+        assert!(
+            (sum - whole_v).abs() < 1e-2,
+            "the two pieces must partition the bin, not overlap: {sum} vs {whole_v}"
+        );
+    }
+
+    #[test]
     fn sloped_bin_is_watertight_and_outward() {
         for dir in [SlopeDir::PlusX, SlopeDir::MinusX, SlopeDir::PlusY, SlopeDir::MinusY] {
             let mut p = gridfinity::Params::default();

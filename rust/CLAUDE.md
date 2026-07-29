@@ -270,28 +270,27 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   classification (`Cut::side_of`, where `On` means *on the cut surface*, not on one plane),
   crossings (`Cut::crossings`, tagging each parameter with the plane it crosses), and cap grouping
   (caps are emitted per plane).
-  **Only the one-plane case works.** A multi-plane `Cut` fails in `close_chains` with "no
-  closed-form section curve for a face the cut crosses", because a connector advancing along plane
-  A must stop at the vertical edge where A meets plane B and continue there, and `close_chains`
-  only ever connects a chain end directly to another chain's start. Adding that — a connector that
-  terminates on a cut-surface edge rather than on a chain — is what a prism trim needs, and it is
-  the *only* thing missing; classification, crossings and per-plane caps are already general.
+  **Multi-plane cuts work.** `Cut::prism(&loops, axis)` sweeps a set of 2D loops into a prism of
+  oriented planes, which is what carving an arbitrary polyomino needs. The piece that used to be
+  missing is a connector that terminates on a *cut-surface edge* rather than on another chain:
+  advancing along plane A must stop where A meets plane B and continue there. `window_exits` finds
+  those stops, `runs_along_cut` recognises a section curve already lying in the cut surface, and
+  `nearest_along_shared_edge` picks the continuation. Classification, crossings and per-plane caps
+  were already general.
   A split is a boolean applied last rather than each piece being authored from its own cell set.
   `build_bin_solid` builds a logical bin once and `carve_to_cells` trims one printable piece out of
   it; every caller pairs them that way and builds each bin **once** — `try_build_pieces` for the
   GUI/STL path, `generate_geometry` for the web app, which carves all of a bin's pieces off the one
   solid rather than rebuilding and re-filleting the bin per piece. `build_piece` is the
   single-piece convenience that composes the two.
-  **`carve_to_cells` trims to the piece's *bounding box*, not its cell set**, so it is exact only
-  when pieces are grid slabs. `layout::partition_cells` (the GUI/STL path) guarantees that — it
-  groups cells by split-line chunk. The web app's `src/lib/cuts.ts` `partitionCells` does **not**:
-  it is a flood fill over severed edges, so a piece can be any connected polyomino and two pieces'
-  bounding boxes can overlap. When they do, the larger piece is carved to a box containing the
-  smaller one and their material is duplicated — measured on a 2x2 bin split into `{(1,0)}` and the
-  L-shaped `{(0,0),(0,1),(1,1)}`, the L came back as the *whole bin* and the two pieces summed to
-  125% of it. Reachable from the editor whenever a bin is concave or has an enclosed hole, since
-  `availableCuts` then yields partial runs (auto-cuts bisect KD-style and stay safe). The fix is
-  the prism trim above; until it lands this is a known defect, not a rounding tolerance. `trim_to` first classifies the solid's vertices, so a split line that
+  **`carve_to_cells` trims to the piece's *cell set*, not its bounding box.** It traces the cells
+  into boundary loops and trims to that prism, so a piece may be any connected polyomino. Carving
+  to a bounding box was exact only for grid slabs: `layout::partition_cells` (the GUI/STL path)
+  guarantees those, but the web app's `src/lib/cuts.ts` `partitionCells` is a flood fill over
+  severed edges, so two pieces' boxes could overlap and their material was duplicated — a 2x2 bin
+  split into `{(1,0)}` and the L-shaped `{(0,0),(0,1),(1,1)}` gave back the L as the *whole bin*,
+  the two pieces summing to 125% of it. `a_staircase_piece_carves_to_its_cells_not_its_bounding_box`
+  pins the partition. `trim` first classifies the solid's vertices, so a cut that
   misses a piece's material is a no-op rather than an error — an L-shaped bin needs that.
   Seam walls are *not* special-cased any more: the whole bin is built with its dividers and then
   cut, so a divider at a seam becomes a wall in both pieces and a plain seam cuts open, which is

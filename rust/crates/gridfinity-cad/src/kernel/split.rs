@@ -158,6 +158,256 @@ struct Chain {
     end: Vec3,
 }
 
+/// The cut surface: one or more oriented planes whose kept side is the negative
+/// side of each `discard_normal`. A half-space is the one-plane case; a
+/// rectilinear prism is the many-plane case, where a point is discarded only
+/// when it is on the discard side of the plane whose window contains it.
+pub struct Cut {
+    planes: Vec<CutPlane>,
+    region: Option<Prism>,
+}
+
+struct CutPlane {
+    surface: Surface,
+    origin: Vec3,
+    discard_normal: Vec3,
+    /// The extent of this plane that is actually part of the cut surface. `None`
+    /// is an unbounded window, which is what makes a half-space a plain plane.
+    span: Option<(Vec3, Vec3)>,
+}
+
+/// A vertical prism over a 2D region, traced material-on-the-left.
+struct Prism {
+    loops: Vec<Vec<(f32, f32)>>,
+    axis: Vec3,
+}
+
+impl CutPlane {
+    /// Whether a point lies on this plane *and* within its window.
+    fn holds(&self, p: Vec3) -> bool {
+        if side_of(&self.surface, p) != Side::On {
+            return false;
+        }
+        let Some((a, b)) = self.span else {
+            return true;
+        };
+        let along = b - a;
+        let len2 = along.length_squared();
+        if len2 < 1e-12 {
+            return false;
+        }
+        let t = (p - a).dot(along) / len2;
+        let slack = ON_PLANE / len2.sqrt();
+        t >= -slack && t <= 1.0 + slack
+    }
+}
+
+impl Cut {
+    pub fn half_space(plane: &Surface, keep: Side) -> Result<Cut, String> {
+        let Surface::Plane { origin, normal, .. } = *plane else {
+            return Err("half-space trim needs a planar cut".into());
+        };
+        let discard_normal = match keep {
+            Side::Negative => normal,
+            Side::Positive => -normal,
+            Side::On => return Err("cannot keep only the material on the plane".into()),
+        };
+        Ok(Cut {
+            planes: vec![CutPlane { surface: *plane, origin, discard_normal, span: None }],
+            region: None,
+        })
+    }
+
+    /// Keep the material inside a vertical prism over `loops`, each traced with
+    /// the kept region on its left (outers CCW, holes CW).
+    pub fn prism(loops: &[Vec<(f32, f32)>], axis: Vec3) -> Result<Cut, String> {
+        let mut planes = Vec::new();
+        for lp in loops {
+            if lp.len() < 3 {
+                return Err("a prism loop needs at least three points".into());
+            }
+            let (u, v) = axis_frame(axis);
+            for i in 0..lp.len() {
+                let (x0, y0) = lp[i];
+                let (x1, y1) = lp[(i + 1) % lp.len()];
+                let a = u * x0 + v * y0;
+                let b = u * x1 + v * y1;
+                let along = b - a;
+                if along.length() < ON_PLANE {
+                    continue;
+                }
+                let outward = along.normalize().cross(axis);
+                planes.push(CutPlane {
+                    surface: Surface::plane(a, outward),
+                    origin: a,
+                    discard_normal: outward,
+                    span: Some((a, b)),
+                });
+            }
+        }
+        if planes.is_empty() {
+            return Err("a prism cut needs at least one boundary segment".into());
+        }
+        Ok(Cut { planes, region: Some(Prism { loops: loops.to_vec(), axis }) })
+    }
+
+    pub fn side_of_point(&self, p: Vec3) -> Side {
+        self.side_of(p)
+    }
+
+    fn side_of(&self, p: Vec3) -> Side {
+        if self.planes.iter().any(|cp| cp.holds(p)) {
+            return Side::On;
+        }
+        match &self.region {
+            Some(prism) => {
+                if prism.contains(p) {
+                    Side::Positive
+                } else {
+                    Side::Negative
+                }
+            }
+            None => {
+                for cp in &self.planes {
+                    let s = side_of(&cp.surface, p);
+                    let discarded = (s == Side::Positive)
+                        == (cp.discard_normal.dot(plane_normal(&cp.surface)) > 0.0);
+                    if discarded {
+                        return Side::Negative;
+                    }
+                }
+                Side::Positive
+            }
+        }
+    }
+
+    /// Parameters at which an edge crosses the cut surface, each tagged with the
+    /// plane it crosses.
+    fn crossings(&self, curve: &Curve, t0: f32, t1: f32) -> Vec<(f32, usize)> {
+        let mut out: Vec<(f32, usize)> = Vec::new();
+        for (i, cp) in self.planes.iter().enumerate() {
+            for t in curve_plane_params(curve, t0, t1, &cp.surface) {
+                if self.side_of(curve.point(t)) == Side::On {
+                    out.push((t, i));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every plane a point on the cut surface lies on. More than one means the
+    /// point sits on an edge of the cut surface, where one plane's window ends
+    /// and the next begins.
+    fn planes_at(&self, p: Vec3) -> Vec<usize> {
+        (0..self.planes.len()).filter(|&i| self.planes[i].holds(p)).collect()
+    }
+}
+
+impl Prism {
+    /// Even-odd containment, with the region's loops projected off the axis.
+    fn contains(&self, p: Vec3) -> bool {
+        let (u, v) = axis_frame(self.axis);
+        let q = (p.dot(u), p.dot(v));
+        let mut inside = false;
+        for lp in &self.loops {
+            for i in 0..lp.len() {
+                let (x0, y0) = lp[i];
+                let (x1, y1) = lp[(i + 1) % lp.len()];
+                if (y0 > q.1) != (y1 > q.1) {
+                    let x = x0 + (q.1 - y0) / (y1 - y0) * (x1 - x0);
+                    if x > q.0 {
+                        inside = !inside;
+                    }
+                }
+            }
+        }
+        inside
+    }
+}
+
+fn axis_frame(axis: Vec3) -> (Vec3, Vec3) {
+    let a = if axis.dot(Vec3::Z).abs() > 0.9 { (Vec3::X, Vec3::Y) } else { (Vec3::Y, Vec3::Z) };
+    a
+}
+
+/// Section curves of a face that pass through a point on the cut surface.
+fn section_curves_through(surface: &Surface, plane: &Surface, from: Vec3) -> Vec<Curve> {
+    match intersect_surfaces(surface, plane) {
+        Intersection::Curves(cs) => cs
+            .into_iter()
+            .filter(|c| (c.point(param_of(c, from)) - from).length() < 1e-2)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Directed advance from `from` to `to` along `curve` travelling towards `dir`.
+fn advance_to(curve: &Curve, t_from: f32, t_to: f32, sign: f32) -> Option<f32> {
+    let mut delta = (t_to - t_from) * sign;
+    if matches!(curve, Curve::Line { .. }) {
+        return (delta > ON_PLANE).then_some(delta);
+    }
+    while delta <= ON_PLANE {
+        delta += std::f32::consts::TAU;
+    }
+    Some(delta)
+}
+
+fn travel_sign(curve: &Curve, t_from: f32, dir: Vec3) -> Option<f32> {
+    let h = 1e-3;
+    let tangent = curve.point(t_from + h) - curve.point(t_from - h);
+    if tangent.length() < 1e-9 {
+        return None;
+    }
+    Some(if tangent.dot(dir) > 0.0 { 1.0 } else { -1.0 })
+}
+
+/// Points ahead along `curve` where the plane being followed hands over to
+/// another plane of the cut — the edges of the cut surface.
+fn window_exits(cut: &Cut, curve: &Curve, from: Vec3, dir: Vec3) -> Vec<(f32, f32, Vec3)> {
+    let t_from = param_of(curve, from);
+    let Some(sign) = travel_sign(curve, t_from, dir) else {
+        return Vec::new();
+    };
+    let (lo, hi) = match curve {
+        Curve::Line { .. } => (t_from - 1e6, t_from + 1e6),
+        _ => (t_from - std::f32::consts::TAU, t_from + std::f32::consts::TAU),
+    };
+    let mut out = Vec::new();
+    for cp in &cut.planes {
+        for t in curve_plane_params(curve, lo, hi, &cp.surface) {
+            let p = curve.point(t);
+            if cut.side_of(p) != Side::On {
+                continue;
+            }
+            if let Some(advance) = advance_to(curve, t_from, t, sign) {
+                out.push((advance, advance * sign, p));
+            }
+        }
+    }
+    out
+}
+
+/// A connector may only run along the cut surface, never across material the
+/// cut removes.
+fn runs_along_cut(cut: &Cut, curve: &Curve, from: Vec3, signed: f32) -> bool {
+    let t0 = param_of(curve, from);
+    for k in 1..4 {
+        let t = t0 + signed * (k as f32 / 4.0);
+        if cut.side_of(curve.point(t)) != Side::On {
+            return false;
+        }
+    }
+    true
+}
+
+fn plane_normal(surface: &Surface) -> Vec3 {
+    match *surface {
+        Surface::Plane { normal, .. } => normal,
+        _ => Vec3::ZERO,
+    }
+}
+
 fn winding_normal(surface: &Surface, sense: bool, p: Vec3) -> Vec3 {
     let n = surface.normal(surface.project(p));
     if sense { n } else { -n }
@@ -167,14 +417,16 @@ fn trim_loop(
     b: &mut Builder,
     solid: &Solid,
     lp: &[(EdgeId, bool)],
-    plane: &Surface,
-    discard: Side,
+    cut: &Cut,
 ) -> Result<Option<Vec<Chain>>, String> {
     let mut pieces: Vec<(Vec3, Vec3, Curve, f32, f32, bool)> = Vec::new();
     for &(e, fwd) in lp {
         let ed = solid.edges[e];
         let (ta, tb) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
-        let mut cuts = curve_plane_params(&ed.curve, ed.t0, ed.t1, plane);
+        let mut cuts: Vec<f32> =
+            cut.crossings(&ed.curve, ed.t0, ed.t1).into_iter().map(|(t, _)| t).collect();
+        cuts.sort_by(f32::total_cmp);
+        cuts.dedup_by(|x, y| (*x - *y).abs() < ON_PLANE);
         cuts.sort_by(|x, y| {
             let dx = (x - ta).abs();
             let dy = (y - ta).abs();
@@ -200,7 +452,7 @@ fn trim_loop(
                 continue;
             }
             let mid = ed.curve.point((u0 + u1) * 0.5);
-            let keep = side_of(plane, mid) != discard;
+            let keep = cut.side_of(mid) != Side::Negative;
             pieces.push((point_at(i), point_at(i + 1), ed.curve, u0, u1, keep));
         }
     }
@@ -275,43 +527,68 @@ fn close_chains(
     b: &mut Builder,
     surface: &Surface,
     sense: bool,
-    plane: &Surface,
-    discard_normal: Vec3,
+    cut: &Cut,
     mut chains: Vec<Chain>,
-    connectors: &mut Vec<(EdgeId, bool)>,
+    connectors: &mut Vec<(EdgeId, bool, usize)>,
 ) -> Result<Vec<Vec<(EdgeId, bool)>>, String> {
     let mut loops: Vec<Vec<(EdgeId, bool)>> = Vec::new();
     while let Some(mut chain) = chains.pop() {
+        let mut hops = 0;
         loop {
-            let normal = winding_normal(surface, sense, chain.end);
-            let dir = normal.cross(discard_normal);
-            if dir.length() < ON_PLANE {
-                return Err("cut is tangent to a face; no connector direction".into());
+            hops += 1;
+            if hops > MAX_CONNECTOR_HOPS {
+                return Err("a connector failed to close along the cut surface".into());
             }
-            let dir = dir.normalize();
+            let at = cut.planes_at(chain.end);
+            if at.is_empty() {
+                return Err("a trimmed chain ends off the cut surface".into());
+            }
 
-            let mut best: Option<(Option<usize>, f32, Curve, f32)> = None;
-            let consider = |target: Vec3,
-                            idx: Option<usize>,
-                            best: &mut Option<(Option<usize>, f32, Curve, f32)>| {
-                if let Some(curve) = connector_curve(surface, plane, chain.end, target)
-                    && let Some((advance, signed)) = advance_along(&curve, chain.end, target, dir)
-                    && best.as_ref().is_none_or(|(_, d, _, _)| advance < *d)
-                {
-                    *best = Some((idx, advance, curve, signed));
+            let mut best: Option<Connector> = None;
+            let consider = |c: Connector, best: &mut Option<Connector>| {
+                if best.as_ref().is_none_or(|prev| c.advance < prev.advance) {
+                    *best = Some(c);
                 }
             };
-            consider(chain.start, None, &mut best);
-            for i in 0..chains.len() {
-                consider(chains[i].start, Some(i), &mut best);
+            for pi in at {
+                let normal = winding_normal(surface, sense, chain.end);
+                let dir = normal.cross(cut.planes[pi].discard_normal);
+                if dir.length() < ON_PLANE {
+                    continue;
+                }
+                let dir = dir.normalize();
+                for curve in section_curves_through(surface, &cut.planes[pi].surface, chain.end) {
+                    let targets = std::iter::once((None, chain.start))
+                        .chain(chains.iter().enumerate().map(|(i, c)| (Some(i), c.start)));
+                    for (idx, target) in targets {
+                        if let Some((advance, signed)) =
+                            advance_along(&curve, chain.end, target, dir)
+                            && runs_along_cut(cut, &curve, chain.end, signed)
+                        {
+                            consider(
+                                Connector { stop: Stop::Chain(idx), advance, curve, signed, plane: pi },
+                                &mut best,
+                            );
+                        }
+                    }
+                    for (advance, signed, point) in window_exits(cut, &curve, chain.end, dir) {
+                        if runs_along_cut(cut, &curve, chain.end, signed) {
+                            consider(
+                                Connector { stop: Stop::Edge(point), advance, curve, signed, plane: pi },
+                                &mut best,
+                            );
+                        }
+                    }
+                }
             }
 
-            let Some((idx, _, curve, signed)) = best else {
+            let Some(Connector { stop, curve, signed, plane: pi, .. }) = best else {
                 return Err("no closed-form section curve for a face the cut crosses".into());
             };
-            let target = match idx {
-                None => chain.start,
-                Some(i) => chains[i].start,
+            let target = match stop {
+                Stop::Edge(p) => p,
+                Stop::Chain(None) => chain.start,
+                Stop::Chain(Some(i)) => chains[i].start,
             };
             let vs = b.vertex(chain.end);
             let ve = b.vertex(target);
@@ -319,14 +596,20 @@ fn close_chains(
                 let t0 = param_of(&curve, chain.end);
                 let edge = emit_edge(b, vs, ve, curve, t0, t0 + signed);
                 chain.edges.push(edge);
-                connectors.push(edge);
+                connectors.push((edge.0, edge.1, pi));
             }
-            match idx {
-                None => {
+            match stop {
+                Stop::Edge(p) => {
+                    if vs == ve {
+                        return Err("a connector stalled on a cut-surface edge".into());
+                    }
+                    chain.end = p;
+                }
+                Stop::Chain(None) => {
                     chain.end = chain.start;
                     break;
                 }
-                Some(i) => {
+                Stop::Chain(Some(i)) => {
                     let next = chains.remove(i);
                     chain.edges.extend(next.edges);
                     chain.end = next.end;
@@ -338,19 +621,30 @@ fn close_chains(
     Ok(loops)
 }
 
-pub fn trim_half_space(solid: &Solid, plane: &Surface, keep: Side) -> Result<Solid, String> {
-    let discard = match keep {
-        Side::Negative => Side::Positive,
-        Side::Positive => Side::Negative,
-        Side::On => return Err("cannot keep only the material on the plane".into()),
-    };
-    let Surface::Plane { origin, normal, .. } = *plane else {
-        return Err("half-space trim needs a planar cut".into());
-    };
-    let discard_normal = if discard == Side::Positive { normal } else { -normal };
+const MAX_CONNECTOR_HOPS: usize = 256;
 
+enum Stop {
+    /// The connector reaches the start of a trimmed chain and the loop continues there.
+    Chain(Option<usize>),
+    /// The plane's window ends here; the connector continues on the next plane.
+    Edge(Vec3),
+}
+
+struct Connector {
+    stop: Stop,
+    advance: f32,
+    curve: Curve,
+    signed: f32,
+    plane: usize,
+}
+
+pub fn trim_half_space(solid: &Solid, plane: &Surface, keep: Side) -> Result<Solid, String> {
+    trim(solid, &Cut::half_space(plane, keep)?)
+}
+
+pub fn trim(solid: &Solid, cut: &Cut) -> Result<Solid, String> {
     let mut b = Builder::new();
-    let mut connectors: Vec<(EdgeId, bool)> = Vec::new();
+    let mut connectors: Vec<(EdgeId, bool, usize)> = Vec::new();
 
     for fid in 0..solid.faces.len() {
         let face = solid.faces[fid].clone();
@@ -358,7 +652,7 @@ pub fn trim_half_space(solid: &Solid, plane: &Surface, keep: Side) -> Result<Sol
         let mut cut_chains: Vec<Chain> = Vec::new();
         let mut dropped_any = false;
         for lp in solid.face_loops(fid) {
-            match trim_loop(&mut b, solid, lp, plane, discard)? {
+            match trim_loop(&mut b, solid, lp, cut)? {
                 None => intact.push(rebuild_loop(&mut b, solid, lp)),
                 Some(chains) if chains.is_empty() => dropped_any = true,
                 Some(chains) => cut_chains.extend(chains),
@@ -376,15 +670,8 @@ pub fn trim_half_space(solid: &Solid, plane: &Surface, keep: Side) -> Result<Sol
             b.face_from(face.surface, face.sense, &outer, &inners);
             continue;
         }
-        let closed = close_chains(
-            &mut b,
-            &face.surface,
-            face.sense,
-            plane,
-            discard_normal,
-            cut_chains,
-            &mut connectors,
-        )?;
+        let closed =
+            close_chains(&mut b, &face.surface, face.sense, cut, cut_chains, &mut connectors)?;
         let mut all = closed;
         all.extend(intact);
         let outer = all.remove(0);
@@ -395,10 +682,56 @@ pub fn trim_half_space(solid: &Solid, plane: &Surface, keep: Side) -> Result<Sol
     if connectors.is_empty() {
         return Err("the cut plane misses the solid entirely".into());
     }
-    emit_caps(&mut b, &connectors, origin, discard_normal)?;
+    for (i, cp) in cut.planes.iter().enumerate() {
+        let on_plane: Vec<(EdgeId, bool)> = connectors
+            .iter()
+            .filter(|&&(_, _, pi)| pi == i)
+            .map(|&(e, fwd, _)| (e, fwd))
+            .collect();
+        if on_plane.is_empty() {
+            continue;
+        }
+        emit_caps(&mut b, &on_plane, cp.origin, cp.discard_normal, cut, i)?;
+    }
     let solid = b.build();
     solid.validate().map_err(|e| format!("split: {e}"))?;
     Ok(solid)
+}
+
+/// Where a cap loop continues when it runs off this plane's window: along the
+/// edge shared with a neighbouring plane, to the nearest point on that edge that
+/// is either another cap piece's start (`Some(index)`) or the loop's own head
+/// (`None`). `None` overall means no such edge, which is a malformed cut.
+fn nearest_along_shared_edge(
+    b: &Builder,
+    cut: &Cut,
+    plane: usize,
+    tail: VertexId,
+    head: VertexId,
+    remaining: &[(EdgeId, bool)],
+) -> Option<Option<usize>> {
+    let tp = b.point(tail);
+    let shared: Vec<usize> = cut.planes_at(tp).into_iter().filter(|&j| j != plane).collect();
+    if shared.is_empty() {
+        return None;
+    }
+    let on_shared = |p: Vec3| {
+        (p - tp).length() > ON_PLANE && shared.iter().any(|&j| cut.planes[j].holds(p))
+    };
+    let mut best: Option<(Option<usize>, f32)> = None;
+    let mut consider = |idx: Option<usize>, p: Vec3| {
+        if on_shared(p) {
+            let d = (p - tp).length();
+            if best.is_none_or(|(_, bd)| d < bd) {
+                best = Some((idx, d));
+            }
+        }
+    };
+    consider(None, b.point(head));
+    for (i, &d) in remaining.iter().enumerate() {
+        consider(Some(i), b.point(b.directed_ends(d).0));
+    }
+    best.map(|(idx, _)| idx)
 }
 
 fn rebuild_loop(b: &mut Builder, solid: &Solid, lp: &[(EdgeId, bool)]) -> Vec<(EdgeId, bool)> {
@@ -419,6 +752,8 @@ fn emit_caps(
     connectors: &[(EdgeId, bool)],
     origin: Vec3,
     outward: Vec3,
+    cut: &Cut,
+    plane: usize,
 ) -> Result<(), String> {
     let mut remaining: Vec<(EdgeId, bool)> =
         connectors.iter().map(|&(e, fwd)| (e, !fwd)).collect();
@@ -431,10 +766,22 @@ fn emit_caps(
             if tail == head {
                 break;
             }
-            let Some(k) = remaining.iter().position(|&d| b.directed_ends(d).0 == tail) else {
-                return Err("cut section does not close into a loop".into());
-            };
-            lp.push(remaining.remove(k));
+            if let Some(k) = remaining.iter().position(|&d| b.directed_ends(d).0 == tail) {
+                lp.push(remaining.remove(k));
+                continue;
+            }
+            // The cap runs off this plane's window. It continues along the edge
+            // the window shares with the neighbouring plane, which is interior
+            // to the solid, so no face section produced it -- synthesise it.
+            match nearest_along_shared_edge(b, cut, plane, tail, head, &remaining) {
+                Some(Some(k)) => {
+                    let start = b.directed_ends(remaining[k]).0;
+                    lp.push(b.line(tail, start));
+                    lp.push(remaining.remove(k));
+                }
+                Some(None) => lp.push(b.line(tail, head)),
+                None => return Err("cut section does not close into a loop".into()),
+            }
         }
         loops.push(lp);
     }
@@ -626,6 +973,30 @@ mod tests {
             let r = dir.get(&(b, a)).copied().unwrap_or(0);
             assert_eq!(f, r, "edge ({a},{b}) unpaired: {f} vs {r}");
         }
+    }
+
+    #[test]
+    fn a_prism_cut_keeps_the_material_inside_a_convex_window() {
+        let solid = extrude(&Sketch::rectangle(0.0, 0.0, 12.0, 12.0), 0.0, 5.0);
+        let strip = vec![vec![(-2.0, -9.0), (2.0, -9.0), (2.0, 9.0), (-2.0, 9.0)]];
+        let cut = Cut::prism(&strip, Vec3::Z).unwrap();
+        let kept = trim(&solid, &cut).unwrap();
+        kept.validate().expect("manifold");
+        assert_mesh_closed(&kept);
+        assert!((volume(&kept) - 240.0).abs() < 1e-2, "{}", volume(&kept));
+    }
+
+    #[test]
+    fn a_prism_cut_turns_the_corner_at_a_reentrant_window_edge() {
+        let solid = extrude(&Sketch::rectangle(0.0, 0.0, 12.0, 12.0), 0.0, 5.0);
+        let l = vec![vec![
+            (-9.0, -9.0), (0.0, -9.0), (0.0, 0.0), (9.0, 0.0), (9.0, 9.0), (-9.0, 9.0),
+        ]];
+        let cut = Cut::prism(&l, Vec3::Z).unwrap();
+        let kept = trim(&solid, &cut).unwrap();
+        kept.validate().expect("manifold");
+        assert_mesh_closed(&kept);
+        assert!((volume(&kept) - 540.0).abs() < 1e-2, "{}", volume(&kept));
     }
 
     #[test]

@@ -2,10 +2,10 @@
 use crate::kernel::build::{loop_of, ring, wall_between};
 use crate::kernel::geom::Surface;
 use crate::layout::{
-    EdgeClass, EffectiveWalls, GridCell, GridEdge, GridFootprint, Orientation, SplitLine,
+    EdgeClass, EffectiveWalls, GridCell, GridEdge, Orientation, SplitLine,
     cell_edges, classify_edge_in, effective_walls, partition_cells,
 };
-use crate::kernel::split::{Side, side_of, trim_half_space};
+use crate::kernel::split::{Cut, Side, trim};
 use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
 use crate::kernel::region2d::{chain_loops, loops_within, region_difference, split_regions};
@@ -262,47 +262,55 @@ pub fn build_piece(
     piece_cells: &[GridCell],
     slope: Option<BinSlope>,
 ) -> Result<Solid, String> {
-    let walls = effective_walls(bin_cells, bin_cells, &p.open_edges, &p.divider_edges);
-    let mut prog = Program::default();
-    plan_piece(p, bin_cells, bin_cells, walls, slope, "piece", &mut prog);
-    let whole = run_all(&prog)?;
+    let whole = build_bin_solid(p, bin_cells, slope)?;
     carve_to_cells(&whole, piece_cells)
 }
 
-fn carve_to_cells(whole: &Solid, piece_cells: &[GridCell]) -> Result<Solid, String> {
-    let Some(f) = GridFootprint::from_cells(piece_cells) else {
-        return Ok(whole.clone());
-    };
-    let mut solid = whole.clone();
-    for (lo, hi, axis) in [
-        (f.min_x, f.min_x + f.width_cells, Vec3::X),
-        (f.min_y, f.min_y + f.depth_cells, Vec3::Y),
-    ] {
-        let at_lo = lo as f32 * GRID_PITCH;
-        solid = trim_to(&solid, &Surface::plane(axis * at_lo, axis), Side::Positive)?;
-        let at_hi = hi as f32 * GRID_PITCH;
-        solid = trim_to(&solid, &Surface::plane(axis * at_hi, axis), Side::Negative)?;
-    }
-    Ok(solid)
+pub fn build_bin_solid(
+    p: &Params,
+    bin_cells: &[GridCell],
+    slope: Option<BinSlope>,
+) -> Result<Solid, String> {
+    let walls = effective_walls(bin_cells, bin_cells, &p.open_edges, &p.divider_edges);
+    let mut prog = Program::default();
+    plan_piece(p, bin_cells, bin_cells, walls, slope, "piece", &mut prog);
+    run_all(&prog)
 }
 
-fn trim_to(solid: &Solid, plane: &Surface, keep: Side) -> Result<Solid, String> {
-    let mut straddles = false;
-    let mut any_kept = false;
-    for v in &solid.verts {
-        match side_of(plane, v.point) {
-            Side::On => {}
-            s if s == keep => any_kept = true,
-            _ => straddles = true,
-        }
+/// Cut one printable piece out of the finished bin: keep the material inside the
+/// vertical prism over the piece's cells. A piece is any connected polyomino, not
+/// necessarily a grid slab, so this must follow the cell set itself -- trimming to
+/// the piece's bounding box duplicates material wherever one piece's box covers
+/// another piece's cells.
+pub fn carve_to_cells(whole: &Solid, piece_cells: &[GridCell]) -> Result<Solid, String> {
+    if piece_cells.is_empty() {
+        return Ok(whole.clone());
     }
-    if !straddles {
-        return Ok(solid.clone());
+    let rects: Vec<RectF> = piece_cells
+        .iter()
+        .map(|c| {
+            RectF::new(c.x as f32 * GRID_PITCH, c.y as f32 * GRID_PITCH, GRID_PITCH, GRID_PITCH)
+        })
+        .collect();
+    let loops: Vec<Vec<(f32, f32)>> = trace_rects(&rects, &[])
+        .iter()
+        .map(|lp| lp.pts.iter().map(|p| (p.x, p.y)).collect())
+        .collect();
+    if loops.is_empty() {
+        return Err("a piece traced no boundary".into());
     }
-    if !any_kept {
-        return Err("a split line leaves one piece with no material".into());
+    let cut = Cut::prism(&loops, Vec3::Z)?;
+    if !straddles(whole, &cut) {
+        return Ok(whole.clone());
     }
-    trim_half_space(solid, plane, keep)
+    trim(whole, &cut)
+}
+
+/// Whether the cut actually divides this solid. A piece whose prism covers the
+/// whole bin needs no cut, and a split line that misses a piece's material is a
+/// no-op rather than an error -- an L-shaped bin needs that.
+fn straddles(solid: &Solid, cut: &Cut) -> bool {
+    solid.verts.iter().any(|v| cut.side_of_point(v.point) == Side::Negative)
 }
 
 pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
@@ -327,10 +335,7 @@ pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
         } else {
             format!("gridfinity-bin-{}", ord + 1)
         };
-        let walls = effective_walls(&bin.cells, &bin.cells, &p.open_edges, &p.divider_edges);
-        let mut prog = Program::default();
-        plan_piece(p, &bin.cells, &bin.cells, walls, bin.slope, "piece", &mut prog);
-        let whole = run_all(&prog)?;
+        let whole = build_bin_solid(p, &bin.cells, bin.slope)?;
         for (i, part) in parts.iter().enumerate() {
             let solid = carve_to_cells(&whole, &part.cells)?;
             let name = if parts.len() == 1 {
