@@ -877,6 +877,26 @@ mod tests {
     }
 
     #[test]
+    fn a_full_height_island_in_a_banded_cavity_gets_one_top_face_not_two() {
+        let p = gridfinity::Params {
+            bins: vec![LogicalBin { cells: cells(&[(0, 0), (0, 1)]), ..Default::default() }],
+            inner_walls: vec![
+                gridfinity::InnerWall {
+                    x1: 20.0, y1: 2.0, x2: 10.0, y2: 60.0, width: 2.0, height: None,
+                },
+                gridfinity::InnerWall {
+                    x1: 40.0, y1: 20.0, x2: -40.0, y2: 110.0, width: 2.0, height: Some(10.0),
+                },
+            ],
+            ..gridfinity::Params::default()
+        };
+        let b = &p.bins[0];
+        let solid = gridfinity::build_piece(&p, &b.cells, &b.cells, b.slope).expect("builds");
+        solid.validate().expect("manifold");
+        assert_watertight(&tessellate(&solid, 6).to_mesh());
+    }
+
+    #[test]
     fn sloped_bin_is_watertight_and_outward() {
         for dir in [SlopeDir::PlusX, SlopeDir::MinusX, SlopeDir::PlusY, SlopeDir::MinusY] {
             let mut p = gridfinity::Params::default();

@@ -2010,16 +2010,13 @@ fn plan_cavity_banded(
     }
     let opts = SlabOpts { cavity: true, open_at: vec![total_h] };
 
-    let rim = plan_bands(&stack)
+    let top_band = plan_bands(&stack)
         .map(|(_, bands)| bands.last().cloned().unwrap_or_default())
         .unwrap_or_default();
-
-    let mut tops = Vec::new();
-    for isl in islands {
-        if isl.top.is_none() {
-            tops.push(reverse_loop(&isl.segs));
-        }
-    }
+    let rim: Vec<Vec<Seg>> =
+        top_band.iter().filter(|l| loop_area(l) > 0.0).cloned().collect();
+    let tops: Vec<Vec<Seg>> =
+        top_band.iter().filter(|l| loop_area(l) < 0.0).cloned().collect();
 
     let mut blends: Vec<(Seg, f32, f32)> = Vec::new();
     for n in &bd.notches {
