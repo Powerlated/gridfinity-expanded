@@ -63,13 +63,62 @@ cargo build --release
 # deliberate pre-PR run, not the every-change one (see AGENTS.md, Validation).
 FUZZ_CASES=2000 cargo test -p gridfinity-cad --test fuzz -- --nocapture
 FUZZ_SEED=7 FUZZ_CASES=500 cargo test -p gridfinity-cad --test fuzz -- --nocapture
+# One fuzzer alone (they print interleaved otherwise, since test threads run in parallel):
+cargo test --release -p gridfinity-cad --test fuzz fuzz_bin_shapes -- --exact --nocapture
 ```
 
 `fuzz_inner_walls` covers free-form inner walls (the divider/fillet work); `fuzz_params_broad`
-covers shape, height, thicknesses, holes, dividers, slope and mode. `fuzz_inner_walls` is at
-**27/150 failing, 5 distinct defects** at the default seed and is **currently red**, as is
-`gridfinity-wasm`'s `opening_on_a_hole_boundary_stays_closed`. Those two are the whole of the
-workspace's known-failing surface; everything else is green. Run the suite with `--no-fail-fast`,
+covers shape, height, thicknesses, holes, dividers, slope and mode; `fuzz_bin_shapes` covers the
+**split path** — random connected polyominoes, partitioned the way the web app partitions them, then
+carved piece by piece. `fuzz_inner_walls` is at **30/150 failing, 6 distinct defects** at the
+default seed and is **currently red**, as is `gridfinity-wasm`'s
+`opening_on_a_hole_boundary_stays_closed`. Those two are the whole of the workspace's known-failing
+surface; everything else, `fuzz_bin_shapes` included, is green. `fuzz_params_broad` reports rather
+than asserts, and is at 65/400 / 13 defects.
+
+`fuzz_bin_shapes` went **47/120 → 0/120** (clean at eight seeds, and 1/1500 at `FUZZ_CASES=1500`)
+across the four defects below. Fixing them moved `fuzz_inner_walls` 27 → 30/150 with **no new defect
+class**: the corner clamp changes every bin's cavity slightly (rc 2.5 → 2.55 at the default wall),
+so the same six defects catch a few more random wall placements. What `fuzz_bin_shapes` found:
+
+- **A cut can split one face into disjoint regions**, and `trim` read the second as a hole of the
+  first — a self-intersecting face that tessellates with leaks. Carving the middle cell of a strip
+  leaves the rim as two separate strips; carving a corner leaves the fillet as two arcs. See
+  `emit_trimmed_faces` under `split.rs`.
+- **The cavity escaped the wall at a rounded corner** whenever `cavity_corner_radius <
+  OUTER_R - wall_thickness`, panicking the rim planner outright below ~1.1 mm of wall. See the
+  corner clamp under `gridfinity.rs`.
+- **The reentrant-corner fillet overhangs the grid** and every piece shaved it off, losing ~54 mm^3
+  per corner. See `carve_to_cells`.
+- **A piece enclosed on all four sides is refused**, not mangled — the one case still unsupported.
+
+Two rarer defects survive at 1500 cases (~0.07%, both in `trim`): a 4-leak tessellation failure on a
+cut plane, and `no closed-form section curve for a face the cut crosses`. Neither is diagnosed.
+
+**`fuzz_bin_shapes` targets `carve_to_cells`, not the model.** It grows a random connected
+polyomino, severs a random subset of its internal adjacencies and flood-fills the remainder — the
+same construction as `src/lib/cuts.ts`'s `partitionCells`, so pieces are arbitrary connected
+polyominoes and not the grid slabs `layout::partition_cells` produces. It builds the bin **once**
+via `build_bin_solid`, checks that whole solid first (failures are prefixed `whole `, so a
+pre-existing model defect never reads as a split defect), then carves each piece and checks it
+(prefixed `piece N `). Its sharpest invariant is **volume conservation**: the pieces' tessellated
+volumes must sum to the whole bin's within `VOLUME_DRIFT`. That is the invariant the bounding-box
+carve bug violated at 125%, and it is what caught the reentrant overhang at 0.2%; it sees material
+that per-piece manifoldness checks pass straight over, in either direction.
+
+**Measure a suspected volume loss against tessellation density before believing it.** Every one of
+these numbers is a coarse mesh's estimate. The reentrant-overhang loss was confirmed real by
+converging on -209 mm^3 from segs 4 to 48 while a rectangular split stayed at 0.01 mm^3, and the
+mechanism was then pinned by correlating drift with reentrant-corner count (rect 0, L 1x -54,
+T and S 2x -104) and with the parameters (flat in every cavity parameter, linear in height). A
+vertex-only containment check will *not* see the overhang: the fillet's tangent points sit exactly
+on the grid lines and only the arc between them escapes.
+
+**Reported leaks are picked by lexicographic minimum, not `leaks[0]`.** `tessellation_leaks` sorts
+by `(a.z, a.x, a.y)`, and ties among those resolve by `HashMap` iteration order, so `leaks[0]` moved
+between runs and silently reshuffled the defect grouping (`fuzz_params_broad` drifted 12↔13 groups
+run to run). All three fuzzers are now byte-identical across repeated runs at a fixed seed; keep any
+new failure message free of hash-ordered content or the grouping stops meaning anything. Run the suite with `--no-fail-fast`,
 since a failing binary otherwise hides the ones after it, and expect ~80s (the badapple benches
 dominate). A run is deterministic per seed, but adding a generator arm reshuffles the stream,
 so quote the *case literal* in a bug report, never "seed 7 case 412".
@@ -270,6 +319,19 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   classification (`Cut::side_of`, where `On` means *on the cut surface*, not on one plane),
   crossings (`Cut::crossings`, tagging each parameter with the plane it crosses), and cap grouping
   (caps are emitted per plane).
+  **A trimmed face may be several faces.** A cut can break one face into disjoint regions — trimming
+  a bin's rim to its middle cell leaves the strip either side of the cavity with no path between
+  them, and trimming a corner fillet leaves an arc either side of the removed span.
+  `emit_trimmed_faces` groups the surviving loops by winding into outers and the holes each outer
+  contains, the way `emit_caps` already grouped its cap loops; taking the first loop as the outer and
+  the rest as its holes made the second region a *hole of the first*, a self-intersecting face that
+  audits `LoopContainment` and tessellates with leaks. Two things it must get right: the winding test
+  is signed area **times the face's `sense`**, since an inverted face's outer loop measures negative;
+  and on a rotational surface `u` is an angle, so each loop's `u` is **unwrapped** first
+  (`unwrap_u`) — a seam-crossing arc otherwise reads as a near-full-turn band whose signed area is
+  meaningless, which is exactly how two disjoint arcs of a corner fillet measured as +137 and -8.
+  A face whose loops do not classify cleanly falls back to first-loop-is-outer, which is the reading
+  every uncut face already has, so the grouping can only ever improve on it.
   **Multi-plane cuts work.** `Cut::prism(&loops, axis)` sweeps a set of 2D loops into a prism of
   oriented planes, which is what carving an arbitrary polyomino needs. The piece that used to be
   missing is a connector that terminates on a *cut-surface edge* rather than on another chain:
@@ -295,6 +357,25 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   Seam walls are *not* special-cased any more: the whole bin is built with its dividers and then
   cut, so a divider at a seam becomes a wall in both pieces and a plain seam cuts open, which is
   what `split_seam_divider_walls_both_pieces` and `seam_edges_default_open` already asserted.
+  It takes the **bin's** cells as well as the piece's, because the prism is not quite the cell set.
+  A reentrant corner is filleted by `OUTER_R` and that arc **overhangs the grid** into the empty
+  cell in the notch — only its two tangent points sit on the grid lines. Trimming to the bare cell
+  rectangles shaved the bulge off every piece and lost it outright: ~54 mm^3 per reentrant corner,
+  so a split L lost 0.1% and a split rectangle lost nothing. Each cell therefore reaches
+  `REENTRANT_FILLET_OVERHANG` into a neighbouring cell **the bin does not occupy**, and reaches
+  **only along y**. One axis is not a simplification, it is the whole correctness argument: a
+  reentrant corner always has a vertical neighbour among its three occupied cells, so one reach
+  always covers the bulge, while reaching along both axes lets two pieces meet inside the same empty
+  cell and both claim it — measured at *+186* mm^3 over-count on a split T.
+  `carving_a_reentrant_bin_keeps_the_corner_fillet_that_overhangs_the_grid` pins it. A ~7 mm^3
+  residual remains, flat in height so it is in the base, not the walls; it is not diagnosed.
+  **A piece enclosed on all four sides by the rest of the bin is refused up front**
+  (`piece_is_enclosed`). Its cut runs through the *interior* of faces without ever crossing their
+  loops, and `trim_loop` only inspects loop edges, so no chain and no connector is ever produced —
+  the 3x3 centre cell reaches `trim` with 32 vertices inside, 312 outside and **0 connectors**.
+  Supporting it means teaching `trim` to open a new interior section loop in a face, which it cannot
+  do; until then the error says so instead of failing deep in the cap emitter with `cut section does
+  not close into a loop`.
 - **`orient.rs`** — the **orientation invariant**: every loop is *material-consistent*, meaning that
   walking it with the face's true outward normal keeps the face's material on the left (outer loops
   positive, holes negative). `Builder::build` establishes it, so every solid the kernel hands out
@@ -406,6 +487,17 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   concave so the floor-fillet blend stays tangent-continuous). Bins are `42·n − 0.5` mm, the
   `Baseplate` is full `42·n` with a peg-shaped through-socket per cell; concentric magnet+screw
   becomes a stepped counterbore.
+  **The outer cavity loop's convex radius is clamped up to `OUTER_R - wt`.** A convex outer corner
+  is an arc of `OUTER_R` about a centre `HALF_TOL + OUTER_R` in from the pitch corner, so a cavity
+  corner of radius `rc` leaves a wall there of `wt - (OUTER_R - wt - rc)(sqrt(2) - 1)`: below
+  `OUTER_R - wt` the wall thins at the corner, and below `wt ~ 1.1` mm a sharp cavity **escapes the
+  outer arc entirely**, at which point it is no longer inside the rim face it is a hole of and
+  `plan_piece` panicked with `total_h hole without a containing face`. Clamping makes the two arcs
+  concentric, which is what keeps the wall its own thickness the whole way round. It moves the
+  default bin's cavity corner 2.5 → 2.55 mm and takes the corner wall 1.179 → 1.2 mm.
+  `a_thin_walled_bin_keeps_its_cavity_inside_the_rounded_corner` sweeps the pair. **A sloped floor
+  is left square** — it builds its cavity with no rounding at all, and clamping there breaks
+  `sloped_bin_is_watertight_and_outward`, so thin-walled *sloped* bins can still hit the panic.
 
 The compartment cavities are built **sharp**; the concave floor fillet is applied afterwards as a
 true `fillet_edges` rolling-ball blend over each compartment's floor-wall edge loop (skipped when

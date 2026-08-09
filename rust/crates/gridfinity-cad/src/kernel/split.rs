@@ -674,9 +674,7 @@ pub fn trim(solid: &Solid, cut: &Cut) -> Result<Solid, String> {
             close_chains(&mut b, &face.surface, face.sense, cut, cut_chains, &mut connectors)?;
         let mut all = closed;
         all.extend(intact);
-        let outer = all.remove(0);
-        let inners: Vec<&[(EdgeId, bool)]> = all.iter().map(|l| l.as_slice()).collect();
-        b.face_from(face.surface, face.sense, &outer, &inners);
+        emit_trimmed_faces(&mut b, face.surface, face.sense, &all)?;
     }
 
     if connectors.is_empty() {
@@ -747,6 +745,126 @@ fn rebuild_loop(b: &mut Builder, solid: &Solid, lp: &[(EdgeId, bool)]) -> Vec<(E
         .collect()
 }
 
+fn polygon_area(pts: &[(f32, f32)]) -> f32 {
+    let mut a = 0.0;
+    for i in 0..pts.len() {
+        let (x0, y0) = pts[i];
+        let (x1, y1) = pts[(i + 1) % pts.len()];
+        a += x0 * y1 - x1 * y0;
+    }
+    a * 0.5
+}
+
+fn point_inside(pts: &[(f32, f32)], p: (f32, f32)) -> bool {
+    let mut hit = false;
+    for i in 0..pts.len() {
+        let (x0, y0) = pts[i];
+        let (x1, y1) = pts[(i + 1) % pts.len()];
+        if (y0 > p.1) != (y1 > p.1) {
+            let x = x0 + (p.1 - y0) / (y1 - y0) * (x1 - x0);
+            if x > p.0 {
+                hit = !hit;
+            }
+        }
+    }
+    hit
+}
+
+fn unwrap_u(pts: &mut [(f32, f32)]) {
+    use std::f32::consts::{PI, TAU};
+    for i in 1..pts.len() {
+        while pts[i].0 - pts[i - 1].0 > PI {
+            pts[i].0 -= TAU;
+        }
+        while pts[i].0 - pts[i - 1].0 < -PI {
+            pts[i].0 += TAU;
+        }
+    }
+    let min = pts.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+    let shift = (min / TAU).floor() * TAU;
+    if shift != 0.0 {
+        for p in pts.iter_mut() {
+            p.0 -= shift;
+        }
+    }
+}
+
+fn loop_encloses(outer: &[(f32, f32)], inner: &[(f32, f32)], angular: bool) -> bool {
+    let p = inner[0];
+    if point_inside(outer, p) {
+        return true;
+    }
+    if !angular {
+        return false;
+    }
+    let tau = std::f32::consts::TAU;
+    point_inside(outer, (p.0 + tau, p.1)) || point_inside(outer, (p.0 - tau, p.1))
+}
+
+fn emit_trimmed_faces(
+    b: &mut Builder,
+    surface: Surface,
+    sense: bool,
+    loops: &[Vec<(EdgeId, bool)>],
+) -> Result<(), String> {
+    let emit_flat = |b: &mut Builder| {
+        let inners: Vec<&[(EdgeId, bool)]> = loops[1..].iter().map(|l| l.as_slice()).collect();
+        b.face_from(surface, sense, &loops[0], &inners);
+    };
+    if loops.len() < 2 {
+        emit_flat(b);
+        return Ok(());
+    }
+
+    let angular = !matches!(surface, Surface::Plane { .. });
+    let mut polys: Vec<Vec<(f32, f32)>> = loops
+        .iter()
+        .map(|lp| {
+            lp.iter()
+                .map(|&d| {
+                    let uv = surface.project(b.point(b.directed_ends(d).0));
+                    (uv.0, uv.1)
+                })
+                .collect()
+        })
+        .collect();
+    if angular {
+        for poly in &mut polys {
+            unwrap_u(poly);
+        }
+    }
+    let winding = if sense { 1.0 } else { -1.0 };
+    let areas: Vec<f32> = polys.iter().map(|p| polygon_area(p) * winding).collect();
+
+    let mut owner: Vec<Option<usize>> = vec![None; loops.len()];
+    let outers: Vec<usize> = (0..loops.len())
+        .filter(|&i| polys[i].len() >= 3 && areas[i] > 0.0)
+        .collect();
+    if outers.len() < 2 {
+        emit_flat(b);
+        return Ok(());
+    }
+    for j in 0..loops.len() {
+        if areas[j] >= 0.0 || polys[j].is_empty() {
+            continue;
+        }
+        owner[j] = outers.iter().copied().find(|&i| loop_encloses(&polys[i], &polys[j], angular));
+        if owner[j].is_none() {
+            emit_flat(b);
+            return Ok(());
+        }
+    }
+
+    for &i in &outers {
+        let inners: Vec<&[(EdgeId, bool)]> = (0..loops.len())
+            .filter(|&j| owner[j] == Some(i))
+            .map(|j| loops[j].as_slice())
+            .collect();
+        b.face_from(surface, sense, &loops[i], &inners);
+    }
+    Ok(())
+}
+
 fn emit_caps(
     b: &mut Builder,
     connectors: &[(EdgeId, bool)],
@@ -795,32 +913,8 @@ fn emit_caps(
     let poly = |lp: &[(EdgeId, bool)]| -> Vec<(f32, f32)> {
         lp.iter().map(|&d| to_2d(b.point(b.directed_ends(d).0))).collect()
     };
-    let area = |pts: &[(f32, f32)]| -> f32 {
-        let mut a = 0.0;
-        for i in 0..pts.len() {
-            let (x0, y0) = pts[i];
-            let (x1, y1) = pts[(i + 1) % pts.len()];
-            a += x0 * y1 - x1 * y0;
-        }
-        a * 0.5
-    };
-    let inside = |pts: &[(f32, f32)], p: (f32, f32)| -> bool {
-        let mut hit = false;
-        for i in 0..pts.len() {
-            let (x0, y0) = pts[i];
-            let (x1, y1) = pts[(i + 1) % pts.len()];
-            if (y0 > p.1) != (y1 > p.1) {
-                let x = x0 + (p.1 - y0) / (y1 - y0) * (x1 - x0);
-                if x > p.0 {
-                    hit = !hit;
-                }
-            }
-        }
-        hit
-    };
-
     let polys: Vec<Vec<(f32, f32)>> = loops.iter().map(|l| poly(l)).collect();
-    let areas: Vec<f32> = polys.iter().map(|p| area(p)).collect();
+    let areas: Vec<f32> = polys.iter().map(|p| polygon_area(p)).collect();
     let mut used = vec![false; loops.len()];
     for i in 0..loops.len() {
         if areas[i] <= 0.0 {
@@ -828,7 +922,7 @@ fn emit_caps(
         }
         let mut inners: Vec<usize> = Vec::new();
         for j in 0..loops.len() {
-            if i != j && areas[j] < 0.0 && inside(&polys[i], polys[j][0]) {
+            if i != j && areas[j] < 0.0 && point_inside(&polys[i], polys[j][0]) {
                 inners.push(j);
                 used[j] = true;
             }

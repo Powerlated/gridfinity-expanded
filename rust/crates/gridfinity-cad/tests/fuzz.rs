@@ -4,7 +4,7 @@ use gridfinity_cad::gridfinity::{
 };
 use gridfinity_cad::kernel::tess::tessellate;
 use gridfinity_cad::layout::{GridCell, GridEdge, Orientation};
-use gridfinity_cad::{audit, tessellation_leaks};
+use gridfinity_cad::{Solid, audit, tessellation_leaks};
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -129,22 +129,12 @@ fn gen_case(rng: &mut Rng, profile: Profile) -> Params {
 }
 
 
-fn check(p: &Params) -> Result<(), String> {
+const TESS_SEGS: usize = 6;
+
+fn catching(f: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        let solid = gridfinity::try_build(p).map_err(|e| format!("build error: {e}"))?;
-        solid.validate().map_err(|e| format!("validate: {e}"))?;
-        let report = audit(&solid);
-        if !report.is_ok() {
-            return Err(format!("audit: {report}"));
-        }
-        let leaks = tessellation_leaks(&tessellate(&solid, 6));
-        if !leaks.is_empty() {
-            return Err(format!("tessellation: {} leak(s), first {:?}", leaks.len(), leaks[0]));
-        }
-        Ok(())
-    }));
+    let outcome = catch_unwind(AssertUnwindSafe(f));
     std::panic::set_hook(prev);
 
     match outcome {
@@ -158,6 +148,27 @@ fn check(p: &Params) -> Result<(), String> {
             Err(format!("panic: {msg}"))
         }
     }
+}
+
+fn sound(solid: &Solid, what: &str) -> Result<(), String> {
+    solid.validate().map_err(|e| format!("{what}validate: {e}"))?;
+    let report = audit(solid);
+    if !report.is_ok() {
+        return Err(format!("{what}audit: {report}"));
+    }
+    let leaks = tessellation_leaks(&tessellate(solid, TESS_SEGS));
+    if !leaks.is_empty() {
+        let named = leaks.iter().map(|l| format!("{l:?}")).min().unwrap_or_default();
+        return Err(format!("{what}tessellation: {} leak(s), first {named}", leaks.len()));
+    }
+    Ok(())
+}
+
+fn check(p: &Params) -> Result<(), String> {
+    catching(|| {
+        let solid = gridfinity::try_build(p).map_err(|e| format!("build error: {e}"))?;
+        sound(&solid, "")
+    })
 }
 
 fn signature(err: &str) -> String {
@@ -353,6 +364,248 @@ fn run(profile: Profile, cases: u32, seed: u64) -> String {
     out
 }
 
+const ENCLOSED_PIECE: &str = "surrounded on every side";
+const SHAPE_EXTENT: i32 = 4;
+const VOLUME_DRIFT: f64 = 0.002;
+const STEPS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+
+struct ShapeCase {
+    params: Params,
+    pieces: Vec<Vec<GridCell>>,
+}
+
+fn sort_cells(cells: &mut [GridCell]) {
+    cells.sort_by_key(|c| (c.y, c.x));
+}
+
+fn gen_polyomino(rng: &mut Rng, target: usize) -> Vec<GridCell> {
+    let mut cells = vec![GridCell { x: 0, y: 0 }];
+    for _ in 0..target * 12 {
+        if cells.len() >= target {
+            break;
+        }
+        let from = cells[rng.below(cells.len() as u32) as usize];
+        let (dx, dy) = rng.pick(&STEPS);
+        let next = GridCell { x: from.x + dx, y: from.y + dy };
+        let inside = (0..SHAPE_EXTENT).contains(&next.x) && (0..SHAPE_EXTENT).contains(&next.y);
+        if inside && !cells.contains(&next) {
+            cells.push(next);
+        }
+    }
+    sort_cells(&mut cells);
+    cells
+}
+
+fn adjacent_pairs(cells: &[GridCell]) -> Vec<(GridCell, GridCell)> {
+    let mut out = Vec::new();
+    for &c in cells {
+        for (dx, dy) in [(1, 0), (0, 1)] {
+            let n = GridCell { x: c.x + dx, y: c.y + dy };
+            if cells.contains(&n) {
+                out.push((c, n));
+            }
+        }
+    }
+    out
+}
+
+fn flood_parts(cells: &[GridCell], severed: &[(GridCell, GridCell)]) -> Vec<Vec<GridCell>> {
+    let joined = |a: GridCell, b: GridCell| {
+        !severed.iter().any(|&(p, q)| (p == a && q == b) || (p == b && q == a))
+    };
+    let mut unseen = cells.to_vec();
+    let mut parts: Vec<Vec<GridCell>> = Vec::new();
+    while let Some(first) = unseen.pop() {
+        let mut queue = vec![first];
+        let mut part = Vec::new();
+        while let Some(c) = queue.pop() {
+            part.push(c);
+            for (dx, dy) in STEPS {
+                let n = GridCell { x: c.x + dx, y: c.y + dy };
+                if !joined(c, n) {
+                    continue;
+                }
+                if let Some(i) = unseen.iter().position(|&u| u == n) {
+                    unseen.remove(i);
+                    queue.push(n);
+                }
+            }
+        }
+        sort_cells(&mut part);
+        parts.push(part);
+    }
+    parts.sort_by_key(|p| (p[0].y, p[0].x));
+    parts
+}
+
+fn gen_shape_case(rng: &mut Rng) -> ShapeCase {
+    let target = rng.below(8) as usize + 2;
+    let cells = gen_polyomino(rng, target);
+    let severed: Vec<(GridCell, GridCell)> =
+        adjacent_pairs(&cells).into_iter().filter(|_| rng.chance(1, 3)).collect();
+    let pieces = flood_parts(&cells, &severed);
+
+    let mut params = Params {
+        bins: vec![LogicalBin { cells, ..Default::default() }],
+        height_units: rng.below(5) + 1,
+        wall_thickness: rng.quantised(0.8, 2.6, 0.2),
+        cavity_corner_radius: rng.quantised(0.0, 4.0, 0.5),
+        floor_fillet: rng.quantised(0.0, 4.0, 0.5),
+        magnet_holes: rng.chance(1, 3),
+        ..Params::default()
+    };
+    params.screw_holes = params.magnet_holes && rng.chance(1, 2);
+    ShapeCase { params, pieces }
+}
+
+fn mesh_volume(solid: &Solid) -> f64 {
+    let mesh = tessellate(solid, TESS_SEGS).to_mesh();
+    let mut v = 0.0f64;
+    for [a, b, c] in mesh.triangles() {
+        v += a.dot(b.cross(c)) as f64;
+    }
+    v / 6.0
+}
+
+fn check_shape(c: &ShapeCase) -> Result<(), String> {
+    catching(|| {
+        let bin = &c.params.bins[0];
+        let whole = gridfinity::build_bin_solid(&c.params, &bin.cells, bin.slope)
+            .map_err(|e| format!("build error: {e}"))?;
+        sound(&whole, "whole ")?;
+        let expected = mesh_volume(&whole);
+
+        let mut carved = 0.0;
+        for (i, piece) in c.pieces.iter().enumerate() {
+            let solid = match gridfinity::carve_to_cells(&whole, &bin.cells, piece) {
+                Ok(s) => s,
+                Err(e) if e.contains(ENCLOSED_PIECE) => return Ok(()),
+                Err(e) => return Err(format!("carve piece {i}: {e}")),
+            };
+            sound(&solid, &format!("piece {i} "))?;
+            carved += mesh_volume(&solid);
+        }
+
+        let drift = (carved - expected).abs() / expected.abs().max(1.0);
+        if drift > VOLUME_DRIFT {
+            return Err(format!(
+                "volume: {} piece(s) sum to {carved:.4} mm^3, whole is {expected:.4} mm^3 ({:.3}% off)",
+                c.pieces.len(),
+                drift * 100.0
+            ));
+        }
+        Ok(())
+    })
+}
+
+fn shrink_shape(c: &ShapeCase, sig: &str) -> ShapeCase {
+    let same = |q: &ShapeCase| check_shape(q).is_err_and(|e| signature(&e) == sig);
+    let mut best = ShapeCase { params: c.params.clone(), pieces: c.pieces.clone() };
+
+    loop {
+        let cells = best.params.bins[0].cells.clone();
+        let Some(smaller) = cells
+            .iter()
+            .filter_map(|&victim| {
+                let kept: Vec<GridCell> = cells.iter().copied().filter(|&c| c != victim).collect();
+                if kept.is_empty() || flood_parts(&kept, &[]).len() != 1 {
+                    return None;
+                }
+                let pieces: Vec<Vec<GridCell>> = best
+                    .pieces
+                    .iter()
+                    .map(|p| p.iter().copied().filter(|&c| c != victim).collect::<Vec<_>>())
+                    .filter(|p: &Vec<GridCell>| !p.is_empty())
+                    .collect();
+                if pieces.iter().any(|p| flood_parts(p, &[]).len() != 1) {
+                    return None;
+                }
+                let mut q = ShapeCase { params: best.params.clone(), pieces };
+                q.params.bins[0].cells = kept;
+                same(&q).then_some(q)
+            })
+            .next()
+        else {
+            break;
+        };
+        best = smaller;
+    }
+
+    let d = Params::default();
+    for (get, set) in [
+        (
+            (|p: &Params| p.floor_fillet) as fn(&Params) -> f32,
+            (|p: &mut Params, v: f32| p.floor_fillet = v) as fn(&mut Params, f32),
+        ),
+        (|p| p.cavity_corner_radius, |p, v| p.cavity_corner_radius = v),
+        (|p| p.wall_thickness, |p, v| p.wall_thickness = v),
+    ] {
+        let mut q = ShapeCase { params: best.params.clone(), pieces: best.pieces.clone() };
+        set(&mut q.params, get(&d));
+        if same(&q) {
+            best = q;
+        }
+    }
+    if best.params.magnet_holes {
+        let mut q = ShapeCase { params: best.params.clone(), pieces: best.pieces.clone() };
+        q.params.magnet_holes = false;
+        q.params.screw_holes = false;
+        if same(&q) {
+            best = q;
+        }
+    }
+    best
+}
+
+fn cell_list(cells: &[GridCell]) -> String {
+    let cs: Vec<String> =
+        cells.iter().map(|c| format!("GridCell {{ x: {}, y: {} }}", c.x, c.y)).collect();
+    format!("vec![{}]", cs.join(", "))
+}
+
+fn repro_shape(c: &ShapeCase) -> String {
+    let pieces: Vec<String> = c.pieces.iter().map(|p| cell_list(p)).collect();
+    format!("{}\n     pieces: vec![{}]", repro(&c.params), pieces.join(", "))
+}
+
+fn run_shapes(cases: u32, seed: u64) -> String {
+    let mut rng = Rng::new(seed);
+    let mut found: BTreeMap<String, Finding> = BTreeMap::new();
+    let mut failures = 0usize;
+
+    for _ in 0..cases {
+        let c = gen_shape_case(&mut rng);
+        let Err(err) = check_shape(&c) else { continue };
+        failures += 1;
+        let sig = signature(&err);
+        match found.get_mut(&sig) {
+            Some(f) => f.count += 1,
+            None => {
+                let small = shrink_shape(&c, &sig);
+                found.insert(sig, Finding { count: 1, repro: repro_shape(&small), detail: err });
+            }
+        }
+    }
+
+    if found.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "{failures}/{cases} cases failed, {} distinct defect(s) (seed {seed}):\n",
+        found.len()
+    );
+    for (i, f) in found.values().enumerate() {
+        out.push_str(&format!(
+            "\n[{}] x{}  {}\n     {}\n",
+            i + 1,
+            f.count,
+            f.detail.lines().next().unwrap_or(""),
+            f.repro
+        ));
+    }
+    out
+}
+
 fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -362,6 +615,14 @@ fn fuzz_inner_walls() {
     let cases = env_u64("FUZZ_CASES", 150) as u32;
     let seed = env_u64("FUZZ_SEED", 0x9E37_79B9_7F4A_7C15);
     let report = run(Profile::InnerWalls, cases, seed);
+    assert!(report.is_empty(), "{report}");
+}
+
+#[test]
+fn fuzz_bin_shapes() {
+    let cases = env_u64("FUZZ_CASES", 120) as u32;
+    let seed = env_u64("FUZZ_SEED", 0x9E37_79B9_7F4A_7C15);
+    let report = run_shapes(cases, seed);
     assert!(report.is_empty(), "{report}");
 }
 

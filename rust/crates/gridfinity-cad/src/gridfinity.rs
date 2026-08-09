@@ -263,7 +263,7 @@ pub fn build_piece(
     slope: Option<BinSlope>,
 ) -> Result<Solid, String> {
     let whole = build_bin_solid(p, bin_cells, slope)?;
-    carve_to_cells(&whole, piece_cells)
+    carve_to_cells(&whole, bin_cells, piece_cells)
 }
 
 pub fn build_bin_solid(
@@ -277,21 +277,52 @@ pub fn build_bin_solid(
     run_all(&prog)
 }
 
+const REENTRANT_FILLET_OVERHANG: f32 = 8.0;
+
 /// Cut one printable piece out of the finished bin: keep the material inside the
 /// vertical prism over the piece's cells. A piece is any connected polyomino, not
 /// necessarily a grid slab, so this must follow the cell set itself -- trimming to
 /// the piece's bounding box duplicates material wherever one piece's box covers
 /// another piece's cells.
-pub fn carve_to_cells(whole: &Solid, piece_cells: &[GridCell]) -> Result<Solid, String> {
+pub fn carve_to_cells(
+    whole: &Solid,
+    bin_cells: &[GridCell],
+    piece_cells: &[GridCell],
+) -> Result<Solid, String> {
     if piece_cells.is_empty() {
         return Ok(whole.clone());
     }
-    let rects: Vec<RectF> = piece_cells
-        .iter()
-        .map(|c| {
-            RectF::new(c.x as f32 * GRID_PITCH, c.y as f32 * GRID_PITCH, GRID_PITCH, GRID_PITCH)
-        })
-        .collect();
+    if piece_is_enclosed(bin_cells, piece_cells) {
+        return Err(
+            "a piece surrounded on every side by the rest of the bin is not supported: the cut \
+             runs through the middle of faces it never reaches the boundary of, and trimming \
+             cannot open a new hole in a face"
+                .into(),
+        );
+    }
+    let cell_rect = |c: &GridCell| {
+        RectF::new(c.x as f32 * GRID_PITCH, c.y as f32 * GRID_PITCH, GRID_PITCH, GRID_PITCH)
+    };
+    let mut rects: Vec<RectF> = piece_cells.iter().map(cell_rect).collect();
+    for c in piece_cells {
+        for step in [-1i32, 1] {
+            let neighbour = GridCell { x: c.x, y: c.y + step };
+            if bin_cells.contains(&neighbour) {
+                continue;
+            }
+            let y = if step > 0 {
+                (c.y + 1) as f32 * GRID_PITCH
+            } else {
+                c.y as f32 * GRID_PITCH - REENTRANT_FILLET_OVERHANG
+            };
+            rects.push(RectF::new(
+                c.x as f32 * GRID_PITCH,
+                y,
+                GRID_PITCH,
+                REENTRANT_FILLET_OVERHANG,
+            ));
+        }
+    }
     let loops: Vec<Vec<(f32, f32)>> = trace_rects(&rects, &[])
         .iter()
         .map(|lp| lp.pts.iter().map(|p| (p.x, p.y)).collect())
@@ -304,6 +335,17 @@ pub fn carve_to_cells(whole: &Solid, piece_cells: &[GridCell]) -> Result<Solid, 
         return Ok(whole.clone());
     }
     trim(whole, &cut)
+}
+
+fn piece_is_enclosed(bin_cells: &[GridCell], piece_cells: &[GridCell]) -> bool {
+    if piece_cells.len() >= bin_cells.len() {
+        return false;
+    }
+    piece_cells.iter().all(|c| {
+        [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().all(|&(dx, dy)| {
+            bin_cells.contains(&GridCell { x: c.x + dx, y: c.y + dy })
+        })
+    })
 }
 
 /// Whether the cut actually divides this solid. A piece whose prism covers the
@@ -337,7 +379,7 @@ pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
         };
         let whole = build_bin_solid(p, &bin.cells, bin.slope)?;
         for (i, part) in parts.iter().enumerate() {
-            let solid = carve_to_cells(&whole, &part.cells)?;
+            let solid = carve_to_cells(&whole, &bin.cells, &part.cells)?;
             let name = if parts.len() == 1 {
                 format!("{stem}.stl")
             } else {
@@ -1174,8 +1216,10 @@ fn plan_piece(
     };
 
     let mut planned: Vec<(CavityLoop, Vec<Island>, f32, Option<Banded>)> = Vec::new();
+    let corner_r = (OUTER_R - wt).max(0.0);
     for ol in &outers_traced {
-        let (convex_r, concave_r) = if slope.is_some() { (0.0, 0.0) } else { (rc, fr) };
+        let (convex_r, concave_r) =
+            if slope.is_some() { (0.0, 0.0) } else { (rc.max(corner_r), fr) };
         let shape = if openish {
             shape_cavity_loop_open(ol, convex_r, concave_r, &spans)
         } else {

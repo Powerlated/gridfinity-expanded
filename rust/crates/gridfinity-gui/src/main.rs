@@ -740,9 +740,36 @@ mod tests {
     use super::*;
     use gridfinity_cad::layout::GridCell;
 
+    fn broken_walls_at(cell: GridCell) -> Vec<gridfinity_cad::gridfinity::InnerWall> {
+        use gridfinity_cad::gridfinity::InnerWall;
+        let pitch = gridfinity::GRID_PITCH;
+        let (ox, oy) = (cell.x as f32 * pitch, cell.y as f32 * pitch);
+        vec![
+            InnerWall {
+                x1: 46.5 + ox, y1: 3.0 + oy, x2: 21.5 + ox, y2: 14.5 + oy,
+                width: 3.0, height: Some(3.0),
+            },
+            InnerWall {
+                x1: 41.0 + ox, y1: -2.5 + oy, x2: 23.0 + ox, y2: 28.0 + oy,
+                width: 5.5, height: Some(5.5),
+            },
+        ]
+    }
+
+    fn broken_bins(cells: &[GridCell]) -> Params {
+        Params {
+            bins: cells
+                .iter()
+                .map(|&c| LogicalBin { cells: vec![c], ..Default::default() })
+                .collect(),
+            inner_walls: cells.iter().copied().flat_map(broken_walls_at).collect(),
+            height_units: 1,
+            ..Params::default()
+        }
+    }
+
     fn broken() -> Params {
-        Params { height_units: 1, wall_thickness: 0.4, floor_fillet: 0.0,
-                 cavity_corner_radius: 0.0, ..Params::default() }
+        broken_bins(&[GridCell { x: 0, y: 0 }])
     }
 
     fn flags(verts: &[f32]) -> (usize, usize) {
@@ -776,11 +803,7 @@ mod tests {
 
     #[test]
     fn a_failed_bin_does_not_take_its_neighbours_with_it() {
-        let mut p = broken();
-        p.bins = vec![
-            LogicalBin { cells: vec![GridCell { x: 0, y: 0 }], ..Default::default() },
-            LogicalBin { cells: vec![GridCell { x: 4, y: 0 }], ..Default::default() },
-        ];
+        let p = broken_bins(&[GridCell { x: 0, y: 0 }, GridCell { x: 4, y: 0 }]);
         let (verts, errors) = build_scene(&p);
         assert_eq!(errors.len(), 2, "both bins share the bad parameters");
         assert_eq!(errors.iter().map(|e| e.bin).collect::<Vec<_>>(), vec![0, 1]);
@@ -794,8 +817,7 @@ mod tests {
 
     #[test]
     fn the_placeholder_sits_on_the_failed_bin_footprint() {
-        let mut p = broken();
-        p.bins = vec![LogicalBin { cells: vec![GridCell { x: 2, y: 1 }], ..Default::default() }];
+        let p = broken_bins(&[GridCell { x: 2, y: 1 }]);
         let (verts, _) = build_scene(&p);
         let (min, max) = vert_bounds(&verts);
         let pitch = gridfinity::GRID_PITCH;

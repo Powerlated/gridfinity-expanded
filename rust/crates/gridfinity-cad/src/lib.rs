@@ -744,8 +744,8 @@ mod tests {
             ..gridfinity::Params::default()
         };
         let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap();
-        let corner = gridfinity::carve_to_cells(&whole, &cells(&[(1, 0)])).unwrap();
-        let ell = gridfinity::carve_to_cells(&whole, &cells(&[(0, 0), (0, 1), (1, 1)])).unwrap();
+        let corner = gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(1, 0)])).unwrap();
+        let ell = gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(0, 0), (0, 1), (1, 1)])).unwrap();
         for piece in [&corner, &ell] {
             piece.validate().expect("manifold");
             assert_watertight(&tessellate(piece, 6).to_mesh());
@@ -756,6 +756,124 @@ mod tests {
             (sum - whole_v).abs() < 1e-2,
             "the two pieces must partition the bin, not overlap: {sum} vs {whole_v}"
         );
+    }
+
+    fn carve_conserves_volume(shape: &[(i32, i32)], parts: &[&[(i32, i32)]], height_units: u32) {
+        let p = gridfinity::Params {
+            bins: vec![LogicalBin { cells: cells(shape), ..Default::default() }],
+            height_units,
+            ..gridfinity::Params::default()
+        };
+        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap();
+        let vol = |s: &Solid| signed_volume(&tessellate(s, 12).to_mesh());
+        let whole_v = vol(&whole);
+        let mut sum = 0.0;
+        for part in parts {
+            let piece = gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(part))
+                .unwrap_or_else(|e| panic!("{shape:?} -> {part:?}: {e}"));
+            piece.validate().unwrap_or_else(|e| panic!("{part:?}: {e}"));
+            assert_watertight(&tessellate(&piece, 12).to_mesh());
+            sum += vol(&piece);
+        }
+        let drift = (sum - whole_v).abs();
+        assert!(
+            drift < whole_v.abs() * 5e-4,
+            "{shape:?} split {parts:?} must conserve volume: pieces {sum} vs whole {whole_v} \
+             ({drift} mm^3 adrift)"
+        );
+    }
+
+    #[test]
+    fn carving_a_reentrant_bin_keeps_the_corner_fillet_that_overhangs_the_grid() {
+        carve_conserves_volume(&[(0, 0), (1, 0), (1, 1)], &[&[(0, 0)], &[(1, 0), (1, 1)]], 4);
+        carve_conserves_volume(
+            &[(0, 0), (1, 0), (2, 0), (1, 1)],
+            &[&[(1, 1)], &[(0, 0), (1, 0), (2, 0)]],
+            4,
+        );
+        carve_conserves_volume(
+            &[(0, 0), (1, 0), (1, 1), (2, 1)],
+            &[&[(0, 0), (1, 0)], &[(1, 1), (2, 1)]],
+            2,
+        );
+    }
+
+    #[test]
+    fn carving_a_middle_cell_splits_the_rim_into_two_faces_not_a_hole() {
+        carve_conserves_volume(
+            &[(0, 0), (1, 0), (2, 0)],
+            &[&[(0, 0)], &[(1, 0)], &[(2, 0)]],
+            4,
+        );
+        let p = gridfinity::Params {
+            bins: vec![LogicalBin { cells: cells(&[(0, 0), (1, 0), (2, 0)]), ..Default::default() }],
+            height_units: 4,
+            ..gridfinity::Params::default()
+        };
+        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap();
+        let middle =
+            gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(1, 0)])).unwrap();
+        let report = audit(&middle);
+        assert!(report.is_ok(), "the middle piece must audit clean: {report}");
+    }
+
+    #[test]
+    fn a_thin_walled_bin_keeps_its_cavity_inside_the_rounded_corner() {
+        for wall_thickness in [0.4f32, 0.8, 1.0, 1.2, 2.0, 3.0] {
+            for cavity_corner_radius in [0.0f32, 0.5, 1.0, 2.5, 4.0] {
+                let p = gridfinity::Params {
+                    bins: vec![LogicalBin { cells: cells(&[(0, 0)]), ..Default::default() }],
+                    wall_thickness,
+                    cavity_corner_radius,
+                    ..gridfinity::Params::default()
+                };
+                let solid = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None)
+                    .unwrap_or_else(|e| panic!("wt {wall_thickness} rc {cavity_corner_radius}: {e}"));
+                solid
+                    .validate()
+                    .unwrap_or_else(|e| panic!("wt {wall_thickness} rc {cavity_corner_radius}: {e}"));
+                assert_watertight(&tessellate(&solid, 6).to_mesh());
+            }
+        }
+    }
+
+    #[test]
+    fn a_piece_enclosed_by_the_rest_of_the_bin_is_refused_not_mangled() {
+        for shape in [
+            vec![(1, 0), (0, 1), (1, 1), (2, 1), (1, 2)],
+            vec![(0, 0), (1, 0), (0, 1), (1, 1), (2, 1), (1, 2)],
+            vec![(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1), (0, 2), (1, 2), (2, 2)],
+        ] {
+            let p = gridfinity::Params {
+                bins: vec![LogicalBin { cells: cells(&shape), ..Default::default() }],
+                ..gridfinity::Params::default()
+            };
+            let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap();
+            let err = gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(1, 1)]))
+                .expect_err("an enclosed piece must be refused");
+            assert!(
+                err.contains("surrounded on every side"),
+                "{shape:?} should name the enclosed piece, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_piece_touching_the_bin_edge_is_still_carved() {
+        let p = gridfinity::Params {
+            bins: vec![LogicalBin {
+                cells: cells(&[(1, 0), (0, 1), (1, 1), (2, 1), (1, 2)]),
+                ..Default::default()
+            }],
+            ..gridfinity::Params::default()
+        };
+        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap();
+        for arm in [(1, 0), (0, 1), (2, 1), (1, 2)] {
+            let piece = gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[arm]))
+                .unwrap_or_else(|e| panic!("arm {arm:?}: {e}"));
+            piece.validate().unwrap_or_else(|e| panic!("arm {arm:?}: {e}"));
+            assert_watertight(&tessellate(&piece, 6).to_mesh());
+        }
     }
 
     #[test]
