@@ -73,6 +73,24 @@ entirely — a check nobody runs is not a check. Where a check is genuinely quad
 only some callers want it, make it a runtime flag checked once per sweep (see `set_verify_prune`
 in `isect.rs`), never a `debug_assert!`.
 
+**An assert replaces the checking, never the exercising.** A test whose body only restates an
+invariant now asserted in production loses its body, not its fixture: the assert only fires on
+inputs something actually feeds it, so deleting the fixture removes coverage while the suite stays
+green. Delete a test outright only when the input is redundantly covered too. The invariants that
+now live in the code rather than in ~30 hand-picked fixtures:
+
+- `Builder::build` — the manifold invariant, orphan edges excepted
+- `orient::normalize` — no misoriented loop survives it
+- `gridfinity::try_build` — the result is a closed manifold *and* audits clean (+37% on a build)
+- `tessellate` — `tessellation_leaks` is empty (~4× the tessellation itself; still ~2 ms a bin)
+- `triangulate` — the triangles tile the loops they came from
+- `build_torus_blend` — the blend torus is not a ring
+- `to_stl_binary` — the file is 84 + 50n bytes
+- `region2d`, `uniforms` — `BOX_TOL` and every uniform block's layout, as `const` asserts that
+  fail the *build*
+
+The lib gate went 0.08 s → 1.9 s across these, which is the trade the rule above asks for.
+
 ## Commands
 
 ```bash
@@ -97,11 +115,11 @@ cargo test --release -p gridfinity-cad --test fuzz fuzz_bin_shapes -- --exact --
 `fuzz_inner_walls` covers free-form inner walls (the divider/fillet work); `fuzz_params_broad`
 covers shape, height, thicknesses, holes, dividers, slope and mode; `fuzz_bin_shapes` covers the
 **split path** — random connected polyominoes, partitioned the way the web app partitions them, then
-carved piece by piece. `fuzz_inner_walls` is at **6/150 failing, 2 distinct defects** at the
+carved piece by piece. `fuzz_inner_walls` is at **5/150 failing, 3 distinct defects** at the
 default seed and is **currently red**, as is `gridfinity-wasm`'s
 `opening_on_a_hole_boundary_stays_closed`. Those two are the whole of the workspace's known-failing
 surface; everything else, `fuzz_bin_shapes` included, is green. `fuzz_params_broad` reports rather
-than asserts, and is at 35/400 / 11 defects.
+than asserts, and is at 35/400 / 10 defects.
 
 A torus blend's tangent circles take their parameter range from **their own tangent points**
 (`circle_span`), not from the edge being blended. Inheriting `(a0, a1)` only works while the

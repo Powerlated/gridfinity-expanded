@@ -227,6 +227,8 @@ pub fn try_build(p: &Params) -> Result<Solid, String> {
     if let Err(e) = solid.validate() {
         panic!("{:?} is not a closed manifold: {e}", p.mode);
     }
+    let report = crate::audit(&solid);
+    assert!(report.is_ok(), "{:?} is not geometrically sound:\n{report}", p.mode);
     Ok(solid)
 }
 

@@ -241,6 +241,13 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
             out.tris.push(Tri { pos: p, nrm: nm });
         }
     }
+    let leaks = crate::kernel::audit::tessellation_leaks(&out);
+    assert!(
+        leaks.is_empty(),
+        "tessellation leaks {} edge(s), first {:?}",
+        leaks.len(),
+        leaks[0]
+    );
     out
 }
 
