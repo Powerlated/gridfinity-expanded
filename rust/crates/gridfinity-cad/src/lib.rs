@@ -897,6 +897,87 @@ mod tests {
     }
 
     #[test]
+    fn probe_blend() {
+        use crate::gridfinity::InnerWall;
+        use std::io::Write;
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        fn legal(v: &[f32]) -> bool {
+            let l0 = ((v[2]-v[0]).powi(2) + (v[3]-v[1]).powi(2)).sqrt();
+            let l1 = ((v[7]-v[5]).powi(2) + (v[8]-v[6]).powi(2)).sqrt();
+            l0 > 5.0 && l1 > 5.0 && (0.8..=8.0).contains(&v[4]) && (0.8..=8.0).contains(&v[9])
+                && (2.0..=18.0).contains(&v[10])
+        }
+        fn outcome(v: &[f32]) -> String {
+            let walls = vec![
+                InnerWall { x1: v[0], y1: v[1], x2: v[2], y2: v[3], width: v[4], height: None },
+                InnerWall { x1: v[5], y1: v[6], x2: v[7], y2: v[8], width: v[9], height: Some(v[10]) },
+            ];
+            let p = gridfinity::Params { inner_walls: walls, ..gridfinity::Params::default() };
+            let b = &p.bins[0];
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                gridfinity::build_piece(&p, &b.cells, &b.cells, b.slope)
+            }));
+            match r {
+                Ok(Ok(s)) => match s.validate() {
+                    Ok(()) => "VALID".into(),
+                    Err(e) => e.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect(),
+                },
+                Ok(Err(e)) => e.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect(),
+                Err(_) => "PANIC".into(),
+            }
+        }
+        let names = ["w0.x1","w0.y1","w0.x2","w0.y2","w0.width","w1.x1","w1.y1","w1.x2","w1.y2","w1.width","w1.height"];
+        let mut v: Vec<f32> = vec![51.0, 20.5, 20.5, 58.5, 3.2, 7.0, 30.5, 41.0, 60.5, 3.4, 12.5];
+        let target = outcome(&v);
+        println!("start: {target}");
+        for _ in 0..3 {
+            for i in 0..v.len() {
+                let orig = v[i];
+                let mut cands: Vec<f32> = vec![
+                    (orig / 21.0).round() * 21.0, (orig / 10.0).round() * 10.0,
+                    (orig / 5.0).round() * 5.0, orig.round(),
+                ];
+                if i == 4 || i == 9 { cands.insert(0, 2.0); }
+                if i == 10 { cands.insert(0, 7.0); }
+                for c in cands {
+                    if (c - orig).abs() < 1e-6 { continue; }
+                    v[i] = c;
+                    if !legal(&v) { v[i] = orig; continue; }
+                    print!("  try {}={c} .. ", names[i]);
+                    std::io::stdout().flush().ok();
+                    let got = outcome(&v);
+                    println!("{got}");
+                    if got == target { break; }
+                    v[i] = orig;
+                }
+            }
+        }
+        println!("shrunk: {target}");
+        for (n, x) in names.iter().zip(&v) { println!("   {n} = {x}"); }
+        std::panic::set_hook(hook);
+    }
+
+    #[test]
+    fn a_blend_selection_the_boolean_split_does_not_fail_the_build() {
+        let p = gridfinity::Params {
+            inner_walls: vec![
+                gridfinity::InnerWall {
+                    x1: 42.0, y1: 21.0, x2: 21.0, y2: 63.0, width: 2.0, height: None,
+                },
+                gridfinity::InnerWall {
+                    x1: 10.0, y1: 21.0, x2: 42.0, y2: 63.0, width: 2.0, height: Some(7.0),
+                },
+            ],
+            ..gridfinity::Params::default()
+        };
+        let b = &p.bins[0];
+        let solid = gridfinity::build_piece(&p, &b.cells, &b.cells, b.slope).expect("builds");
+        solid.validate().expect("manifold");
+        assert_watertight(&tessellate(&solid, 6).to_mesh());
+    }
+
+    #[test]
     fn sloped_bin_is_watertight_and_outward() {
         for dir in [SlopeDir::PlusX, SlopeDir::MinusX, SlopeDir::PlusY, SlopeDir::MinusY] {
             let mut p = gridfinity::Params::default();

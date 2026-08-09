@@ -346,6 +346,17 @@ impl Builder {
         lid
     }
 
+    /// The edge already interned between `a` and `b` through `mid`, without
+    /// interning anything. A selection that names geometry the build did not
+    /// produce must come back empty: interning it would mint an edge no face
+    /// uses, which fails `validate` whatever the caller then does with it.
+    pub fn find_edge(&self, a: Vec3, b: Vec3, mid: Vec3) -> Option<EdgeId> {
+        let va = *self.vert_index.get(&weld_key(a))?;
+        let vb = *self.vert_index.get(&weld_key(b))?;
+        let (lo, hi) = if va < vb { (va, vb) } else { (vb, va) };
+        self.edge_index.get(&(lo, hi, weld_key(mid))).copied()
+    }
+
     pub fn vertex(&mut self, p: Vec3) -> VertexId {
         crate::kernel::perf::count(crate::kernel::perf::Metric::BuilderVertex);
         *self.vert_index.entry(weld_key(p)).or_insert_with(|| {

@@ -1978,15 +1978,17 @@ fn plan_cavity_flat(
     if loop_fr > 0.01 {
         blends.extend(shape.iter().map(|s| (*s, floor_z, loop_fr)));
     }
-    let mut tops = Vec::new();
     for isl in islands {
         if isl.fr > 0.01 {
             blends.extend(isl.segs.iter().map(|s| (*s, floor_z, isl.fr)));
         }
-        if isl.top.is_none() {
-            tops.push(reverse_loop(&isl.segs));
-        }
     }
+    let tops: Vec<Vec<Seg>> = plan_bands(&stack)
+        .map(|(_, bands)| bands.last().cloned().unwrap_or_default())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| loop_area(l) < 0.0)
+        .collect();
     (stack, SlabOpts { cavity: true, open_at: vec![total_h] }, tops, blends)
 }
 

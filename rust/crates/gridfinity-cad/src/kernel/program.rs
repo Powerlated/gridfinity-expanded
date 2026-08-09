@@ -321,7 +321,9 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
             Op::Custom(f) => f(&mut b)?,
             Op::Fillet { edges } => {
                 for &(ref s, z, r) in edges {
-                    blends.push((seg_edge(&mut b, s, z).0, r));
+                    if let Some(e) = find_seg_edge(&b, s, z) {
+                        blends.push((e, r));
+                    }
                 }
             }
             Op::Chamfer { edges } => {
@@ -340,6 +342,23 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
         solid = chamfer_edges(&solid, &chamfers)?;
     }
     Ok(solid)
+}
+
+/// A blend selection resolved against the edges the build actually produced.
+/// The plan names a run; the boolean that built the solid may have split or
+/// dropped it, and a selection that no longer names one edge simply goes
+/// unblended -- an unfilleted corner, not a build failure.
+fn find_seg_edge(b: &Builder, seg: &Seg, z: f32) -> Option<EdgeId> {
+    let start = vec3_of(seg.start().x, seg.start().y, z);
+    let end = vec3_of(seg.end().x, seg.end().y, z);
+    let mid = match *seg {
+        Seg::Line { .. } => (start + end) * 0.5,
+        Seg::Arc { center, radius, a0, a1, .. } => {
+            let t = (a0 + a1) * 0.5;
+            vec3_of(center.x + radius * t.cos(), center.y + radius * t.sin(), z)
+        }
+    };
+    b.find_edge(start, end, mid)
 }
 
 fn emit_hole(
