@@ -1412,6 +1412,26 @@ mod audit_tests {
         assert!(tessellation_leaks(&tess).is_empty(), "default bin should tessellate closed");
     }
 
+    #[test]
+    fn an_inner_wall_meeting_a_cavity_corner_arc_tessellates_closed_at_the_shared_vertex() {
+        use crate::gridfinity::InnerWall;
+        use crate::layout::GridCell;
+        let p = gridfinity::Params {
+            bins: vec![gridfinity::LogicalBin {
+                cells: vec![GridCell { x: 1, y: 0 }],
+                ..Default::default()
+            }],
+            inner_walls: vec![
+                InnerWall { x1: 91.5, y1: -1.0, x2: 27.0, y2: 36.0, width: 1.4, height: None },
+                InnerWall { x1: 40.0, y1: 1.5, x2: 92.0, y2: 20.0, width: 3.2, height: None },
+            ],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&p);
+        let leaks = tessellation_leaks(&tessellate(&solid, 6));
+        assert!(leaks.is_empty(), "wall met the corner arc with a crack: {leaks:?}");
+    }
+
     /// Multi-cell polyomino bins at `arc_segs_per_quarter = 1`, the shape and
     /// resolution the Bad Apple stress test drives. Coarse arcs put most planar
     /// faces on the small-polygon fast path in `triangulate`, and reentrant

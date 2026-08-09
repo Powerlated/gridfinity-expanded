@@ -82,7 +82,11 @@ impl EdgeSamples {
         let mut pts = Vec::with_capacity(solid.edges.len() * 2);
         off.push(0);
         for e in &solid.edges {
+            let start = pts.len();
             e.sample_into(true, e.seg_count(arc_segs_per_quarter), &mut pts);
+            pts[start] = solid.verts[e.v0].point;
+            let last = pts.len() - 1;
+            pts[last] = solid.verts[e.v1].point;
             off.push(pts.len() as u32);
         }
         EdgeSamples { pts, off }

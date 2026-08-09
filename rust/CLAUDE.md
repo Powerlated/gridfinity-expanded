@@ -22,8 +22,15 @@ Prohibited anywhere in the modelling pipeline (`sketch` → `build` → `topo` �
 - **Voxels, SDFs, marching cubes, point sampling,** or any discretised volume representation.
 - **Remeshing, mesh healing, decimation, vertex-merge-to-fix-gaps,** or any "tessellate first,
   then repair the result" strategy. Watertightness is a property of the B-rep, guaranteed by the
-  manifold invariant and by `tess.rs` sampling each edge exactly once — it is never something a
-  post-process patches up.
+  manifold invariant and by `tess.rs` sampling each edge exactly once, from its own two vertices
+  outward — it is never something a post-process patches up. Sampling once is only half of it:
+  `EdgeSamples::build` overwrites the first and last sample of every edge with the stored
+  `Vertex::point`, because `sample_into` evaluates the curve and a vertex is never exactly on the
+  curves that meet there. At `WELD = 1e4` a 10-ulp radial residue on an f32 coordinate near 80 mm
+  is most of a quantisation step, so the arc's endpoint and the line's endpoint welded to
+  different keys and cracked the mesh open at the vertex. Taking the endpoint from the topology
+  rather than the geometry is *not* a weld-to-fix-gaps: it is using the B-rep's own answer for a
+  point the B-rep already decided the edges share.
 - **Numerically approximating a curve or surface** (polyline/facet stand-ins) where a closed-form
   `Curve`/`Surface` is the correct answer. If the needed analytic primitive doesn't exist yet, add
   it to `geom.rs` — `Curve::Ellipse` was added exactly this way.
@@ -90,11 +97,11 @@ cargo test --release -p gridfinity-cad --test fuzz fuzz_bin_shapes -- --exact --
 `fuzz_inner_walls` covers free-form inner walls (the divider/fillet work); `fuzz_params_broad`
 covers shape, height, thicknesses, holes, dividers, slope and mode; `fuzz_bin_shapes` covers the
 **split path** — random connected polyominoes, partitioned the way the web app partitions them, then
-carved piece by piece. `fuzz_inner_walls` is at **12/150 failing, 7 distinct defects** at the
+carved piece by piece. `fuzz_inner_walls` is at **7/150 failing, 5 distinct defects** at the
 default seed and is **currently red**, as is `gridfinity-wasm`'s
 `opening_on_a_hole_boundary_stays_closed`. Those two are the whole of the workspace's known-failing
 surface; everything else, `fuzz_bin_shapes` included, is green. `fuzz_params_broad` reports rather
-than asserts, and is at 65/400 / 13 defects.
+than asserts, and is at 36/400 / 11 defects.
 
 `fuzz_bin_shapes` went **47/120 → 0/120** (clean at eight seeds, and 1/1500 at `FUZZ_CASES=1500`)
 across the four defects below. Fixing them moved `fuzz_inner_walls` 27 → 30/150 with **no new defect
