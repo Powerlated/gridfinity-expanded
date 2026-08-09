@@ -509,6 +509,39 @@ fn build_cyl_blend(
     Ok(Fillet { ta, tb, ca0, ca1, ta_p0, ta_p1, tb_p0, tb_p1, surface, sense, fwd_a })
 }
 
+fn circle_span(
+    center: Vec3,
+    axis: Vec3,
+    ref_dir: Vec3,
+    p0: Vec3,
+    p1: Vec3,
+    src: (f32, f32),
+) -> (f32, f32) {
+    let (d0, d1) = crate::kernel::geom::radial_frame(axis, ref_dir);
+    let angle = |p: Vec3| {
+        let v = p - center;
+        v.dot(d1).atan2(v.dot(d0))
+    };
+    let span = src.1 - src.0;
+    let t0 = angle(p0);
+    if span.abs() >= std::f32::consts::TAU - 1e-3 {
+        return (t0, t0 + span);
+    }
+    let wrapped = |mut a: f32| {
+        while a > std::f32::consts::PI {
+            a -= std::f32::consts::TAU;
+        }
+        while a < -std::f32::consts::PI {
+            a += std::f32::consts::TAU;
+        }
+        a
+    };
+    let want = angle(p1);
+    let miss = |s: f32| wrapped(t0 + s - want).abs();
+    let sweep = if miss(span.abs()) <= miss(-span.abs()) { span.abs() } else { -span.abs() };
+    (t0, t0 + sweep)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_torus_blend(
     ed: crate::kernel::topo::Edge,
@@ -547,15 +580,17 @@ fn build_torus_blend(
     let ta_r = (ta_p0 - ta_center).length();
     let tb_center = torus_center + torus_axis * (tb_p0 - torus_center).dot(torus_axis);
     let tb_r = (tb_p0 - tb_center).length();
+    let (ta_t0, ta_t1) = circle_span(ta_center, torus_axis, ref_dir, ta_p0, ta_p1, (a0, a1));
+    let (tb_t0, tb_t1) = circle_span(tb_center, torus_axis, ref_dir, tb_p0, tb_p1, (a0, a1));
     let ta = CurvEdge {
         curve: Curve::Circle { center: ta_center, axis: torus_axis, radius: ta_r, ref_dir },
-        t0: a0,
-        t1: a1,
+        t0: ta_t0,
+        t1: ta_t1,
     };
     let tb = CurvEdge {
         curve: Curve::Circle { center: tb_center, axis: torus_axis, radius: tb_r, ref_dir },
-        t0: a0,
-        t1: a1,
+        t0: tb_t0,
+        t1: tb_t1,
     };
 
     let p0 = ed.curve.point(a0);
@@ -804,5 +839,28 @@ mod tests {
         assert!(approx(ce.curve.point(ce.t0), from), "arc start");
         assert!(approx(ce.curve.point(ce.t1), to), "arc end");
         assert!(((ce.t1 - ce.t0).abs() - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
+    }
+
+    #[test]
+    fn circle_span_lands_on_its_own_endpoints_not_the_source_edges() {
+        let center = Vec3::new(80.0, 4.0, 23.7);
+        let axis = Vec3::Z;
+        let ref_dir = Vec3::X;
+        let p0 = Vec3::new(80.0, 5.45, 23.7);
+        let p1 = Vec3::new(78.55, 4.0, 23.7);
+        let src = (0.0, -std::f32::consts::FRAC_PI_2);
+        let (t0, t1) = circle_span(center, axis, ref_dir, p0, p1, src);
+        let c = Curve::Circle { center, axis, radius: 1.45, ref_dir };
+        assert!(approx(c.point(t0), p0), "span start {:?}", c.point(t0));
+        assert!(approx(c.point(t1), p1), "span end {:?}", c.point(t1));
+    }
+
+    #[test]
+    fn circle_span_keeps_a_full_turn_a_full_turn() {
+        let center = Vec3::ZERO;
+        let p = Vec3::new(3.0, 0.0, 0.0);
+        let src = (0.0, std::f32::consts::TAU);
+        let (t0, t1) = circle_span(center, Vec3::Z, Vec3::X, p, p, src);
+        assert!((t1 - t0 - std::f32::consts::TAU).abs() < 1e-4, "sweep {}", t1 - t0);
     }
 }
