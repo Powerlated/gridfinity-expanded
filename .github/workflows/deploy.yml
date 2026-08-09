@@ -32,6 +32,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Set up Rust
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Build the geometry kernel
+        run: npm run build:wasm
+
       - name: Build
         run: npm run build
 

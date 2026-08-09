@@ -60,7 +60,7 @@ Changing the geometry pipeline (`src/lib/geometry/`, `src/workers/geometry.worke
   editing Rust while the server runs does nothing until you restart it. A failing kernel build
   fails `npm run dev` rather than falling through to a stale artifact; `npm run dev:nowasm` skips
   the check when you want the UI without the Rust toolchain. `npm run build` does **not** check —
-  `ci.yml` runs `npm run build:wasm` as its own step beforehand.
+  `ci.yml` and `deploy.yml` each run `npm run build:wasm` as their own step beforehand.
 - `cd rust && cargo test --release -p gridfinity-cad --lib` — geometry kernel suite, the printability gate
 - `cd rust && cargo test --release --workspace` — full gate incl. fuzzers and benches (slow; pre-PR only)
 - `npm run test:e2e` — Chromium Playwright smoke

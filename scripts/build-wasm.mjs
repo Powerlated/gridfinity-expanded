@@ -3,9 +3,15 @@
  *
  * The kernel workspace lives in `rust/` in this repository; set
  * `GRIDFINITY_KERNEL` to point somewhere else to build against a different
- * checkout. The output is a build artifact and is gitignored —
- * `npm run build`, `npm run dev`, and `npm run check:manifold` all depend on it
- * existing, so run this first after a fresh clone.
+ * checkout. The output is a build artifact and is gitignored, so a fresh clone
+ * has none until this runs. `npm run build` needs it to already exist; CI and
+ * the Pages deploy therefore run `npm run build:wasm` as a step of their own.
+ *
+ * With `--if-needed` it rebuilds only when `src/wasm/` is missing an artifact or
+ * is older than the kernel's newest source file. `npm run dev` runs it that way,
+ * so the dev server cannot serve geometry older than the kernel it was built
+ * from. It is a startup check, not a watcher: editing Rust while the server runs
+ * takes a restart.
  *
  * Requires the Rust toolchain plus `wasm32-unknown-unknown` and `wasm-pack`:
  *   rustup target add wasm32-unknown-unknown
