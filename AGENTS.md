@@ -33,6 +33,7 @@ Prefer Mantine controls/layout over custom UI. Cross-app control styling → `th
 - `useBinGeometry` schedules on the leading edge, not a debounce. Every exit path from a run must settle the dirty flag, or the preview freezes.
 - The alpha generator assumes every bin is edge-connected and valid. Add no geometry-side component normalization, repair, rejection, or fallback. Enclosed holes stay supported.
 - Render quality is a **pinned user setting, never adaptive**. A frame-time controller would make the preview change appearance while the user is judging a part.
+- The Rust kernel asserts to high hell: every relied-on invariant gets a real `assert!` at the point it is relied on, and spending most of the runtime inside asserts is acceptable. Never `debug_assert!` — `--release` compiles it out. See `rust/CLAUDE.md`.
 - `ModelViewer.tsx` publishes `data-render-quality` and `data-badapple-frame` imperatively via `dataset` inside the render loop. Routing per-frame reads through React state makes the camera stutter. For the same reason, never route `#badapple` clip frames through React state or `add_piece`.
 
 ## Renderer

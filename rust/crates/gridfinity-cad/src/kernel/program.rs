@@ -334,7 +334,7 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
         }
     }
 
-    let mut solid = b.build();
+    let mut solid = b.build_unvalidated();
     if !blends.is_empty() {
         solid = fillet::fillet_best_effort(&solid, &blends)?.0;
     }

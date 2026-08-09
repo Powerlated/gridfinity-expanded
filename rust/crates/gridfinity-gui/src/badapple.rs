@@ -43,7 +43,7 @@ pub fn build_frame(frame: usize) -> (Vec<f32>, usize) {
             }
         }
     }
-    debug_assert_eq!(verts.len() % MESH_STRIDE, 0);
+    assert_eq!(verts.len() % MESH_STRIDE, 0);
     (verts, tris)
 }
 

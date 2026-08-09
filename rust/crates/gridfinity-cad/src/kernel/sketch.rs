@@ -237,7 +237,7 @@ pub fn seg_crossings(pt: Vec2, seg: &Seg) -> u32 {
                 let (lo, hi) = (a0.min(a1), a0.max(a1));
                 let k0 = ((lo - PI / 2.0) / PI).floor() as i32 + 1;
                 let k1 = ((hi - PI / 2.0) / PI).ceil() as i32 - 1;
-                debug_assert!(
+                assert!(
                     k1 - k0 < MAX_ARC_STOPS as i32,
                     "arc spans more than 2pi: a0={a0} a1={a1}"
                 );

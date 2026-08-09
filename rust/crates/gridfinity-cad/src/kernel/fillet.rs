@@ -344,7 +344,7 @@ fn fillet_edges_with(
         b.face_from(bld.surface, bld.sense, &lp, &[]);
     }
 
-    let s = b.build_compact();
+    let s = b.build_compact_unvalidated();
     if let Err(e) = s.validate() {
         return Err(format!("blend: rebuilt solid invalid: {e}"));
     }

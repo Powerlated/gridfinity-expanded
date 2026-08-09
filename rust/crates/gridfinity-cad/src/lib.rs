@@ -1395,7 +1395,7 @@ mod audit_tests {
             front,
             vec![],
         );
-        let mut solid = b.build();
+        let mut solid = b.build_unvalidated();
         solid.edges[e01].t1 = 9.5;
         let report = audit(&solid);
         assert!(!report.is_ok(), "audit should catch the planted defect");

@@ -149,6 +149,14 @@ impl Solid {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.manifold_check(false)
+    }
+
+    pub fn validate_ignoring_unused_edges(&self) -> Result<(), String> {
+        self.manifold_check(true)
+    }
+
+    fn manifold_check(&self, allow_unused: bool) -> Result<(), String> {
         let mut fwd = vec![0u32; self.edges.len()];
         let mut bwd = vec![0u32; self.edges.len()];
         for fi in 0..self.faces.len() {
@@ -171,6 +179,9 @@ impl Solid {
             }
         }
         for e in 0..self.edges.len() {
+            if allow_unused && fwd[e] == 0 && bwd[e] == 0 {
+                continue;
+            }
             if fwd[e] != 1 || bwd[e] != 1 {
                 return Err(format!(
                     "edge {e} used fwd={} bwd={} (want 1/1)",
@@ -503,6 +514,14 @@ impl Builder {
     }
 
     pub fn build(self) -> Solid {
+        let solid = self.build_unvalidated();
+        if let Err(e) = solid.validate_ignoring_unused_edges() {
+            panic!("Builder::build produced a non-manifold solid: {e}");
+        }
+        solid
+    }
+
+    pub fn build_unvalidated(self) -> Solid {
         let mut solid = Solid {
             verts: self.verts,
             edges: self.edges,
@@ -514,8 +533,8 @@ impl Builder {
         solid
     }
 
-    pub fn build_compact(self) -> Solid {
-        let mut s = self.build();
+    pub fn build_compact_unvalidated(self) -> Solid {
+        let mut s = self.build_unvalidated();
         s.compact_edges();
         s
     }

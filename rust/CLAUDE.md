@@ -46,6 +46,26 @@ If a task looks like it needs a prohibited operation, that means either a missin
 primitive or a missing B-rep operator (e.g. blend runout in `fillet.rs`). **Stop and ask** — do not
 reach for a mesh fallback.
 
+## Hard rule: assert everything, and pay for it at runtime
+
+**Assert to high hell.** Every invariant a function relies on gets a real `assert!`/`assert_eq!` at
+the point it is relied on: preconditions on entry, postconditions before returning, topology and
+orientation invariants after any construction step, geometric assumptions (non-degenerate normals,
+on-surface points, sorted/deduplicated inputs, index bounds beyond what slicing already checks) at
+the moment they are assumed. Prefer an assert with a message naming the offending values over a
+silent `if` that patches the case up.
+
+It is fine — expected, even — for most of the kernel's runtime to be spent inside asserts. A
+build that runs slower and fails loudly at the defect is worth far more here than a fast one that
+emits a leaking solid. Do not weaken or delete an assert to make something pass, do not trade one
+for a fallback branch, and do not "optimise" one away without profiling evidence that it is the
+bottleneck of something the user actually waits on.
+
+Use `assert!`, not `debug_assert!`. The suite runs `--release`, which compiles `debug_assert!` out
+entirely — a check nobody runs is not a check. Where a check is genuinely quadratic or worse and
+only some callers want it, make it a runtime flag checked once per sweep (see `set_verify_prune`
+in `isect.rs`), never a `debug_assert!`.
+
 ## Commands
 
 ```bash
@@ -206,8 +226,15 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   (which `fillet_edges` does repeatedly) is therefore a few flat `memcpy`s. `Builder` interns
   vertices and edges (edge key = sorted endpoints **+ welded midpoint**, so a circle's two
   semicircle arcs don't collapse into one edge) and flattens each face's loops into the arena. `Solid::validate()` enforces the
-  manifold invariant: **every edge used exactly twice, once in each direction** — assert it in
-  tests after any construction change. It is *not* the whole story: alternation holds just as well
+  manifold invariant: **every edge used exactly twice, once in each direction**.
+  `Builder::build` asserts it itself, via `validate_ignoring_unused_edges` — the interning arena
+  can outlive edges no face kept, and only `compact_edges` drops them, so orphans are the one
+  tolerated deviation. Three callers legitimately build something that is *not* yet a closed
+  manifold and say so by name: `fillet_edges` and `chamfer_edges` build a candidate speculatively
+  and reject it on a failed `validate` (`build_compact_unvalidated` / `build_unvalidated`), and
+  `program::run_all` emits partial open shells for the step-through debugger. Everything else goes
+  through `build`, so a construction bug panics at the builder that caused it instead of surfacing
+  as a leak in a test far downstream. It is *not* the whole story: alternation holds just as well
   for a consistently-inverted shell, so `Builder::build` additionally establishes the **orientation
   invariant** via `orient::normalize` (see `orient.rs`). Loop directions off a built `Solid` are
   therefore material-consistent and may be relied on; the modules that emit loops (`slab`,

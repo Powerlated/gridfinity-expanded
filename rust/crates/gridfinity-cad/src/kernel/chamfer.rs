@@ -222,7 +222,7 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
         b.face(c.surface, c.sense, lp, vec![]);
     }
 
-    let s = b.build();
+    let s = b.build_unvalidated();
     if let Err(e) = s.validate() {
         return Err(format!("chamfer: rebuilt solid invalid: {e}"));
     }
