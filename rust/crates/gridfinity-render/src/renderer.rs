@@ -23,6 +23,13 @@ struct ShadowKey {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+struct ResolvedKey {
+    accumulation: AccumulationKey,
+    samples: u32,
+    target: u64,
+}
+
+#[derive(Clone, Copy, PartialEq)]
 struct AccumulationKey {
     view_proj: [u32; 16],
     viewport: (i32, i32, i32, i32),
@@ -121,6 +128,7 @@ pub struct Renderer {
     accumulated: u32,
     accumulation_key: Option<AccumulationKey>,
     shadow_key: Option<ShadowKey>,
+    resolved_key: Option<ResolvedKey>,
     generation: u64,
     quality: Quality,
     hdr: bool,
@@ -161,6 +169,7 @@ impl Renderer {
             accumulated: 0,
             accumulation_key: None,
             shadow_key: None,
+            resolved_key: None,
             generation: 0,
             quality: Quality::default(),
             hdr,
@@ -288,7 +297,7 @@ impl Renderer {
                 let (view_proj, eye) = (frame.view_proj, frame.eye);
                 let bounce = self.accumulated > 0;
                 frame.has_occlusion = self.draw_occlusion(
-                    device, queue, &mut encoder, &frame, offscreen, &view_proj, eye, bounce,
+                    device, queue, &mut encoder, &frame, offscreen, &view_proj, eye, bounce, true,
                 );
             }
         }
@@ -320,12 +329,20 @@ impl Renderer {
             self.accumulated += 1;
         }
 
-        let bloom = if self.hdr && level.bloom() {
-            self.draw_bloom(device, queue, &mut encoder, level, width, height)
-        } else {
-            false
+        let resolved_key = ResolvedKey {
+            accumulation: key,
+            samples: self.accumulated,
+            target: self.resolved.generation(),
         };
-        self.resolve(device, queue, &mut encoder, &frame, width, height, bloom);
+        if self.resolved_key != Some(resolved_key) {
+            let bloom = if self.hdr && level.bloom() {
+                self.draw_bloom(device, queue, &mut encoder, level, width, height)
+            } else {
+                false
+            };
+            self.resolve(device, queue, &mut encoder, &frame, width, height, bloom);
+            self.resolved_key = Some(resolved_key);
+        }
         self.presented = Some(viewport);
         self.presented_is_resolved = true;
         encoder.finish()
@@ -481,6 +498,7 @@ impl Renderer {
         view_proj: &Mat4,
         eye: Vec3,
         bounce: bool,
+        denoise: bool,
     ) -> bool {
         let Some((min, max)) = frame.bounds else { return false };
         let divisor = frame.level.occlusion_divisor();
@@ -580,6 +598,10 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
+        if !denoise {
+            return true;
+        }
+
         let tolerance = scene::scene_radius(min, max) * OCCLUSION_DEPTH_TOLERANCE_FRACTION;
         for (index, direction) in [(0usize, [1.0f32, 0.0f32]), (1, [0.0, 1.0])] {
             let mut blur = PostUniform {
@@ -639,6 +661,7 @@ impl Renderer {
                 &mirrored_view_proj,
                 mirrored_eye,
                 false,
+                false,
             );
 
         if !self.reflection.ensure(device, width, height) {
@@ -647,6 +670,7 @@ impl Renderer {
         let mut uniform =
             self.scene_uniform(frame, Viewport::new(0, 0, width, height), &mirrored_view_proj, mirrored_eye, 0.0);
         uniform.toggles[0] = if occluded { 1.0 } else { 0.0 };
+        uniform.fill_lines[3] = 0.0;
         let offset = self.arenas.scene.push(queue, &uniform);
         {
             let Some(vertices) = self.vertices.as_ref() else { return false };
