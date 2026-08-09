@@ -70,7 +70,7 @@ cargo test --release -p gridfinity-cad --test fuzz fuzz_bin_shapes -- --exact --
 `fuzz_inner_walls` covers free-form inner walls (the divider/fillet work); `fuzz_params_broad`
 covers shape, height, thicknesses, holes, dividers, slope and mode; `fuzz_bin_shapes` covers the
 **split path** — random connected polyominoes, partitioned the way the web app partitions them, then
-carved piece by piece. `fuzz_inner_walls` is at **30/150 failing, 6 distinct defects** at the
+carved piece by piece. `fuzz_inner_walls` is at **12/150 failing, 7 distinct defects** at the
 default seed and is **currently red**, as is `gridfinity-wasm`'s
 `opening_on_a_hole_boundary_stays_closed`. Those two are the whole of the workspace's known-failing
 surface; everything else, `fuzz_bin_shapes` included, is green. `fuzz_params_broad` reports rather
@@ -113,6 +113,35 @@ mechanism was then pinned by correlating drift with reentrant-corner count (rect
 T and S 2x -104) and with the parameters (flat in every cavity parameter, linear in height). A
 vertex-only containment check will *not* see the overhang: the fillet's tangent points sit exactly
 on the grid lines and only the arc between them escapes.
+
+**What is left in `fuzz_inner_walls` (12/150).** Three fixes took it from 30. Two were the same
+mistake in different places: an island's top face came from the planner's own loop while the walls
+under it follow the slab band's segmentation, so one raw island side faced several band edges and
+paired with none. Both paths take their tops from the band now. The third stopped `seg_edge`
+interning a blend selection the boolean had split -- that reported a missed selection as a
+non-manifold solid, and masked five that genuinely were. What remains splits by where the fault is:
+
+- **7 cases are the tessellator, not the model.** `validate` passes and `audit` reports **zero
+  errors**, so the B-rep is sound and the mesh still leaks. They move with `wall_thickness` and
+  `cavity_corner_radius` in no pattern -- a case leaks at 1.2/0.0, is clean at 1.5/0.0, leaks again
+  at 2.0/0.0 -- which rules out one degenerate value and points at a general fragility where an
+  inner wall meets the cavity's rounded corner.
+- **2 cases are a real blend defect** on a **spindle torus** (`major_r` 1.45 < `minor_r` 4.0, the
+  shape `orient.rs` already warns about): the blend edge's curve lands 2.05 mm from its own vertex
+  and deviates 2.9 mm from the torus it is meant to lie on.
+- **1 case is a genuinely non-manifold** input to the blend (`edge has 1 faces`), which is what
+  that error is for.
+- **2 cases still fail `validate` with `fwd=1 bwd=0`.**
+
+The fuzzer now only generates and shrinks to **edge-connected** bins. `gen_cells` could delete the
+middle of a 1x3 and `shrink` could delete any cell, so either could hand the model a diagonally
+connected bin, which `AGENTS.md` puts out of scope. It changed no counts, but the repros it prints
+are trustworthy now, and were not before.
+
+**`gridfinity-gui`'s `broken()` is coupled to the model's failure surface.** Its three
+failure-path tests need a configuration that genuinely fails, and every fix here retires one, so it
+has been re-pointed twice. It also needs a **hard** failure: `build_bin` only catches `Err` and
+panics, so a solid that builds and then fails `validate` reads as success there.
 
 **Reported leaks are picked by lexicographic minimum, not `leaks[0]`.** `tessellation_leaks` sorts
 by `(a.z, a.x, a.y)`, and ties among those resolve by `HashMap` iteration order, so `leaks[0]` moved

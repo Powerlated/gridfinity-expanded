@@ -746,12 +746,12 @@ mod tests {
         let (ox, oy) = (cell.x as f32 * pitch, cell.y as f32 * pitch);
         vec![
             InnerWall {
-                x1: 46.5 + ox, y1: 3.0 + oy, x2: 21.5 + ox, y2: 14.5 + oy,
-                width: 3.0, height: Some(3.0),
+                x1: 11.0 + ox, y1: 41.0 + oy, x2: 50.5 + ox, y2: -6.0 + oy,
+                width: 5.5, height: Some(3.0),
             },
             InnerWall {
-                x1: 41.0 + ox, y1: -2.5 + oy, x2: 23.0 + ox, y2: 28.0 + oy,
-                width: 5.5, height: Some(5.5),
+                x1: 34.5 + ox, y1: 9.0 + oy, x2: 21.5 + ox, y2: -6.5 + oy,
+                width: 6.0, height: None,
             },
         ]
     }

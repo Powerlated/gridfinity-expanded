@@ -47,12 +47,20 @@ enum Profile {
     Broad,
 }
 
+fn edge_connected(cells: &[GridCell]) -> bool {
+    !cells.is_empty() && flood_parts(cells, &[]).len() == 1
+}
+
 fn gen_cells(rng: &mut Rng) -> Vec<GridCell> {
     let (gx, gy) = (rng.below(3) + 1, rng.below(3) + 1);
     let mut cells = rect_cells(gx, gy);
     if cells.len() > 2 && rng.chance(1, 3) {
         let victim = rng.below(cells.len() as u32) as usize;
-        cells.remove(victim);
+        let kept: Vec<GridCell> =
+            cells.iter().copied().enumerate().filter(|(i, _)| *i != victim).map(|(_, c)| c).collect();
+        if edge_connected(&kept) {
+            cells = kept;
+        }
     }
     cells
 }
@@ -206,7 +214,7 @@ fn shrink(p: &Params, sig: &str) -> Params {
         }
         let mut q = best.clone();
         q.bins[0].cells.remove(i);
-        if same(&q) {
+        if edge_connected(&q.bins[0].cells) && same(&q) {
             best = q;
         }
     }
