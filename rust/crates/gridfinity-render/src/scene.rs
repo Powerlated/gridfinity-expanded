@@ -52,6 +52,7 @@ pub const LAYER_SELF_SHADOW: f32 = 0.55;
 pub const LAYER_SHADING_HARMONICS: f32 = 3.0;
 
 pub const GI_BOUNCE_STRENGTH: f32 = 0.65;
+pub const GI_BOUNCE_HISTORY_CEILING: f32 = 64.0;
 
 pub const DOF_MAX_RADIUS: f32 = 14.0;
 pub const DOF_APERTURE: f32 = 5.5;

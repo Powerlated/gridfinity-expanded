@@ -76,6 +76,10 @@ fn constants() -> String {
         scene::LAYER_SHADING_HARMONICS
     ));
     out.push_str(&format!("const GI_BOUNCE_STRENGTH: f32 = {:.4};\n", scene::GI_BOUNCE_STRENGTH));
+    out.push_str(&format!(
+        "const GI_BOUNCE_HISTORY_CEILING: f32 = {:.4};\n",
+        scene::GI_BOUNCE_HISTORY_CEILING
+    ));
     out.push_str(&format!("const DOF_MAX_RADIUS: f32 = {:.4};\n", scene::DOF_MAX_RADIUS));
     out
 }
@@ -204,7 +208,10 @@ fn layer_attenuation(footprint: f32) -> f32 {
         return 0.0;
     }
     let x = PI * reach;
-    return select(sin(x) / x, 1.0, x < 1e-4);
+    if (x < 1e-4) {
+        return 1.0;
+    }
+    return sin(x) / x;
 }
 
 fn layer_slope_amplitude(facing: f32) -> f32 {
@@ -256,8 +263,10 @@ fn layer_march(wpos: vec3<f32>, n: vec3<f32>, v: vec3<f32>, facing: f32, atten: 
 
 fn layer_normal(n: vec3<f32>, slope: f32) -> vec3<f32> {
     let along = vec3<f32>(0.0, 0.0, 1.0) - n * n.z;
-    let len = length(along);
-    return select(normalize(n + (along / len) * slope * len), n, len < 1e-4);
+    if (length(along) < 1e-4) {
+        return n;
+    }
+    return normalize(n + along * slope);
 }
 
 fn layer_self_shadow(hit: vec3<f32>, n: vec3<f32>, l: vec3<f32>, facing: f32, atten: f32) -> f32 {
@@ -653,10 +662,14 @@ fn fs_occlusion(v: FullscreenOut) -> @location(0) vec4<f32> {
             if (bounce_enabled > 0.5) {
                 let toward = surface.world - origin;
                 let reach = length(toward);
-                let facing = select(0.0, max(dot(n, toward / reach), 0.0), reach > 1e-5);
-                bounce = bounce
-                       + textureSampleLevel(t_previous, s_linear, sample_uv, 0.0).rgb
-                       * range * facing;
+                var facing = 0.0;
+                if (reach > 1e-5) {
+                    facing = max(dot(n, toward / reach), 0.0);
+                }
+                let history = textureSampleLevel(t_previous, s_linear, sample_uv, 0.0).rgb;
+                if (dot(history, vec3<f32>(1.0)) < GI_BOUNCE_HISTORY_CEILING) {
+                    bounce = bounce + history * range * facing;
+                }
             }
         } else {
             bent = bent + dir;
@@ -883,7 +896,10 @@ fn vs_line(v: LineIn) -> LineOut {
     let s1 = c1.xy / max(abs(c1.w), 1e-4) * line.half_vp;
     let d = s1 - s0;
     let len = length(d);
-    let dir = select(vec2<f32>(1.0, 0.0), d / len, len > 1e-6);
+    var dir = vec2<f32>(1.0, 0.0);
+    if (len > 1e-6) {
+        dir = d / len;
+    }
     let nrm = vec2<f32>(-dir.y, dir.x);
     let half_w = 0.5 * line.width;
     let ext = half_w + 1.0;
@@ -1221,6 +1237,53 @@ mod tests {
         let derivative = source.find("fwidth").expect("the band limit takes a derivative");
         let branch = source.find("if (lines > 0.0)").expect("the relief branch exists");
         assert!(derivative < branch);
+    }
+
+    fn select_arguments(source: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let bytes: Vec<char> = source.chars().collect();
+        let mut at = 0;
+        while let Some(found) = source[at..].find("select(") {
+            let start = at + found + "select(".len();
+            let mut depth = 1;
+            let mut end = start;
+            while end < bytes.len() && depth > 0 {
+                match bytes[end] {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                end += 1;
+            }
+            out.push(source[start..end.saturating_sub(1).max(start)].to_string());
+            at = start;
+        }
+        out
+    }
+
+    #[test]
+    fn no_select_guards_a_division_it_has_already_evaluated() {
+        for (name, source) in every_module() {
+            for argument in select_arguments(&source) {
+                assert!(
+                    !argument.contains('/'),
+                    "{name}: `select` evaluates every operand, so it cannot stand in for a \
+                     branch around a division -- the divide happens either way and a zero \
+                     denominator poisons the frame. Use `if`. Offending call: select({argument})",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_bounce_refuses_a_history_sample_it_cannot_trust() {
+        let source = post_module();
+        assert!(
+            source.contains("dot(history, vec3<f32>(1.0)) < GI_BOUNCE_HISTORY_CEILING"),
+            "the bounce reads the frame it just wrote, so one non-finite pixel would seed \
+             itself forever and spread by the sample radius every frame; every comparison \
+             against a NaN is false, which is what rejects it here",
+        );
     }
 
     #[test]
