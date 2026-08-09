@@ -12,7 +12,7 @@
  *   cargo install wasm-pack
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const repoRoot = resolve(import.meta.dirname, '..');
@@ -26,6 +26,40 @@ if (!existsSync(cratePath)) {
     'The kernel workspace should be at rust/; set GRIDFINITY_KERNEL to use another checkout.',
   );
   process.exit(1);
+}
+
+const SOURCE_EXTENSIONS = ['.rs', '.toml', '.lock', '.wgsl'];
+const ARTIFACTS = ['gridfinity_wasm_bg.wasm', 'gridfinity_wasm.js', 'gridfinity_wasm.d.ts'];
+
+function newestSourceChange(dir) {
+  let newest = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'target' || entry.name.startsWith('.')) continue;
+    const path = resolve(dir, entry.name);
+    if (entry.isDirectory()) {
+      newest = Math.max(newest, newestSourceChange(path));
+    } else if (SOURCE_EXTENSIONS.some((ext) => entry.name.endsWith(ext))) {
+      newest = Math.max(newest, statSync(path).mtimeMs);
+    }
+  }
+  return newest;
+}
+
+function staleness() {
+  const missing = ARTIFACTS.filter((name) => !existsSync(resolve(outDir, name)));
+  if (missing.length > 0) return `src/wasm/ is missing ${missing.join(', ')}`;
+  const built = Math.min(...ARTIFACTS.map((name) => statSync(resolve(outDir, name)).mtimeMs));
+  const changed = newestSourceChange(kernelRoot);
+  return changed > built ? 'the Rust kernel changed since src/wasm/ was built' : null;
+}
+
+if (process.argv.includes('--if-needed')) {
+  const reason = staleness();
+  if (reason === null) {
+    console.log('src/wasm/ is up to date with the Rust kernel.');
+    process.exit(0);
+  }
+  console.log(`Rebuilding src/wasm/: ${reason}.`);
 }
 
 const result = spawnSync(

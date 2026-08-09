@@ -52,7 +52,15 @@ Changing the geometry pipeline (`src/lib/geometry/`, `src/workers/geometry.worke
 - `npm run lint` — Oxlint
 - `npm run test` — Vitest
 - `npm run build` — type-check + Vite build
-- `npm run build:wasm` — rebuild `src/wasm/` from the Rust workspace
+- `npm run build:wasm` — rebuild `src/wasm/` from the Rust workspace, unconditionally
+- `npm run dev` — runs `build-wasm.mjs --if-needed` first, so the dev server never serves a
+  `src/wasm/` older than the kernel. Staleness is the newest mtime among the workspace's
+  `.rs`/`.toml`/`.lock`/`.wgsl` files (`target/` excluded) against the oldest artifact in
+  `src/wasm/`; a missing artifact always rebuilds. It is a **startup check, not a watcher** —
+  editing Rust while the server runs does nothing until you restart it. A failing kernel build
+  fails `npm run dev` rather than falling through to a stale artifact; `npm run dev:nowasm` skips
+  the check when you want the UI without the Rust toolchain. `npm run build` does **not** check —
+  `ci.yml` runs `npm run build:wasm` as its own step beforehand.
 - `cd rust && cargo test --release -p gridfinity-cad --lib` — geometry kernel suite, the printability gate
 - `cd rust && cargo test --release --workspace` — full gate incl. fuzzers and benches (slow; pre-PR only)
 - `npm run test:e2e` — Chromium Playwright smoke
