@@ -97,11 +97,11 @@ cargo test --release -p gridfinity-cad --test fuzz fuzz_bin_shapes -- --exact --
 `fuzz_inner_walls` covers free-form inner walls (the divider/fillet work); `fuzz_params_broad`
 covers shape, height, thicknesses, holes, dividers, slope and mode; `fuzz_bin_shapes` covers the
 **split path** — random connected polyominoes, partitioned the way the web app partitions them, then
-carved piece by piece. `fuzz_inner_walls` is at **7/150 failing, 5 distinct defects** at the
+carved piece by piece. `fuzz_inner_walls` is at **8/150 failing, 4 distinct defects** at the
 default seed and is **currently red**, as is `gridfinity-wasm`'s
 `opening_on_a_hole_boundary_stays_closed`. Those two are the whole of the workspace's known-failing
 surface; everything else, `fuzz_bin_shapes` included, is green. `fuzz_params_broad` reports rather
-than asserts, and is at 36/400 / 11 defects.
+than asserts, and is at 36/400 / 10 defects.
 
 `fuzz_bin_shapes` went **47/120 → 0/120** (clean at eight seeds, and 1/1500 at `FUZZ_CASES=1500`)
 across the four defects below. Fixing them moved `fuzz_inner_walls` 27 → 30/150 with **no new defect
@@ -335,7 +335,14 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   holes, goes to [`planar`](#planarrs). The only triangles dropped are ones a weld would collapse
   anyway (two vertices on the same weld key): a flat triangle with three *distinct* vertices still
   has its three edges paired against its neighbours, so discarding it on area alone punches a slit
-  in the mesh.
+  in the mesh. `triangulate` asserts its own postcondition — `assert_tiles_the_loops` requires
+  every loop edge to land in exactly one triangle and every other edge in exactly two. Neither the
+  quad fast path nor `planar` can satisfy that for a loop that is **not simple in uv**, and before
+  the assert existed they answered anyway: a self-intersecting wall-top quad came back as six
+  triangles including a literal duplicate, which surfaced only as a `tessellation_leaks` report on
+  a face far from the trim that authored the bad loop. The assert is where a bowtie loop is now
+  caught, but it is not where such a loop is *fixed* — a firing is a defect in whoever built the
+  face, not in the triangulator.
 - **`planar.rs`** — planar polygon-with-holes triangulation: **monotone decomposition** (sweep top to
   bottom, diagonals at split/merge vertices) then the stack triangulation of each y-monotone piece.
   Chosen over ear clipping for what it guarantees, not for speed: **every boundary vertex the caller

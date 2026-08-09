@@ -415,6 +415,48 @@ fn cross2(uv: &[Vec2], a: usize, b: usize, c: usize) -> f32 {
 }
 
 fn triangulate(sc: &mut Scratch) {
+    triangulate_into(sc);
+    assert_tiles_the_loops(sc);
+}
+
+fn assert_tiles_the_loops(sc: &Scratch) {
+    let mut want: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    for &(s, e) in &sc.spans {
+        if e - s < 3 {
+            continue;
+        }
+        for i in s..e {
+            let j = if i + 1 == e { s } else { i + 1 };
+            want.insert(if i < j { (i, j) } else { (j, i) });
+        }
+    }
+    let mut seen: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::new();
+    for &[a, b, c] in &sc.tris {
+        for (u, v) in [(a, b), (b, c), (c, a)] {
+            *seen.entry(if u < v { (u, v) } else { (v, u) }).or_default() += 1;
+        }
+    }
+    for (&(u, v), &n) in &seen {
+        let want_n = if want.contains(&(u, v)) { 1 } else { 2 };
+        assert_eq!(
+            n, want_n,
+            "triangulation of a {}-loop face is not a tiling: edge ({:?}, {:?}) in {n} triangles, want {want_n}",
+            sc.spans.len(), sc.uv[u], sc.uv[v]
+        );
+    }
+    for e in &want {
+        assert!(
+            seen.contains_key(e),
+            "triangulation of a {}-loop face dropped boundary edge ({:?}, {:?})",
+            sc.spans.len(),
+            sc.uv[e.0],
+            sc.uv[e.1]
+        );
+    }
+}
+
+fn triangulate_into(sc: &mut Scratch) {
     sc.tris.clear();
     let (s, e) = sc.spans[0];
 
