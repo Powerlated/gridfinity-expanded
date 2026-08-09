@@ -134,6 +134,13 @@ pub fn normalize(solid: &mut Solid) {
     for (_, lid) in misoriented_loops(solid) {
         solid.reverse_loop(lid);
     }
+    let left = misoriented_loops(solid);
+    assert!(
+        left.is_empty(),
+        "normalize left {} loop(s) misoriented, first face {}",
+        left.len(),
+        left[0].0
+    );
 }
 
 #[cfg(test)]

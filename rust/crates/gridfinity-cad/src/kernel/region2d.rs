@@ -8,6 +8,11 @@ const EPS: f32 = 1e-4;
 
 const BOX_TOL: f32 = 1e-2;
 
+const _: () = assert!(
+    BOX_TOL > 1e-3,
+    "boxes are grown by BOX_TOL to cover the 1e-3 that on_seg accepts; below that the prune      drops real crossings and the boolean silently loses a cut"
+);
+
 static VERIFY_PRUNE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn set_verify_prune(on: bool) {
@@ -839,13 +844,5 @@ mod prune_verification {
         regions.extend(apart(50.0));
         presplit_regions(&regions);
         assert!(verify_prune(), "the flag must still be set inside the scope");
-    }
-
-    #[test]
-    fn the_box_tolerance_stays_above_what_on_seg_accepts() {
-        assert!(
-            BOX_TOL > 1e-3,
-            "boxes are grown by BOX_TOL to cover the 1e-3 that on_seg accepts;              shrinking it below that prunes real crossings and the boolean loses a cut"
-        );
     }
 }

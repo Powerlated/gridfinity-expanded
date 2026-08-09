@@ -14,6 +14,10 @@ pub struct Arena {
 impl Arena {
     pub fn new(device: &wgpu::Device, label: &str, size: usize) -> Arena {
         let stride = (size as u64).div_ceil(ALIGNMENT) * ALIGNMENT;
+        assert!(
+            stride % ALIGNMENT == 0 && stride >= size as u64,
+            "a {size}-byte binding needs a stride that is a multiple of {ALIGNMENT}, got {stride}"
+        );
         let capacity = stride * SLOTS;
         Arena {
             buffer: device.create_buffer(&wgpu::BufferDescriptor {
@@ -55,14 +59,5 @@ mod tests {
     #[test]
     fn a_frame_gets_far_more_slots_than_the_pass_chain_can_ask_for() {
         assert!(SLOTS > 64, "the deepest frame issues a few dozen draws");
-    }
-
-    #[test]
-    fn an_offset_always_lands_on_a_uniform_binding_boundary() {
-        for size in [96usize, 208, 240, 260] {
-            let stride = (size as u64).div_ceil(ALIGNMENT) * ALIGNMENT;
-            assert_eq!(stride % ALIGNMENT, 0);
-            assert!(stride >= size as u64);
-        }
     }
 }

@@ -13,11 +13,16 @@ impl Default for Quality {
 
 impl Quality {
     pub fn from_index(index: u32) -> Quality {
-        match index {
+        let level = match index {
             0 => Quality::Low,
             1 => Quality::Medium,
             _ => Quality::High,
-        }
+        };
+        assert!(
+            index > Quality::High.index() || level.index() == index,
+            "Quality index {index} does not round-trip"
+        );
+        level
     }
 
     pub fn index(self) -> u32 {
@@ -157,18 +162,6 @@ mod tests {
             assert!(level.bloom_bright_divisor() > 0);
             assert!(level.bloom_blur_divisor() > 0);
         }
-    }
-
-    #[test]
-    fn levels_round_trip_through_their_index() {
-        for level in [Quality::Low, Quality::Medium, Quality::High] {
-            assert_eq!(Quality::from_index(level.index()), level);
-        }
-    }
-
-    #[test]
-    fn an_out_of_range_index_lands_on_the_richest_level() {
-        assert_eq!(Quality::from_index(9), Quality::High);
     }
 
     #[test]

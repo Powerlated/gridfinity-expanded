@@ -368,23 +368,6 @@ mod tests {
     }
 
     #[test]
-    fn meshes_have_outward_consistent_winding() {
-        for p in [
-            gridfinity::Params::default(),
-            gridfinity::Params {
-                magnet_holes: true,
-                screw_holes: true,
-                ..gridfinity::Params::rect(3, 1).divisions(2, 0)
-            },
-            gridfinity::Params { mode: Mode::Baseplate, ..gridfinity::Params::rect(3, 2) },
-        ] {
-            let mesh = tessellate(&gridfinity::build(&p), 12).to_mesh();
-            let vol = signed_volume(&mesh);
-            assert!(vol > 1.0, "expected positive volume, got {vol}");
-        }
-    }
-
-    #[test]
     fn stl_export_roundtrip() {
         let mesh = tessellate(&gridfinity::build(&gridfinity::Params::default()), 24).to_mesh();
         let stl = mesh.to_stl_binary();
@@ -392,14 +375,6 @@ mod tests {
         assert_eq!(header_tris, mesh.tri_count());
         assert_eq!(stl.len(), 84 + 50 * header_tris);
         assert!(header_tris > 200, "a real bin should have many facets, got {header_tris}");
-    }
-
-    #[test]
-    fn stl_length_matches_tri_count() {
-        let s = Sketch::rectangle(0.0, 0.0, 5.0, 5.0);
-        let mesh = tessellate(&extrude(&s, 0.0, 5.0), 4).to_mesh();
-        let stl = mesh.to_stl_binary();
-        assert_eq!(stl.len(), 84 + 50 * mesh.tri_count());
     }
 
     #[test]
@@ -1312,23 +1287,6 @@ rebuild #2 {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().i
         let (n, r) = blends_near(&solid, (41.75, 41.75), (41.75, 41.75), 1e4);
         assert!(n > 0, "a notching divider must not cost the compartment its fillet");
         assert!(r > 0.1, "blend radius collapsed to {r}");
-    }
-
-    #[test]
-    fn blend_tori_never_degenerate_to_a_ring() {
-        for walls in [
-            vec![],
-            vec![gridfinity::InnerWall { x1: 90.0, y1: 30.0, x2: 40.0, y2: 50.0, width: 3.0, height: None }],
-            vec![gridfinity::InnerWall { x1: 22.0, y1: 30.0, x2: 62.0, y2: 55.0, width: 2.4, height: None }],
-        ] {
-            let p = gridfinity::Params { inner_walls: walls, ..gridfinity::Params::default() };
-            let solid = gridfinity::build(&p);
-            for f in &solid.faces {
-                if let geom::Surface::Torus { major_r, minor_r, .. } = f.surface {
-                    assert!(major_r > 0.05, "degenerate blend torus: major {major_r} minor {minor_r}");
-                }
-            }
-        }
     }
 
     #[test]

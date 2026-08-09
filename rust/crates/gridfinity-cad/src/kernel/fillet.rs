@@ -567,6 +567,10 @@ fn build_torus_blend(
     let torus_center = cv0_on;
     let torus_axis = edge_axis;
     let ref_dir = edge_ref_dir;
+    assert!(
+        major > 0.05,
+        "blend torus degenerates to a ring: major {major} minor {r}"
+    );
     let surface = Surface::Torus {
         center: torus_center,
         axis: torus_axis,

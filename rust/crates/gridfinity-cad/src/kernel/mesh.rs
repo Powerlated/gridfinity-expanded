@@ -72,6 +72,11 @@ impl Mesh {
             }
             buf.extend_from_slice(&0u16.to_le_bytes());
         }
+        assert_eq!(
+            buf.len(),
+            84 + 50 * tris,
+            "binary STL is 84 bytes of header plus 50 per facet"
+        );
         buf
     }
 }
