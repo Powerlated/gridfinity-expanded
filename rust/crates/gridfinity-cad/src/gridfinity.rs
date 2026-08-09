@@ -220,10 +220,14 @@ pub fn build(p: &Params) -> Solid {
 }
 
 pub fn try_build(p: &Params) -> Result<Solid, String> {
-    match p.mode {
-        Mode::Baseplate => Ok(build_baseplate(p)),
-        Mode::Bin => run_all(&program(p)),
+    let solid = match p.mode {
+        Mode::Baseplate => build_baseplate(p),
+        Mode::Bin => run_all(&program(p))?,
+    };
+    if let Err(e) = solid.validate() {
+        panic!("{:?} is not a closed manifold: {e}", p.mode);
     }
+    Ok(solid)
 }
 
 pub fn program(p: &Params) -> Program {
@@ -1536,16 +1540,17 @@ fn plan_piece(
                         holes: floor_holes,
                     },
                 ));
+                rim_holes.push(cl.segs.clone());
             }
             None => {
-                let (stack, opts, tops, blends) =
+                let (stack, opts, tops, rim, blends) =
                     plan_cavity_flat(&cl.segs, &island_shapes, floor_z, total_h, loop_fr);
                 island_tops.extend(tops);
+                rim_holes.extend(rim);
                 fillet_edges.extend(blends);
                 cav_ops.push((format!("cavity {ci}: slab stack"), POp::Slabs { stack, opts }));
             }
         }
-        rim_holes.push(cl.segs.clone());
     }
 
     let sector_segs: Vec<Vec<Seg>> =
@@ -1966,7 +1971,7 @@ fn plan_cavity_flat(
     floor_z: f32,
     total_h: f32,
     loop_fr: f32,
-) -> (Vec<(SlabOp, Slab)>, SlabOpts, Vec<Vec<Seg>>, Vec<(Seg, f32, f32)>) {
+) -> (Vec<(SlabOp, Slab)>, SlabOpts, Vec<Vec<Seg>>, Vec<Vec<Seg>>, Vec<(Seg, f32, f32)>) {
     let mut stack = vec![(SlabOp::Union, Slab::new(vec![shape.to_vec()], floor_z, total_h))];
     for isl in islands {
         stack.push((
@@ -1983,13 +1988,19 @@ fn plan_cavity_flat(
             blends.extend(isl.segs.iter().map(|s| (*s, floor_z, isl.fr)));
         }
     }
-    let tops: Vec<Vec<Seg>> = plan_bands(&stack)
+    let top_band = plan_bands(&stack)
         .map(|(_, bands)| bands.last().cloned().unwrap_or_default())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|l| loop_area(l) < 0.0)
-        .collect();
-    (stack, SlabOpts { cavity: true, open_at: vec![total_h] }, tops, blends)
+        .unwrap_or_default();
+    let tops: Vec<Vec<Seg>> =
+        top_band.iter().filter(|l| loop_area(l) < 0.0).cloned().collect();
+    let rim: Vec<Vec<Seg>> =
+        top_band.iter().filter(|l| loop_area(l) > 0.0).cloned().collect();
+    assert_eq!(
+        tops.len() + rim.len(),
+        top_band.len(),
+        "a top-band loop has zero area, so it is neither void nor island"
+    );
+    (stack, SlabOpts { cavity: true, open_at: vec![total_h] }, tops, rim, blends)
 }
 
 fn plan_cavity_banded(
@@ -2019,6 +2030,11 @@ fn plan_cavity_banded(
         top_band.iter().filter(|l| loop_area(l) > 0.0).cloned().collect();
     let tops: Vec<Vec<Seg>> =
         top_band.iter().filter(|l| loop_area(l) < 0.0).cloned().collect();
+    assert_eq!(
+        tops.len() + rim.len(),
+        top_band.len(),
+        "a top-band loop has zero area, so it is neither void nor island"
+    );
 
     let mut blends: Vec<(Seg, f32, f32)> = Vec::new();
     for n in &bd.notches {

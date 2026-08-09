@@ -84,6 +84,11 @@ impl EdgeSamples {
         for e in &solid.edges {
             let start = pts.len();
             e.sample_into(true, e.seg_count(arc_segs_per_quarter), &mut pts);
+            assert!(
+                pts.len() >= start + 2,
+                "edge sampled to {} points, want at least 2",
+                pts.len() - start
+            );
             pts[start] = solid.verts[e.v0].point;
             let last = pts.len() - 1;
             pts[last] = solid.verts[e.v1].point;

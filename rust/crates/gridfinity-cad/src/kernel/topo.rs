@@ -1,6 +1,6 @@
 
 use crate::kernel::geom::{Curve, Surface};
-use crate::kernel::math::{Vec3, weld_key};
+use crate::kernel::math::{Vec3, WELD_NEAR_SQ, weld_key};
 use crate::kernel::hash::FxHashMap;
 
 pub type VertexId = usize;
@@ -362,19 +362,44 @@ impl Builder {
     /// produce must come back empty: interning it would mint an edge no face
     /// uses, which fails `validate` whatever the caller then does with it.
     pub fn find_edge(&self, a: Vec3, b: Vec3, mid: Vec3) -> Option<EdgeId> {
-        let va = *self.vert_index.get(&weld_key(a))?;
-        let vb = *self.vert_index.get(&weld_key(b))?;
+        let va = self.find_vertex(a)?;
+        let vb = self.find_vertex(b)?;
         let (lo, hi) = if va < vb { (va, vb) } else { (vb, va) };
-        self.edge_index.get(&(lo, hi, weld_key(mid))).copied()
+        self.find_edge_id(lo, hi, mid)
+    }
+
+    pub fn find_vertex(&self, p: Vec3) -> Option<VertexId> {
+        assert!(p.is_finite(), "vertex at a non-finite point {p:?}");
+        let k = weld_key(p);
+        if let Some(&id) = self.vert_index.get(&k) {
+            return Some(id);
+        }
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let n = (k.0 + dx, k.1 + dy, k.2 + dz);
+                    if let Some(&id) = self.vert_index.get(&n)
+                        && (self.verts[id].point - p).length_squared() <= WELD_NEAR_SQ
+                    {
+                        return Some(id);
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub fn vertex(&mut self, p: Vec3) -> VertexId {
         crate::kernel::perf::count(crate::kernel::perf::Metric::BuilderVertex);
-        *self.vert_index.entry(weld_key(p)).or_insert_with(|| {
-            let id = self.verts.len();
-            self.verts.push(Vertex { point: p });
-            id
-        })
+        let k = weld_key(p);
+        if let Some(id) = self.find_vertex(p) {
+            self.vert_index.insert(k, id);
+            return id;
+        }
+        let id = self.verts.len();
+        self.verts.push(Vertex { point: p });
+        self.vert_index.insert(k, id);
+        id
     }
 
     pub fn line(&mut self, a: VertexId, b: VertexId) -> (EdgeId, bool) {
@@ -463,14 +488,41 @@ impl Builder {
         make: impl FnOnce() -> Edge,
     ) -> (EdgeId, bool) {
         let (lo, hi) = if a < b { (a, b) } else { (b, a) };
-        let key = (lo, hi, weld_key(mid));
-        if let Some(&e) = self.edge_index.get(&key) {
+        if let Some(e) = self.find_edge_id(lo, hi, mid) {
             return (e, self.edges[e].v0 == a);
         }
         let id = self.edges.len();
         self.edges.push(make());
-        self.edge_index.insert(key, id);
+        self.edge_index.insert((lo, hi, weld_key(mid)), id);
         (id, true)
+    }
+
+    fn find_edge_id(&self, lo: VertexId, hi: VertexId, mid: Vec3) -> Option<EdgeId> {
+        assert!(mid.is_finite(), "edge midpoint is not finite: {mid:?}");
+        let k = weld_key(mid);
+        if let Some(&e) = self.edge_index.get(&(lo, hi, k)) {
+            return Some(e);
+        }
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let n = (k.0 + dx, k.1 + dy, k.2 + dz);
+                    if let Some(&e) = self.edge_index.get(&(lo, hi, n)) {
+                        let ed = self.edges[e];
+                        let stored = match ed.curve {
+                            Curve::Line { .. } => {
+                                (self.verts[ed.v0].point + self.verts[ed.v1].point) * 0.5
+                            }
+                            _ => ed.curve.point((ed.t0 + ed.t1) * 0.5),
+                        };
+                        if (stored - mid).length_squared() <= WELD_NEAR_SQ {
+                            return Some(e);
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub fn face(&mut self, surface: Surface, sense: bool, outer: Loop, inners: Vec<Loop>) -> usize {

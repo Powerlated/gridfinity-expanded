@@ -1413,6 +1413,53 @@ mod audit_tests {
     }
 
     #[test]
+    fn a_partial_wall_leaves_the_rim_hole_segmented_the_way_the_bands_below_it_are() {
+        use crate::gridfinity::InnerWall;
+        use crate::layout::GridCell;
+        let p = gridfinity::Params {
+            bins: vec![gridfinity::LogicalBin {
+                cells: vec![
+                    GridCell { x: 0, y: 0 },
+                    GridCell { x: 0, y: 1 },
+                    GridCell { x: 1, y: 1 },
+                ],
+                ..Default::default()
+            }],
+            inner_walls: vec![
+                InnerWall { x1: 26.5, y1: 62.0, x2: 51.5, y2: 79.0, width: 1.6, height: Some(11.5) },
+                InnerWall { x1: 27.5, y1: 26.5, x2: 33.0, y2: 89.0, width: 5.0, height: None },
+            ],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&p);
+        assert!(crate::audit(&solid).is_ok(), "{}", crate::audit(&solid));
+        assert!(tessellation_leaks(&tessellate(&solid, 6)).is_empty(), "mesh leaks");
+    }
+
+    #[test]
+    fn two_solves_of_one_corner_that_straddle_a_weld_bucket_intern_to_one_vertex() {
+        use crate::gridfinity::InnerWall;
+        use crate::layout::GridCell;
+        let p = gridfinity::Params {
+            bins: vec![gridfinity::LogicalBin {
+                cells: vec![
+                    GridCell { x: 0, y: 0 },
+                    GridCell { x: 0, y: 1 },
+                    GridCell { x: 1, y: 1 },
+                ],
+                ..Default::default()
+            }],
+            inner_walls: vec![InnerWall {
+                x1: -5.0, y1: 9.5, x2: 66.0, y2: 64.5, width: 1.0, height: Some(11.0),
+            }],
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::build(&p);
+        assert!(crate::audit(&solid).is_ok(), "{}", crate::audit(&solid));
+        assert!(tessellation_leaks(&tessellate(&solid, 6)).is_empty(), "mesh leaks");
+    }
+
+    #[test]
     fn an_inner_wall_meeting_a_cavity_corner_arc_tessellates_closed_at_the_shared_vertex() {
         use crate::gridfinity::InnerWall;
         use crate::layout::GridCell;

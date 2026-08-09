@@ -97,11 +97,11 @@ cargo test --release -p gridfinity-cad --test fuzz fuzz_bin_shapes -- --exact --
 `fuzz_inner_walls` covers free-form inner walls (the divider/fillet work); `fuzz_params_broad`
 covers shape, height, thicknesses, holes, dividers, slope and mode; `fuzz_bin_shapes` covers the
 **split path** — random connected polyominoes, partitioned the way the web app partitions them, then
-carved piece by piece. `fuzz_inner_walls` is at **8/150 failing, 4 distinct defects** at the
+carved piece by piece. `fuzz_inner_walls` is at **5/150 failing, 3 distinct defects** at the
 default seed and is **currently red**, as is `gridfinity-wasm`'s
 `opening_on_a_hole_boundary_stays_closed`. Those two are the whole of the workspace's known-failing
 surface; everything else, `fuzz_bin_shapes` included, is green. `fuzz_params_broad` reports rather
-than asserts, and is at 36/400 / 10 defects.
+than asserts, and is at 35/400 / 10 defects.
 
 `fuzz_bin_shapes` went **47/120 → 0/120** (clean at eight seeds, and 1/1500 at `FUZZ_CASES=1500`)
 across the four defects below. Fixing them moved `fuzz_inner_walls` 27 → 30/150 with **no new defect
@@ -232,7 +232,12 @@ Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet
   loops off the solid via `outer_edges`/`face_loops`/`inner_loops`/`n_inners`. Cloning a `Solid`
   (which `fillet_edges` does repeatedly) is therefore a few flat `memcpy`s. `Builder` interns
   vertices and edges (edge key = sorted endpoints **+ welded midpoint**, so a circle's two
-  semicircle arcs don't collapse into one edge) and flattens each face's loops into the arena. `Solid::validate()` enforces the
+  semicircle arcs don't collapse into one edge). Both lookups are **exact bucket first, then the
+  26 neighbours within `WELD_NEAR`**. The exact bucket must win unconditionally: a point may sit
+  most of a bucket diagonal from its bucket's representative, so distance-testing the exact hit
+  splits vertices the old lookup shared. The neighbour scan is what catches the opposite failure
+  -- two solves of one corner landing 4e-6 mm apart but on either side of a bucket boundary,
+  which interned as two vertices and left the solid non-manifold at an edge nothing paired with. and flattens each face's loops into the arena. `Solid::validate()` enforces the
   manifold invariant: **every edge used exactly twice, once in each direction**.
   `Builder::build` asserts it itself, via `validate_ignoring_unused_edges` — the interning arena
   can outlive edges no face kept, and only `compact_edges` drops them, so orphans are the one
