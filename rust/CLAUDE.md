@@ -103,6 +103,17 @@ default seed and is **currently red**, as is `gridfinity-wasm`'s
 surface; everything else, `fuzz_bin_shapes` included, is green. `fuzz_params_broad` reports rather
 than asserts, and is at 35/400 / 10 defects.
 
+`fuzz_inner_walls`' remaining three cases are the **tiling assert firing on a blend patch whose two
+trim curves cross each other**, and it is a `fillet.rs` defect, not a tessellation one. The face
+that fires is a well-formed 4-edge cylinder quad — `n_inners` 0, sample counts 2/7/2/7, loop
+closure and the manifold invariant both clean — but its two long sides are trim curves that swap
+which side of the patch they bound: on the radius-4 fillet at the junction of two inner walls, one
+side runs `v` 5.22 → 2.11 as `u` sweeps 0 → π/2 while the other runs 0 → 5.145, so they cross near
+`u` ≈ 1.1 and the patch pinches to nothing and reopens inverted. Nothing downstream can triangulate
+that; the blend needed splitting into two faces at the crossing, or rejecting. `tess_grid_quad`
+correctly declines it (neither rotation has an iso-`u` or iso-`v` side), and the planar path is
+where it used to turn into silent overlapping triangles.
+
 `fuzz_bin_shapes` went **47/120 → 0/120** (clean at eight seeds, and 1/1500 at `FUZZ_CASES=1500`)
 across the four defects below. Fixing them moved `fuzz_inner_walls` 27 → 30/150 with **no new defect
 class**: the corner clamp changes every bin's cavity slightly (rc 2.5 → 2.55 at the default wall),
