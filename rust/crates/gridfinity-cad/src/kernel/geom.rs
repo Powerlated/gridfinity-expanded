@@ -172,7 +172,12 @@ impl Surface {
                 let d = p - center;
                 let along = d.dot(axis);
                 let perp = (d - axis * along).length();
-                ((perp - major_r).powi(2) + along * along).sqrt() - minor_r
+                let near = ((perp - major_r).powi(2) + along * along).sqrt() - minor_r;
+                if major_r >= minor_r {
+                    return near;
+                }
+                let far = ((perp + major_r).powi(2) + along * along).sqrt() - minor_r;
+                if near.abs() <= far.abs() { near } else { far }
             }
         }
     }

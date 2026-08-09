@@ -328,6 +328,7 @@ fn fillet_edges_with(
         b.face_from(surface, sense, outer, &inners);
     }
 
+    let mut blend_faces: Vec<usize> = Vec::with_capacity(bm.len());
     let mut blend_keys: Vec<EdgeId> = bm.keys().copied().collect();
     blend_keys.sort_unstable();
     for k in blend_keys {
@@ -341,12 +342,18 @@ fn fillet_edges_with(
         } else {
             [e_ta, e_ca1, (e_tb.0, !e_tb.1), (e_ca0.0, !e_ca0.1)]
         };
-        b.face_from(bld.surface, bld.sense, &lp, &[]);
+        blend_faces.push(b.face_from(bld.surface, bld.sense, &lp, &[]));
     }
 
     let s = b.build_compact_unvalidated();
     if let Err(e) = s.validate() {
         return Err(format!("blend: rebuilt solid invalid: {e}"));
+    }
+    let _ = &blend_faces;
+    for fid in 0..s.faces.len() {
+        if crate::kernel::audit::face_loops_self_intersect(&s, fid) {
+            return Err(format!("blend: face {fid}'s boundary crosses itself"));
+        }
     }
     Ok(s)
 }

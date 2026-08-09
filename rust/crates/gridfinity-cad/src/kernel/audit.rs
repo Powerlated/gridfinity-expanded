@@ -204,6 +204,95 @@ pub fn tessellation_leaks(tess: &crate::kernel::tess::Tessellation) -> Vec<TessL
 }
 
 
+pub fn face_loops_self_intersect(solid: &Solid, fid: usize) -> bool {
+    use crate::kernel::math::Vec2;
+    const PER_EDGE: usize = 4;
+    let face = &solid.faces[fid];
+    if matches!(face.surface, Surface::Sphere { .. }) {
+        return false;
+    }
+    let prep = face.surface.prepare();
+    let planar = matches!(face.surface, Surface::Plane { .. });
+    let mut pts: Vec<Vec2> = Vec::new();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for lp in solid.face_loops(fid) {
+        let start = pts.len();
+        for &(e, fwd) in lp {
+            let ed = solid.edges[e];
+            let n = match ed.curve {
+                Curve::Line { .. } => 1,
+                _ => PER_EDGE,
+            };
+            for k in 0..n {
+                let f = k as f32 / n as f32;
+                let t = if fwd {
+                    ed.t0 + (ed.t1 - ed.t0) * f
+                } else {
+                    ed.t1 + (ed.t0 - ed.t1) * f
+                };
+                let (u, v) = prep.project(ed.curve.point(t));
+                pts.push(Vec2::new(u, v));
+            }
+        }
+        spans.push((start, pts.len()));
+    }
+    if !planar {
+        for &(s, e) in &spans {
+            let mut prev = pts[s].x;
+            for p in pts.iter_mut().take(e).skip(s + 1) {
+                while p.x - prev > std::f32::consts::PI {
+                    p.x -= std::f32::consts::TAU;
+                }
+                while p.x - prev < -std::f32::consts::PI {
+                    p.x += std::f32::consts::TAU;
+                }
+                prev = p.x;
+            }
+        }
+    }
+    if matches!(face.surface, Surface::Torus { .. }) {
+        for &(s, e) in &spans {
+            let mut prev = pts[s].y;
+            for p in pts.iter_mut().take(e).skip(s + 1) {
+                while p.y - prev > std::f32::consts::PI {
+                    p.y -= std::f32::consts::TAU;
+                }
+                while p.y - prev < -std::f32::consts::PI {
+                    p.y += std::f32::consts::TAU;
+                }
+                prev = p.y;
+            }
+        }
+    }
+    let mut segs: Vec<(Vec2, Vec2)> = Vec::new();
+    for &(s, e) in &spans {
+        if e - s < 3 {
+            continue;
+        }
+        for i in s..e {
+            let j = if i + 1 == e { s } else { i + 1 };
+            segs.push((pts[i], pts[j]));
+        }
+    }
+    let side = |a: Vec2, b: Vec2, c: Vec2| (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    for i in 0..segs.len() {
+        for j in (i + 1)..segs.len() {
+            let (p, q) = segs[i];
+            let (r, t) = segs[j];
+            if p == r || p == t || q == r || q == t {
+                continue;
+            }
+            let (d1, d2) = (side(p, q, r), side(p, q, t));
+            let (d3, d4) = (side(r, t, p), side(r, t, q));
+            if d1 * d2 < 0.0 && d3 * d4 < 0.0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+
 fn audit_manifold(solid: &Solid, defects: &mut Vec<Defect>) {
     let edge_faces = solid.edge_faces();
     let mut fwd = vec![0u32; solid.edges.len()];
@@ -614,12 +703,9 @@ fn dist_to_surface(p: Vec3, s: Surface) -> f32 {
                 r * (theta - half_angle).sin().abs()
             }
         }
-        Surface::Sphere { center, radius, .. } => (p - center).length() - radius,
-        Surface::Torus { center, axis, major_r, minor_r, .. } => {
-            let rel = p - center;
-            let axial = rel.dot(axis);
-            let radial = (rel - axis * axial).length();
-            (((radial - major_r).powi(2) + axial * axial).sqrt() - minor_r).abs()
+        Surface::Sphere { center, radius, .. } => ((p - center).length() - radius).abs(),
+        Surface::Torus { .. } => {
+            s.signed_distance(p).abs()
         }
     }
     .abs()

@@ -202,6 +202,20 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
                 }
             }
         }
+        if matches!(face.surface, crate::kernel::geom::Surface::Torus { .. }) {
+            for &(s, e) in &sc.spans {
+                let mut prev = sc.uv[s].y;
+                for p in sc.uv.iter_mut().take(e).skip(s + 1) {
+                    while p.y - prev > std::f32::consts::PI {
+                        p.y -= 2.0 * std::f32::consts::PI;
+                    }
+                    while p.y - prev < -std::f32::consts::PI {
+                        p.y += 2.0 * std::f32::consts::PI;
+                    }
+                    prev = p.y;
+                }
+            }
+        }
 
         let t1 = diag.then(now);
         triangulate(&mut sc);

@@ -115,37 +115,28 @@ cargo test --release -p gridfinity-cad --test fuzz fuzz_bin_shapes -- --exact --
 `fuzz_inner_walls` covers free-form inner walls (the divider/fillet work); `fuzz_params_broad`
 covers shape, height, thicknesses, holes, dividers, slope and mode; `fuzz_bin_shapes` covers the
 **split path** — random connected polyominoes, partitioned the way the web app partitions them, then
-carved piece by piece. `fuzz_inner_walls` is at **5/150 failing, 3 distinct defects** at the
-default seed and is **currently red**, as is `gridfinity-wasm`'s
-`opening_on_a_hole_boundary_stays_closed`. Those two are the whole of the workspace's known-failing
-surface; everything else, `fuzz_bin_shapes` included, is green. `fuzz_params_broad` reports rather
-than asserts, and is at 35/400 / 10 defects.
+carved piece by piece. `fuzz_inner_walls` and `fuzz_bin_shapes` are both **green** at the default
+seed. `fuzz_params_broad` reports rather than asserts, and is at 28/400 / 5 defects.
 
 A torus blend's tangent circles take their parameter range from **their own tangent points**
-(`circle_span`), not from the edge being blended. Inheriting `(a0, a1)` only works while the
-tangent circle is in phase with the source arc, and it is not once the blend radius exceeds the
-corner radius: the tangent circle lands on the far side of the axis, so the range needed rotating
-by π and reversing. `circle_span` takes only the sweep *magnitude* from the source and picks the
-direction that lands on the second tangent point — the magnitude still has to come from the source,
-because a full-turn blend's two endpoints coincide and the endpoints alone cannot tell 2π from 0.
+(`circle_span`), not from the edge being blended: once the blend radius exceeds the corner radius
+the tangent circle lands on the far side of the axis, so the inherited range needed rotating by π
+and reversing. Only the sweep *magnitude* comes from the source, because a full-turn blend's two
+endpoints coincide and cannot tell 2π from 0.
 
-`fuzz_inner_walls`' remaining tiling cases are the **tiling assert firing on a blend patch whose two
-trim curves cross each other**, and it is a `fillet.rs` defect, not a tessellation one. The face
-that fires is a well-formed 4-edge cylinder quad — `n_inners` 0, sample counts 2/7/2/7, loop
-closure and the manifold invariant both clean — but its two long sides are trim curves that swap
-which side of the patch they bound: on the radius-4 fillet at the junction of two inner walls, one
-side runs `v` 5.22 → 2.11 as `u` sweeps 0 → π/2 while the other runs 0 → 5.145, so they cross near
-`u` ≈ 1.1 and the patch pinches to nothing and reopens inverted. Nothing downstream can triangulate
-that; the blend needed splitting into two faces at the crossing, or rejecting. `tess_grid_quad`
-correctly declines it (neither rotation has an iso-`u` or iso-`v` side), and the planar path is
-where it used to turn into silent overlapping triangles.
+**Both of a torus's parameters are angles**, and `tessellate` unwrapped only `u` for years. A blend
+patch crossing the `v` seam therefore arrived at the triangulator as a torn polygon. `dist_to_surface`
+had the matching bug in the other direction: it duplicated the ring-torus distance formula, whose
+`perp` is unsigned, so on a **spindle** torus (`major_r` < `minor_r`, every corner blend) a point
+with a negative radial coefficient measured exactly `2·major_r` off a surface it was sitting on.
+`Surface::signed_distance` now takes the nearer of the two radial branches for spindles, and the
+auditor delegates to it instead of keeping a copy.
 
-The audit case that remains is three `EdgeOnSurface` errors, each a `TorusSection` connect-arc
-deviating **2·`major_r`** from the spindle torus it should lie on — the signature of a π error in
-the section's `offset`/`branch`, and the same phase family `circle_span` fixed for the tangent
-circles. That is the next thread to pull, and it is a plausible source of the crossing trim curves
-above, since a mis-phased blend curve is exactly what would make two trims swap sides.
-
+**A fillet that would build a face whose boundary crosses itself is refused**, and
+`fillet_best_effort` drops it — an unfilleted corner, not a build failure, which is the policy that
+was already there for blends that fail to build at all. The check (`face_loops_self_intersect`)
+runs over *every* face the rebuild touched, not just the blend faces: the runout rewrites the loops
+of neighbouring walls too, and the bowties it left there were the larger half of the defect.
 `fuzz_bin_shapes` went **47/120 → 0/120** (clean at eight seeds, and 1/1500 at `FUZZ_CASES=1500`)
 across the four defects below. Fixing them moved `fuzz_inner_walls` 27 → 30/150 with **no new defect
 class**: the corner clamp changes every bin's cavity slightly (rc 2.5 → 2.55 at the default wall),
