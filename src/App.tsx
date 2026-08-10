@@ -15,7 +15,7 @@ const ModelViewer = lazy(() => import('./components/viewer/ModelViewer').then((m
 export default function App() {
   const design = useAppStore((s) => s.design);
   const panelWidths = useAppStore((s) => s.panelWidths);
-  const { bins, design: generatedDesign, generating, error } = useBinGeometry(design);
+  const { bins, generating, error } = useBinGeometry(design);
   const badApple = useBadApple();
 
   return (
@@ -53,7 +53,6 @@ export default function App() {
         )}>
           <ModelViewer
             bins={bins}
-            design={generatedDesign}
             error={error}
             badApple={badApple}
           />

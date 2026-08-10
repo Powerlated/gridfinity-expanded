@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Text } from '@mantine/core';
+import { Button, Group, Text } from '@mantine/core';
 import wasmUrl from '../../wasm/gridfinity_wasm_bg.wasm?url';
 import { createViewer, initKernel } from '../../lib/geometry/kernel';
 import type { Viewer } from '../../lib/geometry/kernel';
 import { previewLayout } from '../../lib/preview';
 import type { PreviewPiece } from '../../lib/preview';
-import type { Bin, Design } from '../../lib/types';
+import type { Bin } from '../../lib/types';
 import type { BadAppleFeed } from '../../hooks/useBadApple';
 import { binColor } from '../sidebar/binColors';
 import { RENDER_QUALITY_INDEX, renderQualityFromIndex, useAppStore } from '../../store';
@@ -14,6 +14,8 @@ const NO_PARTS: PreviewPiece[] = [];
 const CLEAR_COLOR = 0x1c1c21;
 const DEFAULT_CAMERA_YAW = 0.9;
 const FACE_ORIENTATION = 'counter-clockwise';
+const EXPLODE_DISTANCE = 24;
+const EXPLODE_TIME_CONSTANT = 0.12;
 
 function hexToRgb(hex: string): number {
   return Number.parseInt(hex.replace('#', ''), 16);
@@ -21,18 +23,16 @@ function hexToRgb(hex: string): number {
 
 interface Props {
   bins: Bin[];
-  design: Design | null;
   error: string | null;
   badApple?: BadAppleFeed | null;
 }
 
 export function ModelViewer({
   bins,
-  design,
   error,
   badApple = null,
 }: Props) {
-  const designParts = useMemo(() => previewLayout(bins, design), [bins, design]);
+  const designParts = useMemo(() => previewLayout(bins), [bins]);
   const active = badApple?.active ?? false;
   const parts = active ? NO_PARTS : designParts;
   const renderQuality = useAppStore((state) => state.renderQuality);
@@ -47,6 +47,12 @@ export function ModelViewer({
   feedRef.current = active ? badApple : null;
   const [viewer, setViewer] = useState<Viewer | null>(null);
   const [kernelError, setKernelError] = useState<string | null>(null);
+  const [exploded, setExploded] = useState(false);
+  const explodeTargetRef = useRef(0);
+  const explodeRef = useRef(0);
+  const explodeClockRef = useRef<number | null>(null);
+  const separable = parts.length > 1;
+  explodeTargetRef.current = exploded && separable ? EXPLODE_DISTANCE : 0;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -83,6 +89,19 @@ export function ModelViewer({
 
         const tick = (time: number) => {
           frame = requestAnimationFrame(tick);
+          const previous = explodeClockRef.current;
+          explodeClockRef.current = time;
+          const target = explodeTargetRef.current;
+          if (explodeRef.current !== target) {
+            const elapsed = Math.min(0.05, previous === null ? 0 : (time - previous) / 1000);
+            const eased = explodeRef.current
+              + (target - explodeRef.current) * (1 - Math.exp(-elapsed / EXPLODE_TIME_CONSTANT));
+            explodeRef.current = Math.abs(target - eased) < 0.01 ? target : eased;
+            created.set_explode(explodeRef.current);
+            if (containerRef.current) {
+              containerRef.current.dataset.explode = explodeRef.current.toFixed(2);
+            }
+          }
           const next = feedRef.current?.pending.current ?? null;
           if (next) {
             feedRef.current!.pending.current = null;
@@ -178,9 +197,10 @@ export function ModelViewer({
     for (const part of parts) {
       viewer.add_piece(
         part.vertices,
-        part.previewOffset.x,
-        part.previewOffset.y,
+        part.apartDirection.x,
+        part.apartDirection.y,
         hexToRgb(binColor(part.binId)),
+        part.cutSegments,
       );
     }
     viewer.commit_scene(true);
@@ -199,18 +219,28 @@ export function ModelViewer({
       data-mesh-topology="welded-vertex-normals"
       data-renderer="rust-webgl2"
       data-render-quality-mode={renderQuality}
-      data-preview-offsets={parts.map((part) =>
-        `${part.previewOffset.x.toFixed(2)},${part.previewOffset.y.toFixed(2)}`).join(';')}
+      data-piece-directions={parts.map((part) =>
+        `${part.apartDirection.x.toFixed(2)},${part.apartDirection.y.toFixed(2)}`).join(';')}
     >
       <canvas ref={canvasRef} className="viewer-canvas" aria-label="3D bin preview" />
-      <Button
-        className="viewer-reset"
-        size="compact-xs"
-        variant="default"
-        onClick={() => viewerRef.current?.reset_view()}
-      >
-        Reset view
-      </Button>
+      <Group className="viewer-tools" gap="xs">
+        <Button
+          size="compact-xs"
+          variant={exploded ? 'filled' : 'default'}
+          disabled={!separable}
+          aria-pressed={exploded}
+          onClick={() => setExploded((on) => !on)}
+        >
+          {exploded ? 'Close up' : 'Show gaps'}
+        </Button>
+        <Button
+          size="compact-xs"
+          variant="default"
+          onClick={() => viewerRef.current?.reset_view()}
+        >
+          Reset view
+        </Button>
+      </Group>
       {(error || kernelError) && (
         <div className="viewer-overlay viewer-overlay--error">
           <Text size="sm" c="red">{error ?? kernelError}</Text>

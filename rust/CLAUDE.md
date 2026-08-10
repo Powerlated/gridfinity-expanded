@@ -97,15 +97,18 @@ The lib gate went 0.08 s → 1.9 s across these, which is the trade the rule abo
 cargo build                      # build both crates
 cargo test --release -p gridfinity-cad --lib   # the working gate: engine + model unit tests
 cargo test --release -p gridfinity-cad --lib <name> -- --nocapture   # one test, e.g. default_bin_is_valid_watertight_and_sized
-cargo test --release --workspace # full gate incl. fuzz/scale/gui benches -- slow, pre-PR only
+cargo test --release --workspace # full gate incl. the fuzzers -- slow, pre-PR only
+cargo test --release --workspace -- --ignored --nocapture   # the benchmarks and perf reports
 cargo run  -p gridfinity-gui     # launch the app (needs a display + a wgpu backend)
 cargo build --release
 
 # The geometry fuzzer (tests/fuzz.rs): random Params -> try_build -> validate -> audit
 # -> tessellation_leaks, with failures grouped by signature and each shrunk to a
-# paste-ready `Params` literal. Nothing in this workspace is #[ignore]d any more: every test,
-# fuzzer, bench and report runs as a gate under `cargo test --release --workspace` -- which is a
-# deliberate pre-PR run, not the every-change one (see AGENTS.md, Validation).
+# paste-ready `Params` literal. Every test and fuzzer runs as a gate under
+# `cargo test --release --workspace` -- a deliberate pre-PR run, not the every-change one
+# (see AGENTS.md, Validation). The measuring targets do not: `tests/scale.rs`, the badapple
+# timings in `gridfinity-gui`, `perf_report` and `alloc_report` are #[ignore]d, because a
+# number that no assertion reads is not a gate and they dominated the workspace run.
 FUZZ_CASES=2000 cargo test -p gridfinity-cad --test fuzz -- --nocapture
 FUZZ_SEED=7 FUZZ_CASES=500 cargo test -p gridfinity-cad --test fuzz -- --nocapture
 # One fuzzer alone (they print interleaved otherwise, since test threads run in parallel):
@@ -115,8 +118,22 @@ cargo test --release -p gridfinity-cad --test fuzz fuzz_bin_shapes -- --exact --
 `fuzz_inner_walls` covers free-form inner walls (the divider/fillet work); `fuzz_params_broad`
 covers shape, height, thicknesses, holes, dividers, slope and mode; `fuzz_bin_shapes` covers the
 **split path** — random connected polyominoes, partitioned the way the web app partitions them, then
-carved piece by piece. `fuzz_inner_walls` and `fuzz_bin_shapes` are both **green** at the default
-seed. `fuzz_params_broad` reports rather than asserts, and is at 28/400 / 5 defects.
+carved piece by piece; `fuzz_split_pieces` covers the **same path through the product's own split
+model** — random `SplitLine` sets, `partition_cells`, then one carve per chunk — and asserts what
+"split" is supposed to mean rather than only that each piece is sound:
+
+- `partition_cells` reproduces an independently derived chunking of the cells,
+- each piece is as many separate geometries as its cell set has islands (union-find over the welded
+  mesh), so a chunk that falls into two arms must come back as two shells, not one,
+- no piece keeps material standing over another piece's cells (the reentrant fillet's 8 mm overhang
+  into *empty* cells is allowed -- it is what `REENTRANT_FILLET_OVERHANG` exists for),
+- the pieces sum back to the whole bin's volume, and
+- pieces whose cells adjoin **touch** on the cut plane, while pieces whose cells do not adjoin are
+  measurably apart. Both distances come from XY footprints quantised to 0.05 mm.
+
+`fuzz_inner_walls`, `fuzz_bin_shapes` and `fuzz_split_pieces` are **green** at the default seed;
+`fuzz_split_pieces` is also green at 400 cases on seed 7, with chunk counts up to 8.
+`fuzz_params_broad` reports rather than asserts, and is at 28/400 / 5 defects.
 
 `gridfinity-wasm`'s `opening_on_a_hole_boundary_stays_closed` is the workspace's one known-failing
 test. The bin is a **ring** whose opening sits on the enclosed hole's boundary, which merges the
@@ -221,8 +238,7 @@ by `(a.z, a.x, a.y)`, and ties among those resolve by `HashMap` iteration order,
 between runs and silently reshuffled the defect grouping (`fuzz_params_broad` drifted 12↔13 groups
 run to run). All three fuzzers are now byte-identical across repeated runs at a fixed seed; keep any
 new failure message free of hash-ordered content or the grouping stops meaning anything. Run the suite with `--no-fail-fast`,
-since a failing binary otherwise hides the ones after it, and expect ~80s (the badapple benches
-dominate). A run is deterministic per seed, but adding a generator arm reshuffles the stream,
+since a failing binary otherwise hides the ones after it. A run is deterministic per seed, but adding a generator arm reshuffles the stream,
 so quote the *case literal* in a bug report, never "seed 7 case 412".
 
 The GUI is `windows_subsystem="windows"` in release, so it opens a window and blocks. To smoke-test
@@ -668,7 +684,8 @@ until the next input event. `regenerate`/`badapple_tick` now run before `Central
 The web app drives the identical `Renderer` and the identical
 `append_smooth_shaded` staging from `gridfinity-wasm`'s `Viewer`; the shading path is shared, and
 the two consumers differ only in what they upload (the GUI adds a wireframe pass and the `bad`
-flag; the web app adds per-bin colour and preview offsets). Back-face culling relies on the engine's outward winding (see
+flag; the web app adds per-bin colour, the explode displacement, and `FLAG_CUT` on the triangles
+that lie in a split's cut plane). Back-face culling relies on the engine's outward winding (see
 the `meshes_have_outward_consistent_winding` test). `main.rs` binds `Params` to widgets, regenerates
 (build → tessellate → upload the vertex buffer) on change, and exports STL via `rfd` + `Mesh::to_stl_binary`.
 
@@ -702,8 +719,8 @@ includes the `seg_seg_points` beneath it — so the column does not sum to the w
 stack in a thread-local `Cell` — never a `Vec`, so pushing a scope can't re-enter the allocator);
 that attribution is *exclusive*, unlike the nesting time column, and the shortfall against the
 global total is unscoped construction churn. `perf_report` reports the **2nd** rebuild (the
-slider-drag case). `cargo test -p gridfinity-cad perf_report -- --nocapture` prints the
-table from the terminal.
+slider-drag case). `cargo test --release -p gridfinity-cad --lib perf_report -- --ignored --nocapture`
+prints the table from the terminal; like every other measuring target it is `#[ignore]`d.
 
 That instrumentation drove a churn-first data-oriented pass: a `Solid` is now flat CSR arenas
 (`loop_edges` + `loops` offsets, a compact `Face { loop0, n_loops }`), not per-`Face`/per-`Loop`
@@ -712,7 +729,9 @@ That instrumentation drove a churn-first data-oriented pass: a `Solid` is now fl
 `edge_faces` as a borrow rather than recomputing it once per face. Together those cut a default
 rebuild's allocation churn ~77% (fillet_edges ~92%).
 
-A second pass went after *work* rather than churn. The scaling harness is `tests/scale.rs`
+A second pass went after *work* rather than churn. The scaling harness is `tests/scale.rs` — every
+test in it is `#[ignore]`d, so reach for it with
+`cargo test --release -p gridfinity-cad --test scale -- --ignored --nocapture`
 (`scale_report` for the cost curve, `scale_features` for what the optional features cost,
 `scale_profile` for the per-metric table at `SCALE_WH=48x48`, `tess_bench` for the tessellator
 alone). Four changes, biggest first:

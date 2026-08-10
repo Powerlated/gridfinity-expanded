@@ -204,6 +204,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "benchmark: cargo test --release -p gridfinity-gui -- --ignored --nocapture"]
     fn bin_cost() {
         use gridfinity_cad::gridfinity::{self, Params};
         use gridfinity_cad::layout::GridCell;
@@ -226,6 +227,7 @@ mod tests {
     /// Shrink a leaking blob to the smallest still-leaking connected subset, so
     /// the defect can be read off a shape small enough to reason about.
     #[test]
+    #[ignore = "benchmark: cargo test --release -p gridfinity-gui -- --ignored --nocapture"]
     fn leak_hunt() {
         let p = cell_params();
         let connected = |cs: &[GridCell]| -> bool {
@@ -450,6 +452,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "benchmark: cargo test --release -p gridfinity-gui -- --ignored --nocapture"]
     fn profile() {
         use gridfinity_cad::kernel::perf;
         let sample: Vec<usize> = (0..(10.0 * FPS) as usize).collect();
@@ -527,6 +530,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "benchmark: cargo test --release -p gridfinity-gui -- --ignored --nocapture"]
     fn throughput() {
         let n = frame_count();
         let (mut tris, mut secs) = (0usize, 0.0f64);
@@ -544,6 +548,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "benchmark: cargo test --release -p gridfinity-gui -- --ignored --nocapture"]
     fn build_profile() {
         use gridfinity_cad::kernel::perf;
         let n = frame_count();
@@ -621,6 +626,7 @@ build only: {:?} total, {:.2} ms/frame
     }
 
     #[test]
+    #[ignore = "benchmark: cargo test --release -p gridfinity-gui -- --ignored --nocapture"]
     fn phase_split() {
         let n = frame_count();
         let p = cell_params();
@@ -642,6 +648,7 @@ build only: {:?} total, {:.2} ms/frame
     }
 
     #[test]
+    #[ignore = "benchmark: cargo test --release -p gridfinity-gui -- --ignored --nocapture"]
     fn throughput_pipelined() {
         let n = frame_count();
         let depth: usize =

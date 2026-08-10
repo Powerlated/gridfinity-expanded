@@ -58,7 +58,6 @@ export const DESIGN_DEFAULTS = {
 export const IMPLEMENTATION_ALLOWANCES = {
   bedClearancePerSide: 5,
   minimumStraightCavityWall: 0.2,
-  multipartPreviewGap: 0.3,
 } as const;
 
 export const GRIDFINITY_SOURCES = [

@@ -5,6 +5,10 @@ pub const LINE_STRIDE: usize = 11;
 
 pub const KERNEL_STRIDE: usize = 6;
 
+pub const FLAG_NONE: f32 = 0.0;
+pub const FLAG_BAD: f32 = 1.0;
+pub const FLAG_CUT: f32 = 2.0;
+
 pub fn color_of(rgb: u32) -> Vec3 {
     Vec3::new(
         ((rgb >> 16) & 0xff) as f32 / 255.0,
@@ -24,7 +28,7 @@ fn push(out: &mut Vec<f32>, position: Vec3, normal: Vec3, color: Vec3, bad: bool
         color.x,
         color.y,
         color.z,
-        if bad { 1.0 } else { 0.0 },
+        if bad { FLAG_BAD } else { FLAG_NONE },
     ]);
 }
 

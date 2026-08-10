@@ -1,11 +1,12 @@
 
 use gridfinity_cad::gridfinity::{
-    self, BinSlope, InnerWall, LogicalBin, Mode, Params, SlopeDir, rect_cells,
+    self, BinSlope, GRID_PITCH, InnerWall, LogicalBin, Mode, Params, SlopeDir, rect_cells,
 };
+use gridfinity_cad::kernel::mesh::Mesh;
 use gridfinity_cad::kernel::tess::tessellate;
-use gridfinity_cad::layout::{GridCell, GridEdge, Orientation};
+use gridfinity_cad::layout::{Axis, GridCell, GridEdge, Orientation, SplitLine, partition_cells};
 use gridfinity_cad::{Solid, audit, tessellation_leaks};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 
@@ -614,6 +615,320 @@ fn run_shapes(cases: u32, seed: u64) -> String {
     out
 }
 
+const SPLIT_TOL: f32 = 0.15;
+const QUANTUM: f32 = 20.0;
+
+struct SplitCase {
+    params: Params,
+}
+
+fn chunk_cells(cells: &[GridCell], lines: &[SplitLine]) -> Vec<Vec<(i32, i32)>> {
+    let key = |c: GridCell| {
+        let across = |axis, at| lines.iter().filter(|l| l.axis == axis && l.index <= at).count();
+        (across(Axis::Y, c.y), across(Axis::X, c.x))
+    };
+    let mut groups: BTreeMap<(usize, usize), Vec<(i32, i32)>> = BTreeMap::new();
+    for &c in cells {
+        groups.entry(key(c)).or_default().push((c.x, c.y));
+    }
+    let mut out: Vec<Vec<(i32, i32)>> = groups.into_values().collect();
+    for g in &mut out {
+        g.sort_unstable();
+    }
+    out.sort();
+    out
+}
+
+fn as_pairs(cells: &[GridCell]) -> Vec<(i32, i32)> {
+    let mut v: Vec<(i32, i32)> = cells.iter().map(|c| (c.x, c.y)).collect();
+    v.sort_unstable();
+    v
+}
+
+fn gen_split_case(rng: &mut Rng) -> SplitCase {
+    let target = rng.below(8) as usize + 2;
+    let cells = gen_polyomino(rng, target);
+    let mut split_lines = Vec::new();
+    for axis in [Axis::X, Axis::Y] {
+        for index in 1..SHAPE_EXTENT {
+            if rng.chance(1, 3) {
+                split_lines.push(SplitLine { axis, index });
+            }
+        }
+    }
+    let mut params = Params {
+        bins: vec![LogicalBin { cells, split_lines, ..Default::default() }],
+        height_units: rng.below(5) + 1,
+        wall_thickness: rng.quantised(0.8, 2.6, 0.2),
+        cavity_corner_radius: rng.quantised(0.0, 4.0, 0.5),
+        floor_fillet: rng.quantised(0.0, 4.0, 0.5),
+        magnet_holes: rng.chance(1, 3),
+        ..Params::default()
+    };
+    params.screw_holes = params.magnet_holes && rng.chance(1, 2);
+    SplitCase { params }
+}
+
+fn mesh_parts(mesh: &Mesh) -> usize {
+    let mut owner: Vec<usize> = (0..mesh.positions.len()).collect();
+    fn root(owner: &mut [usize], mut i: usize) -> usize {
+        while owner[i] != i {
+            owner[i] = owner[owner[i]];
+            i = owner[i];
+        }
+        i
+    }
+    for t in mesh.indices.chunks_exact(3) {
+        for pair in [(t[0], t[1]), (t[1], t[2])] {
+            let (a, b) = (root(&mut owner, pair.0 as usize), root(&mut owner, pair.1 as usize));
+            owner[a] = b;
+        }
+    }
+    let mut seen: HashSet<usize> = HashSet::new();
+    let welded: Vec<usize> = mesh.indices.iter().map(|&i| i as usize).collect();
+    for i in welded {
+        let r = root(&mut owner, i);
+        seen.insert(r);
+    }
+    seen.len()
+}
+
+const OVERHANG_REACH: f32 = 8.0;
+
+fn well_inside(cells: &[GridCell], x: f32, y: f32) -> bool {
+    cells.iter().any(|c| {
+        let (x0, y0) = (c.x as f32 * GRID_PITCH, c.y as f32 * GRID_PITCH);
+        x > x0 + SPLIT_TOL
+            && x < x0 + GRID_PITCH - SPLIT_TOL
+            && y > y0 + SPLIT_TOL
+            && y < y0 + GRID_PITCH - SPLIT_TOL
+    })
+}
+
+fn grid_gap(a: &[GridCell], b: &[GridCell]) -> f32 {
+    let mut best = f32::INFINITY;
+    for p in a {
+        for q in b {
+            let dx = ((p.x - q.x).abs() - 1).max(0) as f32 * GRID_PITCH;
+            let dy = ((p.y - q.y).abs() - 1).max(0) as f32 * GRID_PITCH;
+            best = best.min((dx * dx + dy * dy).sqrt());
+        }
+    }
+    best
+}
+
+fn footprint(mesh: &Mesh) -> Vec<(f32, f32)> {
+    let mut seen: HashSet<(i32, i32)> = HashSet::new();
+    for p in &mesh.positions {
+        seen.insert(((p.x * QUANTUM).round() as i32, (p.y * QUANTUM).round() as i32));
+    }
+    seen.into_iter().map(|(x, y)| (x as f32 / QUANTUM, y as f32 / QUANTUM)).collect()
+}
+
+fn closest(a: &[(f32, f32)], b: &[(f32, f32)]) -> f32 {
+    let mut best = f32::INFINITY;
+    for &(ax, ay) in a {
+        for &(bx, by) in b {
+            best = best.min(((ax - bx).powi(2) + (ay - by).powi(2)).sqrt());
+        }
+    }
+    best
+}
+
+fn check_split(c: &SplitCase) -> Result<(), String> {
+    catching(|| {
+        let bin = &c.params.bins[0];
+        let parts = partition_cells(&bin.cells, &bin.split_lines);
+        let mut got: Vec<Vec<(i32, i32)>> = parts.iter().map(|p| as_pairs(&p.cells)).collect();
+        got.sort();
+        let want = chunk_cells(&bin.cells, &bin.split_lines);
+        if got != want {
+            return Err(format!(
+                "partition: {} split line(s) should cut {} cell(s) into {} piece(s) {want:?}, got {} piece(s) {got:?}",
+                bin.split_lines.len(),
+                bin.cells.len(),
+                want.len(),
+                got.len()
+            ));
+        }
+
+        let whole = gridfinity::build_bin_solid(&c.params, &bin.cells, bin.slope)
+            .map_err(|e| format!("build error: {e}"))?;
+        sound(&whole, "whole ")?;
+        let expected = mesh_volume(&whole);
+
+        let mut meshes: Vec<Mesh> = Vec::new();
+        let mut carved = 0.0;
+        for (i, part) in parts.iter().enumerate() {
+            let solid = match gridfinity::carve_to_cells(&whole, &bin.cells, &part.cells) {
+                Ok(s) => s,
+                Err(e) if e.contains(ENCLOSED_PIECE) => return Ok(()),
+                Err(e) => return Err(format!("carve piece {i}: {e}")),
+            };
+            sound(&solid, &format!("piece {i} "))?;
+            let mesh = tessellate(&solid, TESS_SEGS).to_mesh();
+
+            let islands = flood_parts(&part.cells, &[]).len();
+            let shells = mesh_parts(&mesh);
+            if shells != islands {
+                return Err(format!(
+                    "piece {i} covers {} cell(s) in {islands} island(s) but is {shells} separate geometry(s)",
+                    part.cells.len()
+                ));
+            }
+            let trespass = parts.iter().enumerate().filter(|(j, _)| *j != i).find_map(|(j, other)| {
+                mesh.positions.iter().find(|p| well_inside(&other.cells, p.x, p.y)).map(|p| (j, *p))
+            });
+            if let Some((j, p)) = trespass {
+                return Err(format!(
+                    "piece {i} keeps material at ({:.3}, {:.3}), which stands over piece {j}",
+                    p.x, p.y
+                ));
+            }
+            carved += mesh_volume(&solid);
+            meshes.push(mesh);
+        }
+
+        let drift = (carved - expected).abs() / expected.abs().max(1.0);
+        if drift > VOLUME_DRIFT {
+            return Err(format!(
+                "volume: {} piece(s) sum to {carved:.4} mm^3, whole is {expected:.4} mm^3 ({:.3}% off)",
+                parts.len(),
+                drift * 100.0
+            ));
+        }
+
+        let prints: Vec<Vec<(f32, f32)>> = meshes.iter().map(footprint).collect();
+        for i in 0..parts.len() {
+            for j in (i + 1)..parts.len() {
+                let want = grid_gap(&parts[i].cells, &parts[j].cells);
+                let got = closest(&prints[i], &prints[j]);
+                if want == 0.0 && got > SPLIT_TOL {
+                    return Err(format!(
+                        "gap: pieces {i} and {j} were cut apart on a shared edge but stand {got:.3} mm apart"
+                    ));
+                }
+                if want > 0.0 && got <= SPLIT_TOL {
+                    return Err(format!(
+                        "gap: pieces {i} and {j} touch, but no cell of one adjoins a cell of the other"
+                    ));
+                }
+                if got < want - 2.0 * OVERHANG_REACH {
+                    return Err(format!(
+                        "gap: pieces {i} and {j} stand {got:.3} mm apart, the grid leaves {want:.3} mm between them"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+fn shrink_split(c: &SplitCase, sig: &str) -> SplitCase {
+    let same = |q: &SplitCase| check_split(q).is_err_and(|e| signature(&e) == sig);
+    let mut best = SplitCase { params: c.params.clone() };
+
+    loop {
+        let cells = best.params.bins[0].cells.clone();
+        let Some(smaller) = cells
+            .iter()
+            .filter_map(|&victim| {
+                let kept: Vec<GridCell> = cells.iter().copied().filter(|&c| c != victim).collect();
+                if !edge_connected(&kept) {
+                    return None;
+                }
+                let mut q = SplitCase { params: best.params.clone() };
+                q.params.bins[0].cells = kept;
+                same(&q).then_some(q)
+            })
+            .next()
+        else {
+            break;
+        };
+        best = smaller;
+    }
+
+    for i in (0..best.params.bins[0].split_lines.len()).rev() {
+        let mut q = SplitCase { params: best.params.clone() };
+        q.params.bins[0].split_lines.remove(i);
+        if same(&q) {
+            best = q;
+        }
+    }
+
+    let d = Params::default();
+    for (get, set) in [
+        (
+            (|p: &Params| p.floor_fillet) as fn(&Params) -> f32,
+            (|p: &mut Params, v: f32| p.floor_fillet = v) as fn(&mut Params, f32),
+        ),
+        (|p| p.cavity_corner_radius, |p, v| p.cavity_corner_radius = v),
+        (|p| p.wall_thickness, |p, v| p.wall_thickness = v),
+    ] {
+        let mut q = SplitCase { params: best.params.clone() };
+        set(&mut q.params, get(&d));
+        if same(&q) {
+            best = q;
+        }
+    }
+    if best.params.magnet_holes {
+        let mut q = SplitCase { params: best.params.clone() };
+        q.params.magnet_holes = false;
+        q.params.screw_holes = false;
+        if same(&q) {
+            best = q;
+        }
+    }
+    best
+}
+
+fn repro_split(c: &SplitCase) -> String {
+    let lines: Vec<String> = c.params.bins[0]
+        .split_lines
+        .iter()
+        .map(|l| format!("SplitLine {{ axis: Axis::{:?}, index: {} }}", l.axis, l.index))
+        .collect();
+    format!("{}\n     split_lines: vec![{}]", repro(&c.params), lines.join(", "))
+}
+
+fn run_splits(cases: u32, seed: u64) -> String {
+    let mut rng = Rng::new(seed);
+    let mut found: BTreeMap<String, Finding> = BTreeMap::new();
+    let mut failures = 0usize;
+
+    for _ in 0..cases {
+        let c = gen_split_case(&mut rng);
+        let Err(err) = check_split(&c) else { continue };
+        failures += 1;
+        let sig = signature(&err);
+        match found.get_mut(&sig) {
+            Some(f) => f.count += 1,
+            None => {
+                let small = shrink_split(&c, &sig);
+                found.insert(sig, Finding { count: 1, repro: repro_split(&small), detail: err });
+            }
+        }
+    }
+
+    if found.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "{failures}/{cases} cases failed, {} distinct defect(s) (seed {seed}):\n",
+        found.len()
+    );
+    for (i, f) in found.values().enumerate() {
+        out.push_str(&format!(
+            "\n[{}] x{}  {}\n     {}\n",
+            i + 1,
+            f.count,
+            f.detail.lines().next().unwrap_or(""),
+            f.repro
+        ));
+    }
+    out
+}
+
 fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -631,6 +946,14 @@ fn fuzz_bin_shapes() {
     let cases = env_u64("FUZZ_CASES", 120) as u32;
     let seed = env_u64("FUZZ_SEED", 0x9E37_79B9_7F4A_7C15);
     let report = run_shapes(cases, seed);
+    assert!(report.is_empty(), "{report}");
+}
+
+#[test]
+fn fuzz_split_pieces() {
+    let cases = env_u64("FUZZ_CASES", 120) as u32;
+    let seed = env_u64("FUZZ_SEED", 0x9E37_79B9_7F4A_7C15);
+    let report = run_splits(cases, seed);
     assert!(report.is_empty(), "{report}");
 }
 

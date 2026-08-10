@@ -1,6 +1,7 @@
 use glam::Vec3;
 use gridfinity_render::{
-    Camera, Quality, Renderer, Viewport, append_smooth_shaded, bounds_of, color_of,
+    Camera, FLAG_CUT, KERNEL_STRIDE, Quality, Renderer, VERTEX_STRIDE, Viewport,
+    append_smooth_shaded, bounds_of, color_of,
 };
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
@@ -14,6 +15,9 @@ pub struct Viewer {
     renderer: Renderer,
     camera: Camera,
     staged: Vec<f32>,
+    displaced: Vec<f32>,
+    spans: Vec<PieceSpan>,
+    explode: f32,
     width: u32,
     height: u32,
     clear: Vec3,
@@ -75,6 +79,9 @@ pub async fn create_viewer(
         renderer,
         camera: Camera::default(),
         staged: Vec::new(),
+        displaced: Vec::new(),
+        spans: Vec::new(),
+        explode: 0.0,
         width,
         height,
         clear: color_of(clear_rgb),
@@ -87,32 +94,67 @@ pub async fn create_viewer(
 impl Viewer {
     pub fn begin_scene(&mut self) {
         self.staged.clear();
+        self.spans.clear();
     }
 
-    pub fn add_piece(&mut self, vertices: &[f32], offset_x: f32, offset_y: f32, rgb: u32) {
-        append_smooth_shaded(
-            &mut self.staged,
-            vertices,
-            Vec3::new(offset_x, offset_y, 0.0),
-            color_of(rgb),
-            false,
-        );
+    pub fn add_piece(
+        &mut self,
+        vertices: &[f32],
+        apart_x: f32,
+        apart_y: f32,
+        rgb: u32,
+        cuts: &[f32],
+    ) {
+        let start = self.staged.len();
+        let color = color_of(rgb);
+        for tri in vertices.chunks_exact(3 * KERNEL_STRIDE) {
+            let severed =
+                tri.chunks_exact(KERNEL_STRIDE).all(|v| on_a_cut(cuts, v[0], v[1]));
+            let from = self.staged.len();
+            append_smooth_shaded(&mut self.staged, tri, Vec3::ZERO, color, false);
+            if severed {
+                for v in self.staged[from..].chunks_exact_mut(VERTEX_STRIDE) {
+                    v[9] = FLAG_CUT;
+                }
+            }
+        }
+        self.spans.push(PieceSpan {
+            start,
+            end: self.staged.len(),
+            apart: Vec3::new(apart_x, apart_y, 0.0),
+        });
     }
 
     pub fn upload_vertices(&mut self, verts: &[f32]) {
         self.staged.clear();
+        self.spans.clear();
         self.staged.extend_from_slice(verts);
-        self.renderer.upload(&self.device, &self.queue, &self.staged);
+        self.lay_out();
+        self.renderer.upload(&self.device, &self.queue, &self.displaced);
     }
 
     pub fn commit_scene(&mut self, refit: bool) {
+        self.lay_out();
         if refit {
-            match bounds_of(&self.staged) {
+            match bounds_of(&self.displaced) {
                 Some((min, max)) => self.camera.frame(min, max),
                 None => self.camera = Camera::default(),
             }
         }
-        self.renderer.upload(&self.device, &self.queue, &self.staged);
+        self.renderer.upload(&self.device, &self.queue, &self.displaced);
+    }
+
+    pub fn set_explode(&mut self, distance: f32) {
+        if (distance - self.explode).abs() < 1e-4 {
+            return;
+        }
+        self.explode = distance;
+        self.lay_out();
+        self.renderer.upload(&self.device, &self.queue, &self.displaced);
+    }
+
+    pub fn explode(&self) -> f32 {
+        self.explode
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -131,7 +173,7 @@ impl Viewer {
 
     pub fn reset_view(&mut self) {
         self.camera.reset_angles();
-        if let Some((min, max)) = bounds_of(&self.staged) {
+        if let Some((min, max)) = bounds_of(&self.displaced) {
             self.camera.frame(min, max);
         } else {
             self.camera = Camera::default();
@@ -209,10 +251,45 @@ impl Viewer {
     pub fn destroy(&mut self) {
         self.renderer.destroy();
         self.staged = Vec::new();
+        self.displaced = Vec::new();
+        self.spans = Vec::new();
     }
 }
 
+struct PieceSpan {
+    start: usize,
+    end: usize,
+    apart: Vec3,
+}
+
+const CUT_TOLERANCE: f32 = 0.01;
+
+fn on_a_cut(cuts: &[f32], x: f32, y: f32) -> bool {
+    cuts.chunks_exact(4).any(|c| {
+        let (along, across) = if c[0] < 0.5 { (x, y) } else { (y, x) };
+        (along - c[1]).abs() <= CUT_TOLERANCE
+            && across >= c[2] - CUT_TOLERANCE
+            && across <= c[3] + CUT_TOLERANCE
+    })
+}
+
 impl Viewer {
+    fn lay_out(&mut self) {
+        self.displaced.clear();
+        self.displaced.extend_from_slice(&self.staged);
+        if self.explode == 0.0 {
+            return;
+        }
+        for span in &self.spans {
+            let shift = span.apart * self.explode;
+            for v in self.displaced[span.start..span.end].chunks_exact_mut(VERTEX_STRIDE) {
+                v[0] += shift.x;
+                v[1] += shift.y;
+                v[2] += shift.z;
+            }
+        }
+    }
+
     fn configure(&mut self) {
         self.surface.configure(&self.device, &wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,

@@ -130,7 +130,7 @@ body.no-select {
   background: color-mix(in srgb, var(--mantine-color-body) 85%, transparent);
 }
 
-.viewer-reset {
+.viewer-tools {
   position: absolute;
   top: var(--mantine-spacing-sm);
   right: var(--mantine-spacing-sm);

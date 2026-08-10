@@ -1116,6 +1116,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "benchmark: cargo test --release -p gridfinity-cad --lib -- --ignored --nocapture"]
     fn alloc_report() {
         use crate::kernel::perf;
         let _g = perf_guard();
@@ -1184,6 +1185,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "benchmark: cargo test --release -p gridfinity-cad --lib -- --ignored --nocapture"]
     fn perf_report() {
         use crate::kernel::perf;
         let _g = perf_guard();

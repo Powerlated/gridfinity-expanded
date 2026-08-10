@@ -13,5 +13,6 @@ pub use camera::Camera;
 pub use quality::Quality;
 pub use renderer::{Renderer, Viewport};
 pub use vertex::{
-    KERNEL_STRIDE, LINE_STRIDE, VERTEX_STRIDE, append_smooth_shaded, bounds_of, color_of,
+    FLAG_BAD, FLAG_CUT, FLAG_NONE, KERNEL_STRIDE, LINE_STRIDE, VERTEX_STRIDE, append_smooth_shaded,
+    bounds_of, color_of,
 };

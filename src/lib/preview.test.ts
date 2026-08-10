@@ -1,21 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { previewLayout } from './preview';
-import type { Bin, Design } from './types';
-
-const design: Design = {
-  bins: [{
-    id: 'bin-1',
-    cells: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }],
-    openings: [],
-    walls: [],
-    cuts: [{ start: { x: 1, y: 0 }, end: { x: 1, y: 1 } }],
-  }],
-  heightUnits: 3,
-  perimeterThickness: 1.2,
-  filletRadius: 2.8,
-  fasteners: { magnets: false, m3: false },
-  printer: { name: 'Editor only', bedWidth: 100, bedDepth: 100 },
-};
+import type { Bin } from './types';
 
 const bins: Bin[] = [{
   binId: 'bin-1',
@@ -26,49 +11,56 @@ const bins: Bin[] = [{
 }];
 
 describe('preview layout', () => {
-  it('separates cut pieces with the multipart preview gap', () => {
-    const pieces = previewLayout(bins, design);
-    expect(pieces.map((piece) => piece.previewOffset)).toEqual([
-      { x: -0.15, y: 0 },
-      { x: 0.15, y: 0 },
+  it('points every cut piece away from the bin centre', () => {
+    const pieces = previewLayout(bins);
+    expect(pieces.map((piece) => piece.apartDirection)).toEqual([
+      { x: -1, y: 0 },
+      { x: 1, y: 0 },
     ]);
     expect(pieces.map((piece) => piece.pieceIndex)).toEqual([0, 1]);
   });
 
-  it('leaves uncut bins at their model position', () => {
-    const single: Bin[] = [{
-      binId: 'bin-1',
-      pieces: [{ vertices: new Float32Array(18), cells: [{ x: 0, y: 0 }] }],
-    }];
-    expect(previewLayout(single, design)[0].previewOffset).toEqual({ x: 0, y: 0 });
-    expect(previewLayout(single, null)[0].previewOffset).toEqual({ x: 0, y: 0 });
-    expect(previewLayout(single, { ...design, bins: [] })[0].previewOffset)
-      .toEqual({ x: 0, y: 0 });
-  });
-
-  it('mirrors horizontal cuts before spacing generation-coordinate pieces', () => {
-    const horizontalDesign: Design = {
-      ...design,
-      bins: [{
-        id: 'bin-1',
-        cells: [{ x: 0, y: 0 }, { x: 0, y: 1 }],
-        openings: [],
-        walls: [],
-        cuts: [{ start: { x: 0, y: 1 }, end: { x: 1, y: 1 } }],
-      }],
-    };
-    const horizontalBins: Bin[] = [{
+  it('separates pieces along the axis they were cut on', () => {
+    const stacked: Bin[] = [{
       binId: 'bin-1',
       pieces: [
         { vertices: new Float32Array(18), cells: [{ x: 0, y: 1 }] },
         { vertices: new Float32Array(18), cells: [{ x: 0, y: 0 }] },
       ],
     }];
+    expect(previewLayout(stacked).map((piece) => piece.apartDirection)).toEqual([
+      { x: 0, y: 1 },
+      { x: 0, y: -1 },
+    ]);
+  });
 
-    expect(previewLayout(horizontalBins, horizontalDesign)
-      .map((piece) => piece.previewOffset)).toEqual([
-      { x: 0, y: 0.15 },
-      { x: 0, y: -0.15 },
+  it('marks only the edges where a piece meets another piece', () => {
+    const [left, right] = previewLayout(bins);
+    expect(Array.from(left.cutSegments)).toEqual([0, 42, 0, 42]);
+    expect(Array.from(right.cutSegments)).toEqual([0, 42, 0, 42]);
+  });
+
+  it('leaves an uncut bin with nowhere to move', () => {
+    const single: Bin[] = [{
+      binId: 'bin-1',
+      pieces: [{ vertices: new Float32Array(18), cells: [{ x: 0, y: 0 }] }],
+    }];
+    expect(previewLayout(single)[0].apartDirection).toEqual({ x: 0, y: 0 });
+  });
+
+  it('keeps a piece centred on the whole bin where it is', () => {
+    const row: Bin[] = [{
+      binId: 'bin-1',
+      pieces: [
+        { vertices: new Float32Array(18), cells: [{ x: 0, y: 0 }] },
+        { vertices: new Float32Array(18), cells: [{ x: 1, y: 0 }] },
+        { vertices: new Float32Array(18), cells: [{ x: 2, y: 0 }] },
+      ],
+    }];
+    expect(previewLayout(row).map((piece) => piece.apartDirection)).toEqual([
+      { x: -1, y: 0 },
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
     ]);
   });
 });

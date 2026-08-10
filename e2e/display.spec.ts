@@ -25,7 +25,7 @@ test('the display tab drives the renderer and never touches the geometry', async
   const viewer = page.locator('.viewer');
   await expect(viewer).toHaveAttribute('data-render-quality', 'high', { timeout: 30_000 });
   const parts = await viewer.getAttribute('data-part-count');
-  const offsets = await viewer.getAttribute('data-preview-offsets');
+  const directions = await viewer.getAttribute('data-piece-directions');
 
   await openDisplaySection(page);
 
@@ -36,7 +36,7 @@ test('the display tab drives the renderer and never touches the geometry', async
   }
 
   await expect(viewer).toHaveAttribute('data-part-count', parts ?? '');
-  await expect(viewer).toHaveAttribute('data-preview-offsets', offsets ?? '');
+  await expect(viewer).toHaveAttribute('data-piece-directions', directions ?? '');
   await expect(page.locator('canvas.viewer-canvas')).toBeVisible();
   expect(errors).toEqual([]);
 });

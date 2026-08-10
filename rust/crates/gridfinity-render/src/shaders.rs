@@ -85,14 +85,27 @@ fn constants() -> String {
 }
 
 const COLOUR_PRELUDE: &str = r#"
-fn tonemap(colour: vec3<f32>) -> vec3<f32> {
-    let x = colour * EXPOSURE;
+const HIGHLIGHT_WHITE_SHIFT: f32 = 8.0;
+
+fn tone_curve(x: f32) -> f32 {
     let a = 2.51;
     let b = 0.03;
     let c = 2.43;
     let d = 0.59;
     let e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+fn tonemap(colour: vec3<f32>) -> vec3<f32> {
+    let x = max(colour, vec3<f32>(0.0)) * EXPOSURE;
+    let peak = max(x.r, max(x.g, x.b));
+    if (peak <= 1e-5) {
+        return vec3<f32>(0.0);
+    }
+    let mapped = tone_curve(peak);
+    let whiten = pow(mapped, HIGHLIGHT_WHITE_SHIFT);
+    let hue = x / peak;
+    return clamp(mix(hue, vec3<f32>(1.0), whiten) * mapped, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 fn encode_srgb(c: vec3<f32>) -> vec3<f32> {
@@ -408,6 +421,21 @@ fn fs_mesh(v: MeshOut) -> @location(0) vec4<f32> {
         gi = textureSampleLevel(t_screen, s_screen, screen_uv(v.clip.xy), 0.0);
     }
     let ao = mix(1.0, gi.a, OCCLUSION_STRENGTH);
+
+    if (v.bad > 1.5) {
+        let base = decode_srgb(v.color);
+        let high = max(base.r, max(base.g, base.b));
+        let low = min(base.r, min(base.g, base.b));
+        let opposed = vec3<f32>(high + low) - base;
+        let venom = mix(vec3<f32>(0.85, 0.16, 0.02), opposed, smoothstep(0.04, 0.22, high - low));
+        let ember = normalize(venom + vec3<f32>(1e-4));
+        let rim = pow(1.0 - nv, 2.0);
+        let pulse = 0.55 + 0.45 * sin(scene.eye_time.w * 1.7);
+        let key = max(dot(n, key_dir), 0.0);
+        let cut = ember * (0.10 + 0.22 * key) * ao
+                + ember * (0.30 + 0.45 * pulse) * (0.40 + rim);
+        return scene_out(cut);
+    }
 
     if (v.bad > 0.5) {
         let rim = pow(1.0 - nv, 2.5);
@@ -1272,6 +1300,22 @@ mod tests {
                      denominator poisons the frame. Use `if`. Offending call: select({argument})",
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_tone_curve_maps_the_peak_channel_rather_than_each_one() {
+        for (name, source) in every_module() {
+            if !source.contains("fn tonemap") {
+                continue;
+            }
+            assert!(
+                source.contains("let peak = max(x.r, max(x.g, x.b));")
+                    && source.contains("let mapped = tone_curve(peak);"),
+                "{name}: running the curve per channel compresses the channels unevenly, so \
+                 every bright reflection loses its hue and clips to white. Map the peak \
+                 channel and carry the other two along in proportion.",
+            );
         }
     }
 
