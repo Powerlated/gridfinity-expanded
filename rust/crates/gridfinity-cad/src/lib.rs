@@ -1697,6 +1697,63 @@ rebuild #2 {:?} -> {} faces, {} tris",
             "a crossing divider should still leave the floor filleted"
         );
     }
+
+    #[test]
+    fn a_drawer_bin_partitioned_into_compartments_is_watertight() {
+        const DIVIDERS: [(f32, f32, f32, f32); 23] = [
+            (0.85, 23.65, 64.25, 23.65),
+            (217.45, 28.65, 278.65, 28.65),
+            (82.45, 38.65, 120.85, 38.65),
+            (63.05, 41.45, 124.25, 41.45),
+            (217.45, 65.85, 255.85, 65.85),
+            (45.25, 68.65, 218.65, 68.65),
+            (0.85, 85.85, 24.25, 85.85),
+            (123.05, 90.85, 186.45, 90.85),
+            (45.25, 105.85, 83.65, 105.85),
+            (23.65, 23.05, 23.65, 86.45),
+            (45.85, 68.05, 45.85, 106.45),
+            (63.65, 0.85, 63.65, 24.25),
+            (63.65, 40.85, 63.65, 69.25),
+            (83.05, 0.85, 83.05, 39.25),
+            (83.05, 68.05, 83.05, 106.45),
+            (120.25, 0.85, 120.25, 39.25),
+            (123.65, 0.85, 123.65, 42.05),
+            (123.65, 68.05, 123.65, 91.45),
+            (155.85, 0.85, 155.85, 69.25),
+            (185.85, 0.85, 185.85, 91.45),
+            (218.05, 28.05, 218.05, 69.25),
+            (255.25, 28.05, 255.25, 66.45),
+            (278.05, 0.85, 278.05, 29.25),
+        ];
+        let footprint: Vec<(i32, i32)> = (0..5).flat_map(|y| (0..7).map(move |x| (x, y))).collect();
+        let p = gridfinity::Params {
+            bins: vec![LogicalBin {
+                cells: cells(&footprint),
+                ..Default::default()
+            }],
+            wall_thickness: 1.2,
+            inner_walls: DIVIDERS
+                .iter()
+                .map(|&(x1, y1, x2, y2)| gridfinity::InnerWall {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    width: 1.2,
+                    height: None,
+                })
+                .collect(),
+            ..gridfinity::Params::default()
+        };
+        let solid = gridfinity::try_build(&p).expect("drawer bin builds");
+        solid.validate().expect("drawer bin topology valid");
+        assert!(
+            crate::audit(&solid).is_ok(),
+            "B-rep must be sound:\n{}",
+            crate::audit(&solid)
+        );
+        assert_watertight(&tessellate(&solid, 6).to_mesh());
+    }
 }
 
 #[cfg(test)]

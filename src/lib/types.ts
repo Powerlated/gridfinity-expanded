@@ -36,6 +36,68 @@ export interface Cut {
   end: GridPoint;
 }
 
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  depth: number;
+}
+
+export type Rotation = 0 | 90 | 180 | 270;
+
+export interface ProjectObject {
+  id: string;
+  name: string;
+  parts: Rect[];
+  quantity: number;
+}
+
+export interface Drawer {
+  width: number;
+  depth: number;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  drawer: Drawer;
+  dividerThickness: number;
+  clearance: number;
+  objects: ProjectObject[];
+}
+
+export interface Placement {
+  objectId: string;
+  instance: number;
+  rotation: Rotation;
+  parts: Rect[];
+}
+
+export interface PackResult {
+  placements: Placement[];
+  placedByObjectId: Record<string, number>;
+  iterations: number;
+}
+
+export type PackEffort = 'quick' | 'standard' | 'thorough';
+
+export interface PackInput {
+  area: Rect;
+  objects: ProjectObject[];
+  dividerThickness: number;
+  clearance: number;
+  effort: PackEffort;
+}
+
+export interface PackRequest {
+  revision: number;
+  input: PackInput;
+}
+
+export type PackResponse =
+  | { ok: true; revision: number; done: boolean; progress: number; best: PackResult }
+  | { ok: false; revision: number; error: string };
+
 export interface FastenerSettings {
   magnets: boolean;
   m3: boolean;

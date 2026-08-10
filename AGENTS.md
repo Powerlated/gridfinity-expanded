@@ -4,6 +4,8 @@ Sole operative LLM guide. Other agent files import it, never duplicate it. When 
 
 This is an index, not a manual. It says where things live and which rules are not visible from the source. For how anything works, read the code.
 
+**Never spawn subagents.** No Task/Agent tool calls, no Explore/Plan/general-purpose delegation, no background agents — not for searching, not for planning, not for review. Do the work inline with your own tools. A subagent starts cold, re-derives context that is already in the conversation, and reports back a summary that has to be re-verified anyway. This holds even when the task looks broad or the user says "thorough"; the only exception is the user explicitly asking for a subagent by name.
+
 ## Scope
 
 React 19 + Vite 6 + TypeScript app generating printable Gridfinity STLs. "GUI" in user requests means this web app, not the egui debugger in `rust/crates/gridfinity-gui`. Pick local implementation details freely; ask before changing architecture, user-visible semantics, compatibility policy, or scope. Keep changes narrow, preserve unrelated working-tree changes, inspect call sites first — trace store, worker boundary, preview, and export paths.
@@ -12,8 +14,9 @@ React 19 + Vite 6 + TypeScript app generating printable Gridfinity STLs. "GUI" i
 
 - `src/main.tsx` mounts; `src/App.tsx` = Mantine AppShell; `src/store.ts` = Zustand state + design commands; `src/theme.ts` = Mantine defaults.
 - `src/lib/`: `types.ts` contracts, `gridfinitySpec.ts` normative dimensions, `coordinates.ts` editor→generation transforms, `binParameters.ts` per-bin worker input, `geometryCache.ts` triangle cache, `preview.ts` viewer layout, `edges.ts`, `cuts.ts` cut planning, `printers.ts` fit, `geometry/`, `export/printableObjects.ts` splitting+naming, `export/stl.ts`.
-- Geometry runs in `src/workers/geometry.worker.ts` via `src/hooks/useBinGeometry.ts`.
-- `src/components/`: left panel = Shape/Walls/Cuts editors; right panel = Dimensions/Features/Printer-fit/Display accordions; `viewer/ModelViewer.tsx` hosts the Rust renderer.
+- `src/lib/project/`: the drawer-fitting Projects feature — `rects.ts` rectilinear geometry, `drawer.ts` drawer→grid+packing area, `pack.ts` the optimizer, `walls.ts` placements→dividers, `layout.ts` the drawer bin, `defaults.ts`, `storage.ts` localStorage.
+- Geometry runs in `src/workers/geometry.worker.ts` via `src/hooks/useBinGeometry.ts`; layout optimization in `src/workers/pack.worker.ts` via `src/hooks/usePackLayout.ts`.
+- `src/components/`: left panel = Shape/Walls/Cuts editors; right panel = Dimensions/Features/Printer-fit/Display accordions; `viewer/ModelViewer.tsx` hosts the Rust renderer. `project/` holds the Project mode panels and canvases.
 - `rust/` is the geometry kernel and renderer workspace; see `rust/CLAUDE.md`.
 - Scripts in `scripts/`; Vitest beside source as `*.test.ts`; browser tests in `e2e/`.
 
@@ -21,7 +24,7 @@ React 19 + Vite 6 + TypeScript app generating printable Gridfinity STLs. "GUI" i
 
 TypeScript ESM, function components, two-space indent. `PascalCase.tsx`, `useName.ts`, camelCase helper exports. Shared contracts in `types.ts`, domain logic in `src/lib/`.
 
-Prefer Mantine controls/layout over custom UI. Cross-app control styling → `theme.ts`; global layout and library workarounds → `src/index.css`; SVG editor styles → `src/components/sidebar/editor.css`. No fixed design constants in JSX unless data-driven.
+Prefer Mantine controls/layout over custom UI. Cross-app control styling → `theme.ts`; global layout and library workarounds → `src/index.css`; SVG editor styles → `src/components/sidebar/editor.css`; Project-mode SVG styles → `src/components/project/project.css`. No fixed design constants in JSX unless data-driven.
 
 ## Rules that the source does not show
 
@@ -38,6 +41,21 @@ Prefer Mantine controls/layout over custom UI. Cross-app control styling → `th
 - The Rust kernel asserts to high hell: every relied-on invariant gets a real `assert!` at the point it is relied on, and spending most of the runtime inside asserts is acceptable. Never `debug_assert!` — `--release` compiles it out. See `rust/CLAUDE.md`.
 - `ModelViewer.tsx` publishes `data-render-quality`, `data-badapple-frame` and `data-explode` imperatively via `dataset` inside the render loop. Routing per-frame reads through React state makes the camera stutter. For the same reason, never route `#badapple` clip frames through React state or `add_piece`.
 
+## Projects
+
+A *project* is a drawer plus the objects to organize in it. The pipeline is drawer → objects → pack → walls → one `BinDesign`. `appMode` in the store switches the whole shell between `'bins'` and `'project'`; nothing else about the two modes is shared.
+
+- **The drawer is one bin, and the optimizer writes its `walls`.** One compartment per placed object, divided by ordinary `Wall`s. This is why the feature is pure TypeScript: `Wall` already flows `store` → `buildBinParameters`/`mirrorWall` → `geometry.worker` → `gridfinity-wasm` `InnerWall` → kernel, so no Rust change was needed and none should be added for it.
+- **Packing is millimetre-space; only the bin outline is cell-quantized.** The outline is just `floor(drawer / 42)` cells (capped at `MAX_GRID`), and the leftover millimetres are reported as unusable drawer margin. Compartments sit at arbitrary mm positions inside `packingArea()`, the cavity interior inset by `perimeterClearancePerSide + perimeterThickness`. That inset treats the cavity as a plain rectangle and ignores its ~2.5 mm corner rounding; an object hard into a corner leans on its clearance.
+- An object is one or more **connected** axis-aligned boxes. Each instance claims its boxes inflated by `clearance + dividerThickness / 2`, so packing the claims without overlap is what keeps divider centrelines apart and leaves each compartment interior exactly the object plus its clearance.
+- **The optimizer's budget is an iteration count, never wall-clock.** `PACK_RESTARTS` per effort tier plus a fixed `PACK_SEED` is the whole reason a given drawer and object list always produce the same layout; a time budget would make the result depend on the machine. Measured cost on a 46-instance drawer: quick ~0.4 s, standard ~2.7 s, thorough ~11 s. `packOnce` accumulates its own score — do not re-derive it by re-measuring placements.
+- **Every generated divider is extended by half its thickness at both ends.** Without it the kernel's `region_difference` leaves a half-thickness gap at each junction and adjacent compartments leak into each other. It is safe because the `t/2` band around a claim boundary is reserved by construction and belongs to no compartment interior. `walls.test.ts` flood-fills the packing area and asserts no compartment centre reaches another — that is the test that catches a junction gap.
+- Collinear and duplicated boundary runs are merged per line, so two abutting compartments share **one** divider rather than two stacked ones. Runs lying on the packing-area boundary are dropped (that is the bin's own perimeter wall) and runs shorter than `MIN_GENERATED_WALL_LENGTH` are dropped with them.
+- Applying a layout **replaces `design.bins` entirely** with the single drawer bin, sizes the editor grid to the drawer, and returns to `'bins'` mode. Any project edit clears the layout, because a stale layout no longer describes the objects.
+- Projects persist to `localStorage` under `gridfinity-expanded.projects.v1` through `subscribeProjectStorage()`, wired once from `main.tsx` — deliberately **not** zustand `persist` middleware, which would drag storage into `store.ts` and make the store tests touch a `localStorage` that does not exist under vitest's node environment. A missing key, unparseable JSON, or a different `version` all fall back to "no saved projects" silently; never throw and never block startup. Bump the version and add a migration rather than reinterpreting an old blob.
+- **`ModelViewer` stays mounted in project mode**, covered by `.project-workspace` rather than unmounted, so switching modes never tears down and rebuilds the wgpu device. It keeps rendering behind the cover.
+- Inner walls are the kernel's weakest surface (`fuzz_inner_walls`, see `rust/CLAUDE.md`), and a packed drawer emits dozens of them into one bin, all terminating where a divider meets the cavity's rounded corner. `a_drawer_bin_partitioned_into_compartments_is_watertight` is the gate: its 7×5 cells and 23 dividers are the **verbatim output** of `buildDrawerBin` for a 300 × 210 mm drawer holding nine objects, not a hand-written approximation of it. Re-dump and replace that fixture if the wall generator changes. A bin the kernel still cannot build surfaces as red `FLAG_BAD` geometry rather than crashing.
+
 ## Renderer
 
 `rust/crates/gridfinity-render` is a shared `wgpu` + `glam` crate with no egui or wasm deps, consumed by the egui debugger (`gridfinity-gui`) and the web app (`gridfinity-wasm`). Keep front-end concerns out; change its camera, shaders, or vertex format only with both consumers in mind.
@@ -51,7 +69,7 @@ Prefer Mantine controls/layout over custom UI. Cross-app control styling → `th
 - **`select` is not a branch — it evaluates every operand.** `select(a / b, fallback, b != 0)` still divides by zero, and the resulting NaN is free to reach the result through whatever arithmetic the backend lowers `select` to. Guard a division with `if`, or remove it. `no_select_guards_a_division_it_has_already_evaluated` fails the build on the pattern.
 - **The GI bounce reads the frame it just wrote.** That feedback loop is contractive in magnitude (`GI_BOUNCE_STRENGTH` < 1) but not in NaN: one non-finite pixel re-seeds itself every frame and spreads by the sample radius, so the history sample is rejected against `GI_BOUNCE_HISTORY_CEILING` first. Every comparison against a NaN is false, which is what makes that one test reject it. Anything else that samples the previous frame needs the same guard.
 
-Changing the geometry pipeline (`src/lib/geometry/`, `src/workers/geometry.worker.ts`, `src/hooks/useBinGeometry.ts`, `src/lib/{binParameters,coordinates,geometryCache,preview,cuts,gridfinitySpec,edges}.ts`, `src/lib/export/printableObjects.ts`) or the viewer (`src/components/viewer/ModelViewer.tsx`, `rust/crates/gridfinity-render/`, `rust/crates/gridfinity-wasm/src/viewer.rs`) requires updating this guide in the same change.
+Changing the geometry pipeline (`src/lib/geometry/`, `src/lib/project/`, `src/workers/geometry.worker.ts`, `src/workers/pack.worker.ts`, `src/hooks/useBinGeometry.ts`, `src/hooks/usePackLayout.ts`, `src/lib/{binParameters,coordinates,geometryCache,preview,cuts,gridfinitySpec,edges}.ts`, `src/lib/export/printableObjects.ts`) or the viewer (`src/components/viewer/ModelViewer.tsx`, `rust/crates/gridfinity-render/`, `rust/crates/gridfinity-wasm/src/viewer.rs`) requires updating this guide in the same change.
 
 ## Validation
 
@@ -88,7 +106,7 @@ Complete means required commands finished with confirmed successful exit codes. 
 CI always runs lint, Vitest, build. The classifier adds gates fail-safe:
 
 - Playwright: runtime UI, entrypoints, styles, store, hooks, workers, shared types, dependencies, build config
-- Rust: geometry, cut/part generation, STL export, geometry workers, geometry-consumed config, anything under `rust/`
+- Rust: geometry, cut/part generation, STL export, geometry workers, geometry-consumed config, anything under `rust/`. `src/lib/project/` counts — it authors the walls the kernel builds.
 - Both: ambiguous shared runtime files
 - Neither: docs-only, isolated test-only
 

@@ -16,15 +16,25 @@ export const gridToSvg = (i: number): number => PAD + i * CELL;
 export const mmToSvg = (mm: number): number => PAD + (mm / GRID_PITCH) * CELL;
 /** SVG unit → whole-bin mm. */
 export const svgToMm = (u: number): number => ((u - PAD) / CELL) * GRID_PITCH;
+/** A length in mm → a length in SVG units. */
+export const mmSpanToSvg = (mm: number): number => (mm / GRID_PITCH) * CELL;
 
-/** A pointer event's position in whole-bin mm, from the canvas's own viewBox. */
-export function pointerToMm(
+/** A pointer event's position in the canvas's own viewBox units. */
+export function pointerToUnits(
   svg: SVGSVGElement, e: { clientX: number; clientY: number },
 ): { x: number; y: number } {
   const rect = svg.getBoundingClientRect();
   const view = svg.viewBox.baseVal;
   return {
-    x: svgToMm(((e.clientX - rect.left) / rect.width) * view.width),
-    y: svgToMm(((e.clientY - rect.top) / rect.height) * view.height),
+    x: ((e.clientX - rect.left) / rect.width) * view.width,
+    y: ((e.clientY - rect.top) / rect.height) * view.height,
   };
+}
+
+/** A pointer event's position in whole-bin mm, from the canvas's own viewBox. */
+export function pointerToMm(
+  svg: SVGSVGElement, e: { clientX: number; clientY: number },
+): { x: number; y: number } {
+  const units = pointerToUnits(svg, e);
+  return { x: svgToMm(units.x), y: svgToMm(units.y) };
 }

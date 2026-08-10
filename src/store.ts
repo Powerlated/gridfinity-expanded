@@ -3,14 +3,23 @@ import { availableCuts, cutKey, partitionCells, sortCuts, toggleCut } from './li
 import { cellKey, classifyEdge, edgeKey, perimeterEdges, sortEdges } from './lib/edges';
 import { DESIGN_DEFAULTS } from './lib/gridfinitySpec';
 import { PRINTER_PROFILES, checkBedFit, cutsForPrinter } from './lib/printers';
+import { PROJECT_DEFAULTS, newObject, newProject } from './lib/project/defaults';
+import { drawerGrid } from './lib/project/drawer';
+import { buildDrawerBin } from './lib/project/layout';
 import type {
   BinDesign,
   Cell,
   Cut,
   Design,
+  Drawer,
   Edge,
   FastenerSettings,
+  PackEffort,
+  PackResult,
   PrinterSettings,
+  Project,
+  ProjectObject,
+  Rect,
   Wall,
 } from './lib/types';
 
@@ -23,6 +32,8 @@ export const PANEL_MAX_WIDTH = 900;
 export const MAX_GRID = 40;
 
 export type PanelSide = 'sidebar' | 'settings';
+
+export type AppMode = 'bins' | 'project';
 
 export type RenderQuality = 'low' | 'medium' | 'high';
 
@@ -126,6 +137,31 @@ interface AppState {
   gridRows: number;
   panelWidths: Record<PanelSide, number>;
   renderQuality: RenderQuality;
+  appMode: AppMode;
+  projects: Project[];
+  activeProjectId: string | null;
+  selectedObjectId: string | null;
+  packEffort: PackEffort;
+  layout: PackResult | null;
+  setAppMode: (appMode: AppMode) => void;
+  createProject: () => void;
+  renameProject: (id: string, name: string) => void;
+  deleteProject: (id: string) => void;
+  selectProject: (id: string) => void;
+  setDrawer: (drawer: Drawer) => void;
+  setDividerThickness: (dividerThickness: number) => void;
+  setClearance: (clearance: number) => void;
+  setPackEffort: (packEffort: PackEffort) => void;
+  addObject: () => void;
+  renameObject: (id: string, name: string) => void;
+  setObjectQuantity: (id: string, quantity: number) => void;
+  removeObject: (id: string) => void;
+  selectObject: (id: string | null) => void;
+  addObjectPart: (part: Rect) => void;
+  updateObjectPart: (index: number, patch: Partial<Rect>) => void;
+  removeObjectPart: (index: number) => void;
+  setLayout: (layout: PackResult | null) => void;
+  applyLayout: () => void;
   selectBin: (id: string) => void;
   startNewBin: () => void;
   paintCell: (cell: Cell, targetBinId?: string) => void;
@@ -149,6 +185,32 @@ interface AppState {
   setRenderQuality: (renderQuality: RenderQuality) => void;
 }
 
+function withActiveProject(
+  state: AppState,
+  update: (project: Project) => Project,
+): Partial<AppState> {
+  return {
+    projects: state.projects.map((project) =>
+      project.id === state.activeProjectId ? update(project) : project),
+    layout: null,
+  };
+}
+
+function withObject(
+  state: AppState,
+  id: string,
+  update: (object: ProjectObject) => ProjectObject,
+): Partial<AppState> {
+  return withActiveProject(state, (project) => ({
+    ...project,
+    objects: project.objects.map((object) => object.id === id ? update(object) : object),
+  }));
+}
+
+function activeProject(state: AppState): Project | undefined {
+  return state.projects.find((project) => project.id === state.activeProjectId);
+}
+
 export const useAppStore = create<AppState>((set) => ({
   design: DEFAULT_DESIGN,
   selectedBinId: DEFAULT_DESIGN.bins[0].id,
@@ -156,6 +218,117 @@ export const useAppStore = create<AppState>((set) => ({
   gridRows: 7,
   panelWidths: DEFAULT_PANEL_WIDTHS,
   renderQuality: DEFAULT_RENDER_QUALITY,
+  appMode: 'bins',
+  projects: [],
+  activeProjectId: null,
+  selectedObjectId: null,
+  packEffort: PROJECT_DEFAULTS.effort,
+  layout: null,
+
+  setAppMode: (appMode) => set({ appMode }),
+
+  createProject: () => set((state) => {
+    const project = newProject(state.projects);
+    return {
+      projects: [...state.projects, project],
+      activeProjectId: project.id,
+      selectedObjectId: null,
+      layout: null,
+    };
+  }),
+
+  renameProject: (id, name) => set((state) => ({
+    projects: state.projects.map((project) => project.id === id ? { ...project, name } : project),
+  })),
+
+  deleteProject: (id) => set((state) => {
+    const projects = state.projects.filter((project) => project.id !== id);
+    const activeProjectId = state.activeProjectId === id
+      ? projects[0]?.id ?? null
+      : state.activeProjectId;
+    return { projects, activeProjectId, selectedObjectId: null, layout: null };
+  }),
+
+  selectProject: (id) => set({ activeProjectId: id, selectedObjectId: null, layout: null }),
+
+  setDrawer: (drawer) => set((state) => withActiveProject(state, (project) => ({ ...project, drawer }))),
+
+  setDividerThickness: (dividerThickness) => set((state) =>
+    withActiveProject(state, (project) => ({ ...project, dividerThickness }))),
+
+  setClearance: (clearance) => set((state) =>
+    withActiveProject(state, (project) => ({ ...project, clearance }))),
+
+  setPackEffort: (packEffort) => set({ packEffort, layout: null }),
+
+  addObject: () => set((state) => {
+    const project = activeProject(state);
+    if (!project) return state;
+    const object = newObject(project.objects);
+    return {
+      ...withActiveProject(state, (value) => ({ ...value, objects: [...value.objects, object] })),
+      selectedObjectId: object.id,
+    };
+  }),
+
+  renameObject: (id, name) => set((state) => withObject(state, id, (object) => ({ ...object, name }))),
+
+  setObjectQuantity: (id, quantity) => set((state) =>
+    withObject(state, id, (object) => ({ ...object, quantity }))),
+
+  removeObject: (id) => set((state) => ({
+    ...withActiveProject(state, (project) => ({
+      ...project,
+      objects: project.objects.filter((object) => object.id !== id),
+    })),
+    selectedObjectId: state.selectedObjectId === id ? null : state.selectedObjectId,
+  })),
+
+  selectObject: (id) => set({ selectedObjectId: id }),
+
+  addObjectPart: (part) => set((state) => state.selectedObjectId
+    ? withObject(state, state.selectedObjectId, (object) => ({
+      ...object,
+      parts: [...object.parts, part],
+    }))
+    : state),
+
+  updateObjectPart: (index, patch) => set((state) => state.selectedObjectId
+    ? withObject(state, state.selectedObjectId, (object) => ({
+      ...object,
+      parts: object.parts.map((part, partIndex) =>
+        partIndex === index ? { ...part, ...patch } : part),
+    }))
+    : state),
+
+  removeObjectPart: (index) => set((state) => state.selectedObjectId
+    ? withObject(state, state.selectedObjectId, (object) => ({
+      ...object,
+      parts: object.parts.filter((_, partIndex) => partIndex !== index),
+    }))
+    : state),
+
+  setLayout: (layout) => set({ layout }),
+
+  applyLayout: () => set((state) => {
+    const project = activeProject(state);
+    if (!project || !state.layout) return state;
+    const bin = buildDrawerBin(
+      project,
+      state.layout,
+      state.design.printer,
+      state.design.perimeterThickness,
+      MAX_GRID,
+    );
+    const grid = drawerGrid(project.drawer, MAX_GRID);
+    return {
+      design: { ...state.design, bins: [bin] },
+      selectedBinId: bin.id,
+      gridCols: Math.max(4, grid.cols),
+      gridRows: Math.max(4, grid.rows),
+      appMode: 'bins',
+    };
+  }),
 
   selectBin: (id) => set({ selectedBinId: id }),
 

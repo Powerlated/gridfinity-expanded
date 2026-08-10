@@ -17,7 +17,7 @@ const paths = execFileSync('git', diffArgs, { encoding: 'utf8' })
 const documentation = /^(?:AGENTS\.md|CLAUDE\.md|README(?:\.[^/]*)?|docs\/|\.agents\/)/;
 const isolatedTest = /(?:^|\/)(?:__tests__\/.*|[^/]+\.(?:test|spec)\.[cm]?[jt]sx?)$/;
 const playwrightOnly = /^(?:e2e\/|playwright\.config\.[cm]?[jt]s$)/;
-const geometry = /^(?:rust\/|src\/lib\/(?:geometry\/|cuts\.ts$|coordinates\.ts$|gridfinitySpec\.ts$|export\/stl\.ts$|types\.ts$)|src\/workers\/geometry\.worker\.ts$|src\/store\.ts$|package(?:-lock)?\.json$)/;
+const geometry = /^(?:rust\/|src\/lib\/(?:geometry\/|project\/|cuts\.ts$|coordinates\.ts$|gridfinitySpec\.ts$|export\/stl\.ts$|types\.ts$)|src\/workers\/geometry\.worker\.ts$|src\/store\.ts$|package(?:-lock)?\.json$)/;
 const browserRuntime = /^(?:src\/|public\/|index\.html$|package(?:-lock)?\.json$|vite\.config\.[cm]?[jt]s$|tsconfig(?:\.[^/]*)?\.json$|postcss\.config\.[cm]?[jt]s$)/;
 const tooling = /^(?:\.github\/workflows\/|scripts\/classify-changes\.mjs$|vitest\.config\.[cm]?[jt]s$|\.gitignore$)/;
 
