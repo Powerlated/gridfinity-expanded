@@ -603,6 +603,45 @@ fn audit_loop_containment(solid: &Solid, defects: &mut Vec<Defect>) {
                 continue 'faces;
             }
         }
+
+        if !matches!(face.surface, Surface::Plane { .. }) {
+            continue;
+        }
+        let area = |uv: &[[f32; 2]]| -> f32 {
+            let mut a = 0.0;
+            for i in 0..uv.len() {
+                let j = (i + 1) % uv.len();
+                a += uv[i][0] * uv[j][1] - uv[j][0] * uv[i][1];
+            }
+            a * 0.5
+        };
+        let mut net = area(&outer_uv).abs();
+        for lp in loops[1..].iter() {
+            let mut hole: Vec<[f32; 2]> = Vec::new();
+            for &(e, fwd) in lp.iter() {
+                let sp = &edge_pts[&e];
+                let chain: Vec<Vec3> =
+                    if fwd { sp.to_vec() } else { sp.iter().rev().copied().collect() };
+                for p in &chain[..chain.len() - 1] {
+                    let uv = to_uv(*p);
+                    hole.push([uv.0, uv.1]);
+                }
+            }
+            if hole.len() >= 3 {
+                net -= area(&hole).abs();
+            }
+        }
+        if net <= 0.0 {
+            defects.push(Defect {
+                severity: Severity::Error,
+                category: Category::LoopContainment,
+                message: format!(
+                    "face {fi}'s holes cover {:.4} mm² more than its outer boundary encloses, so                      they overlap each other; the face has no interior left to triangulate",
+                    -net
+                ),
+                location: Some(Location::Face(fi)),
+            });
+        }
     }
 }
 

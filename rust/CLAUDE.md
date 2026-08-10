@@ -118,6 +118,18 @@ covers shape, height, thicknesses, holes, dividers, slope and mode; `fuzz_bin_sh
 carved piece by piece. `fuzz_inner_walls` and `fuzz_bin_shapes` are both **green** at the default
 seed. `fuzz_params_broad` reports rather than asserts, and is at 28/400 / 5 defects.
 
+`gridfinity-wasm`'s `opening_on_a_hole_boundary_stays_closed` is the workspace's one known-failing
+test. The bin is a **ring** whose opening sits on the enclosed hole's boundary, which merges the
+hole into the cavity — so the cavity's rim loop already swallows the hole, and the ring's own inner
+loop is then added as a *second* hole covering the same area. The two overlap: outer 15722 mm²,
+holes 1792 + 15141, a net of −1209 mm², leaving the face no interior. `audit` now reports it as
+`LoopContainment` (the containment pass had only ever tested each hole against the *outer* loop,
+never holes against each other), and `build_bin_solid` asserts the audit, so the failure names the
+defect instead of surfacing 196 tessellation leaks. Dropping a hole that another hole contains is
+**not** the fix — `divider_ring_island_is_watertight` has a legitimately nested pair and breaks.
+The rim holes have to come from one region computation that already accounts for the merge, the way
+`plan_cavity_flat`'s rim does.
+
 A torus blend's tangent circles take their parameter range from **their own tangent points**
 (`circle_span`), not from the edge being blended: once the blend radius exceeds the corner radius
 the tangent circle lands on the far side of the axis, so the inherited range needed rotating by π

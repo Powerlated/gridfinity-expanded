@@ -280,7 +280,14 @@ pub fn build_bin_solid(
     let walls = effective_walls(bin_cells, bin_cells, &p.open_edges, &p.divider_edges);
     let mut prog = Program::default();
     plan_piece(p, bin_cells, bin_cells, walls, slope, "piece", &mut prog);
-    run_all(&prog)
+    let solid = run_all(&prog)?;
+    if let Err(e) = solid.validate() {
+        panic!("a bin solid is not a closed manifold: {e}");
+    }
+    let report = crate::audit(&solid);
+    assert!(report.is_ok(), "a bin solid is not geometrically sound:
+{report}");
+    Ok(solid)
 }
 
 const REENTRANT_FILLET_OVERHANG: f32 = 8.0;
