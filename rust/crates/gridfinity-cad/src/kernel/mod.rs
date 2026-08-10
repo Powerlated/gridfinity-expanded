@@ -1,6 +1,5 @@
-
-pub mod build;
 pub mod audit;
+pub mod build;
 pub mod chamfer;
 pub mod fillet;
 pub mod geom;
@@ -14,8 +13,8 @@ pub mod planar;
 pub mod program;
 pub mod rectregion;
 pub mod region2d;
-pub mod slab;
 pub mod sketch;
+pub mod slab;
 pub mod split;
 pub mod tess;
 pub mod topo;

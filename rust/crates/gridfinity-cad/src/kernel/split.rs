@@ -39,7 +39,12 @@ pub fn curve_plane_params(curve: &Curve, t0: f32, t1: f32, plane: &Surface) -> V
             let t = (c - p0.dot(normal)) / denom;
             if within(t) { vec![t] } else { Vec::new() }
         }
-        Curve::Circle { center, axis, radius, ref_dir } => {
+        Curve::Circle {
+            center,
+            axis,
+            radius,
+            ref_dir,
+        } => {
             let (d0, d1) = radial_frame(axis, ref_dir);
             harmonic_roots(
                 radius * d0.dot(normal),
@@ -52,16 +57,12 @@ pub fn curve_plane_params(curve: &Curve, t0: f32, t1: f32, plane: &Surface) -> V
             .filter(|&t| within(t))
             .collect()
         }
-        Curve::Ellipse { center, a, b } => harmonic_roots(
-            a.dot(normal),
-            b.dot(normal),
-            c - center.dot(normal),
-            lo,
-            hi,
-        )
-        .into_iter()
-        .filter(|&t| within(t))
-        .collect(),
+        Curve::Ellipse { center, a, b } => {
+            harmonic_roots(a.dot(normal), b.dot(normal), c - center.dot(normal), lo, hi)
+                .into_iter()
+                .filter(|&t| within(t))
+                .collect()
+        }
         Curve::TorusSection { .. } => Vec::new(),
     }
 }
@@ -106,9 +107,12 @@ pub fn emit_edge(
 ) -> (EdgeId, bool) {
     match curve {
         Curve::Line { .. } => b.line(vs, ve),
-        Curve::Circle { center, axis, radius, ref_dir } => {
-            b.arc(vs, ve, center, axis, radius, ref_dir, t0, t1)
-        }
+        Curve::Circle {
+            center,
+            axis,
+            radius,
+            ref_dir,
+        } => b.arc(vs, ve, center, axis, radius, ref_dir, t0, t1),
         Curve::Ellipse { center, a, b: eb } => b.ellipse(vs, ve, center, a, eb, t0, t1),
         Curve::TorusSection { .. } => b.torus_section(vs, ve, curve, t0, t1),
     }
@@ -117,7 +121,12 @@ pub fn emit_edge(
 pub fn param_of(curve: &Curve, p: Vec3) -> f32 {
     match *curve {
         Curve::Line { p0, dir } => (p - p0).dot(dir),
-        Curve::Circle { center, axis, ref_dir, .. } => {
+        Curve::Circle {
+            center,
+            axis,
+            ref_dir,
+            ..
+        } => {
             let (d0, d1) = radial_frame(axis, ref_dir);
             let v = p - center;
             v.dot(d1).atan2(v.dot(d0))
@@ -127,7 +136,13 @@ pub fn param_of(curve: &Curve, p: Vec3) -> f32 {
             let (la, lb) = (a.length_squared().max(1e-12), b.length_squared().max(1e-12));
             (v.dot(b) / lb).atan2(v.dot(a) / la)
         }
-        Curve::TorusSection { center, axis, major, minor, .. } => {
+        Curve::TorusSection {
+            center,
+            axis,
+            major,
+            minor,
+            ..
+        } => {
             let v = p - center;
             let along = v.dot(axis);
             let radial = (v - axis * along).length();
@@ -213,7 +228,12 @@ impl Cut {
             Side::On => return Err("cannot keep only the material on the plane".into()),
         };
         Ok(Cut {
-            planes: vec![CutPlane { surface: *plane, origin, discard_normal, span: None }],
+            planes: vec![CutPlane {
+                surface: *plane,
+                origin,
+                discard_normal,
+                span: None,
+            }],
             region: None,
         })
     }
@@ -248,7 +268,13 @@ impl Cut {
         if planes.is_empty() {
             return Err("a prism cut needs at least one boundary segment".into());
         }
-        Ok(Cut { planes, region: Some(Prism { loops: loops.to_vec(), axis }) })
+        Ok(Cut {
+            planes,
+            region: Some(Prism {
+                loops: loops.to_vec(),
+                axis,
+            }),
+        })
     }
 
     pub fn side_of_point(&self, p: Vec3) -> Side {
@@ -299,7 +325,9 @@ impl Cut {
     /// point sits on an edge of the cut surface, where one plane's window ends
     /// and the next begins.
     fn planes_at(&self, p: Vec3) -> Vec<usize> {
-        (0..self.planes.len()).filter(|&i| self.planes[i].holds(p)).collect()
+        (0..self.planes.len())
+            .filter(|&i| self.planes[i].holds(p))
+            .collect()
     }
 }
 
@@ -326,7 +354,11 @@ impl Prism {
 }
 
 fn axis_frame(axis: Vec3) -> (Vec3, Vec3) {
-    let a = if axis.dot(Vec3::Z).abs() > 0.9 { (Vec3::X, Vec3::Y) } else { (Vec3::Y, Vec3::Z) };
+    let a = if axis.dot(Vec3::Z).abs() > 0.9 {
+        (Vec3::X, Vec3::Y)
+    } else {
+        (Vec3::Y, Vec3::Z)
+    };
     a
 }
 
@@ -371,7 +403,10 @@ fn window_exits(cut: &Cut, curve: &Curve, from: Vec3, dir: Vec3) -> Vec<(f32, f3
     };
     let (lo, hi) = match curve {
         Curve::Line { .. } => (t_from - 1e6, t_from + 1e6),
-        _ => (t_from - std::f32::consts::TAU, t_from + std::f32::consts::TAU),
+        _ => (
+            t_from - std::f32::consts::TAU,
+            t_from + std::f32::consts::TAU,
+        ),
     };
     let mut out = Vec::new();
     for cp in &cut.planes {
@@ -423,8 +458,11 @@ fn trim_loop(
     for &(e, fwd) in lp {
         let ed = solid.edges[e];
         let (ta, tb) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
-        let mut cuts: Vec<f32> =
-            cut.crossings(&ed.curve, ed.t0, ed.t1).into_iter().map(|(t, _)| t).collect();
+        let mut cuts: Vec<f32> = cut
+            .crossings(&ed.curve, ed.t0, ed.t1)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
         cuts.sort_by(f32::total_cmp);
         cuts.dedup_by(|x, y| (*x - *y).abs() < ON_PLANE);
         cuts.sort_by(|x, y| {
@@ -488,7 +526,11 @@ fn trim_loop(
                 c.end = piece.1;
             }
             None => {
-                current = Some(Chain { edges: vec![edge], start: piece.0, end: piece.1 });
+                current = Some(Chain {
+                    edges: vec![edge],
+                    start: piece.0,
+                    end: piece.1,
+                });
             }
         }
     }
@@ -566,7 +608,13 @@ fn close_chains(
                             && runs_along_cut(cut, &curve, chain.end, signed)
                         {
                             consider(
-                                Connector { stop: Stop::Chain(idx), advance, curve, signed, plane: pi },
+                                Connector {
+                                    stop: Stop::Chain(idx),
+                                    advance,
+                                    curve,
+                                    signed,
+                                    plane: pi,
+                                },
                                 &mut best,
                             );
                         }
@@ -574,7 +622,13 @@ fn close_chains(
                     for (advance, signed, point) in window_exits(cut, &curve, chain.end, dir) {
                         if runs_along_cut(cut, &curve, chain.end, signed) {
                             consider(
-                                Connector { stop: Stop::Edge(point), advance, curve, signed, plane: pi },
+                                Connector {
+                                    stop: Stop::Edge(point),
+                                    advance,
+                                    curve,
+                                    signed,
+                                    plane: pi,
+                                },
                                 &mut best,
                             );
                         }
@@ -582,7 +636,14 @@ fn close_chains(
                 }
             }
 
-            let Some(Connector { stop, curve, signed, plane: pi, .. }) = best else {
+            let Some(Connector {
+                stop,
+                curve,
+                signed,
+                plane: pi,
+                ..
+            }) = best
+            else {
                 return Err("no closed-form section curve for a face the cut crosses".into());
             };
             let target = match stop {
@@ -670,8 +731,14 @@ pub fn trim(solid: &Solid, cut: &Cut) -> Result<Solid, String> {
             b.face_from(face.surface, face.sense, &outer, &inners);
             continue;
         }
-        let closed =
-            close_chains(&mut b, &face.surface, face.sense, cut, cut_chains, &mut connectors)?;
+        let closed = close_chains(
+            &mut b,
+            &face.surface,
+            face.sense,
+            cut,
+            cut_chains,
+            &mut connectors,
+        )?;
         let mut all = closed;
         all.extend(intact);
         emit_trimmed_faces(&mut b, face.surface, face.sense, &all)?;
@@ -709,13 +776,16 @@ fn nearest_along_shared_edge(
     remaining: &[(EdgeId, bool)],
 ) -> Option<Option<usize>> {
     let tp = b.point(tail);
-    let shared: Vec<usize> = cut.planes_at(tp).into_iter().filter(|&j| j != plane).collect();
+    let shared: Vec<usize> = cut
+        .planes_at(tp)
+        .into_iter()
+        .filter(|&j| j != plane)
+        .collect();
     if shared.is_empty() {
         return None;
     }
-    let on_shared = |p: Vec3| {
-        (p - tp).length() > ON_PLANE && shared.iter().any(|&j| cut.planes[j].holds(p))
-    };
+    let on_shared =
+        |p: Vec3| (p - tp).length() > ON_PLANE && shared.iter().any(|&j| cut.planes[j].holds(p));
     let mut best: Option<(Option<usize>, f32)> = None;
     let mut consider = |idx: Option<usize>, p: Vec3| {
         if on_shared(p) {
@@ -848,7 +918,10 @@ fn emit_trimmed_faces(
         if areas[j] >= 0.0 || polys[j].is_empty() {
             continue;
         }
-        owner[j] = outers.iter().copied().find(|&i| loop_encloses(&polys[i], &polys[j], angular));
+        owner[j] = outers
+            .iter()
+            .copied()
+            .find(|&i| loop_encloses(&polys[i], &polys[j], angular));
         if owner[j].is_none() {
             emit_flat(b);
             return Ok(());
@@ -873,8 +946,7 @@ fn emit_caps(
     cut: &Cut,
     plane: usize,
 ) -> Result<(), String> {
-    let mut remaining: Vec<(EdgeId, bool)> =
-        connectors.iter().map(|&(e, fwd)| (e, !fwd)).collect();
+    let mut remaining: Vec<(EdgeId, bool)> = connectors.iter().map(|&(e, fwd)| (e, !fwd)).collect();
     let mut loops: Vec<Vec<(EdgeId, bool)>> = Vec::new();
     while let Some(seed) = remaining.pop() {
         let mut lp = vec![seed];
@@ -911,7 +983,9 @@ fn emit_caps(
     };
     let to_2d = |p: Vec3| (p.dot(u_dir), p.dot(v_dir));
     let poly = |lp: &[(EdgeId, bool)]| -> Vec<(f32, f32)> {
-        lp.iter().map(|&d| to_2d(b.point(b.directed_ends(d).0))).collect()
+        lp.iter()
+            .map(|&d| to_2d(b.point(b.directed_ends(d).0)))
+            .collect()
     };
     let polys: Vec<Vec<(f32, f32)>> = loops.iter().map(|l| poly(l)).collect();
     let areas: Vec<f32> = polys.iter().map(|p| polygon_area(p)).collect();
@@ -973,7 +1047,11 @@ mod tests {
         let curve = Curve::circle_z(Vec3::ZERO, 4.0);
         let plane = plane_x(1.5);
         let params = curve_plane_params(&curve, -PI, PI, &plane);
-        assert_eq!(params.len(), 2, "a secant plane cuts a circle twice: {params:?}");
+        assert_eq!(
+            params.len(),
+            2,
+            "a secant plane cuts a circle twice: {params:?}"
+        );
         assert_lands_on_plane(&curve, &params, &plane);
     }
 
@@ -988,7 +1066,11 @@ mod tests {
         let curve = Curve::circle_z(Vec3::ZERO, 4.0);
         let plane = plane_x(1.5);
         let quarter = curve_plane_params(&curve, 0.0, PI / 2.0, &plane);
-        assert_eq!(quarter.len(), 1, "one crossing in the first quadrant: {quarter:?}");
+        assert_eq!(
+            quarter.len(),
+            1,
+            "one crossing in the first quadrant: {quarter:?}"
+        );
         assert_lands_on_plane(&curve, &quarter, &plane);
     }
 
@@ -1021,7 +1103,15 @@ mod tests {
                 a: Vec3::new(6.0, 0.0, 0.0),
                 b: Vec3::new(0.0, 3.0, 0.0),
             },
-            Curve::torus_section(Vec3::new(2.0, 1.0, 0.0), Vec3::Z, Vec3::X, 1.0, 10.0, 2.0, 1.0),
+            Curve::torus_section(
+                Vec3::new(2.0, 1.0, 0.0),
+                Vec3::Z,
+                Vec3::X,
+                1.0,
+                10.0,
+                2.0,
+                1.0,
+            ),
         ];
         for curve in &curves {
             for i in 1..12 {
@@ -1084,7 +1174,12 @@ mod tests {
     fn a_prism_cut_turns_the_corner_at_a_reentrant_window_edge() {
         let solid = extrude(&Sketch::rectangle(0.0, 0.0, 12.0, 12.0), 0.0, 5.0);
         let l = vec![vec![
-            (-9.0, -9.0), (0.0, -9.0), (0.0, 0.0), (9.0, 0.0), (9.0, 9.0), (-9.0, 9.0),
+            (-9.0, -9.0),
+            (0.0, -9.0),
+            (0.0, 0.0),
+            (9.0, 0.0),
+            (9.0, 9.0),
+            (-9.0, 9.0),
         ]];
         let cut = Cut::prism(&l, Vec3::Z).unwrap();
         let kept = trim(&solid, &cut).unwrap();
@@ -1104,7 +1199,10 @@ mod tests {
         assert_mesh_closed(&lo);
         assert_mesh_closed(&hi);
         let (vw, vl, vh) = (volume(&solid), volume(&lo), volume(&hi));
-        assert!(vl > 0.0 && vh > 0.0, "halves must have positive volume: {vl} {vh}");
+        assert!(
+            vl > 0.0 && vh > 0.0,
+            "halves must have positive volume: {vl} {vh}"
+        );
         assert!((vl + vh - vw).abs() < 1e-2, "{vl} + {vh} != {vw}");
     }
 
@@ -1137,7 +1235,10 @@ mod tests {
             assert_mesh_closed(&lo);
             assert_mesh_closed(&hi);
             let (vw, vl, vh) = (volume(&solid), volume(&lo), volume(&hi));
-            assert!(vl > 0.0 && vh > 0.0, "x={cut}: halves must have volume: {vl} {vh}");
+            assert!(
+                vl > 0.0 && vh > 0.0,
+                "x={cut}: halves must have volume: {vl} {vh}"
+            );
             assert!((vl + vh - vw).abs() < 0.05, "x={cut}: {vl} + {vh} != {vw}");
         }
     }
@@ -1152,7 +1253,12 @@ mod tests {
             let tess = tessellate(&half, 24);
             for (ti, tri) in tess.tris.iter().enumerate() {
                 let face = &half.faces[tess.face_of_tri[ti]];
-                let Surface::Cylinder { base, axis, radius, .. } = face.surface else { continue };
+                let Surface::Cylinder {
+                    base, axis, radius, ..
+                } = face.surface
+                else {
+                    continue;
+                };
                 let c = (tri.pos[0] + tri.pos[1] + tri.pos[2]) / 3.0;
                 let v = c - base;
                 let d = (v - axis * v.dot(axis)).length();

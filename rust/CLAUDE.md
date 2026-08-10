@@ -233,6 +233,34 @@ failure-path tests need a configuration that genuinely fails, and every fix here
 has been re-pointed twice. It also needs a **hard** failure: `build_bin` only catches `Err` and
 panics, so a solid that builds and then fails `validate` reads as success there.
 
+**A `HashMap` keyed by edge must not decide a value keyed by vertex.** `fillet_edges` filled
+`vinfo` (vertex -> moved tangent points) by iterating `bm`, a `std::collections::HashMap<EdgeId,
+Fillet>`. A blend *chain* has two blended edges meeting at each interior vertex, so both wrote that
+vertex and **the last writer won** — with `RandomState` seeded per process and per thread, which
+one that was changed run to run. The two blends agree only to within an ulp, and an ulp at a
+`weld_key` boundary is exactly the crack described under `topo.rs`, so `fuzz_inner_walls` failed on
+about half of all runs (and at `RAYON_NUM_THREADS=1` too — this was never a threading bug, only a
+seeding one). It now iterates `bm`'s keys sorted, the way lines 188 and 332 of the same function
+already did. **Any iteration order that reaches geometry has to be sorted**: a std `HashMap` here is
+a random number generator, and `--workspace` vs `-p gridfinity-cad` builds different binaries, so a
+"passes alone, fails in the gate" report is a determinism smell before it is a feature-unification
+one.
+
+**The long test targets are `rayon`-parallel, and must stay deterministic anyway.** The three
+asserting fuzzers share one `sweep()`: cases are generated **sequentially** from the seeded `Rng`
+into a `Vec` (so the case stream is byte-identical to the serial version), then checked with
+`par_iter`, then grouped in `BTreeMap` order and shrunk in parallel. Generating per-case seeds in
+parallel instead would reshuffle the stream and invalidate every recorded count. `catching` no
+longer swaps the panic hook per case — with many threads inside `catch_unwind` that race silenced
+the harness's own hook; `quiet_panics()` installs one silent hook per sweep, refcounted, and
+restores the loud one before the report is asserted. `gridfinity-gui`'s `badapple::tests::
+face_shapes` sweeps every distinct blob >= 40 cells in the first ten seconds of the clip: ~31
+minutes of CPU, which is what made `cargo test --workspace` look hung. It is parallel (measured
+13.6x on 16 threads) and de-duplicates blobs that repeat across consecutive frames, taking it to
+~140 s. Because it saturates every core, anything sharing that binary must not have a wall-clock
+budget tight enough to starve — `pipelined_worker_matches_serial_build` polled a fixed 2000 x 2 ms
+and began failing under the load; its budget is an explicit deadline now.
+
 **Reported leaks are picked by lexicographic minimum, not `leaks[0]`.** `tessellation_leaks` sorts
 by `(a.z, a.x, a.y)`, and ties among those resolve by `HashMap` iteration order, so `leaks[0]` moved
 between runs and silently reshuffled the defect grouping (`fuzz_params_broad` drifted 12↔13 groups

@@ -1,7 +1,6 @@
-
-use crate::layout::GridCell;
 use crate::kernel::math::Vec2;
 use crate::kernel::sketch::{Seg, loop_area};
+use crate::layout::GridCell;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
 
@@ -221,7 +220,10 @@ mod tests {
         let loops = region_loops(&cells(&[(0, 0)]), 10.0, 2.0, Vec2::ZERO);
         let segs = &loops[0].segs;
         let arcs = segs.iter().filter(|s| matches!(s, Seg::Arc { .. })).count();
-        let lines = segs.iter().filter(|s| matches!(s, Seg::Line { .. })).count();
+        let lines = segs
+            .iter()
+            .filter(|s| matches!(s, Seg::Line { .. }))
+            .count();
         assert_eq!(arcs, 4, "four rounded corners");
         assert!(lines >= 4, "four straight sides remain");
     }
@@ -235,7 +237,10 @@ mod tests {
             Vec2::ZERO,
         );
         assert_eq!(loops.len(), 1);
-        assert!((loop_area(&loops[0].segs) - 4.0).abs() < 1e-5, "area = 4 cells");
+        assert!(
+            (loop_area(&loops[0].segs) - 4.0).abs() < 1e-5,
+            "area = 4 cells"
+        );
     }
 
     #[test]

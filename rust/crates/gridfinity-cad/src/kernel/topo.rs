@@ -1,7 +1,6 @@
-
 use crate::kernel::geom::{Curve, Surface};
-use crate::kernel::math::{Vec3, WELD_NEAR_SQ, weld_key};
 use crate::kernel::hash::FxHashMap;
+use crate::kernel::math::{Vec3, WELD_NEAR_SQ, weld_key};
 
 pub type VertexId = usize;
 pub type EdgeId = usize;
@@ -166,7 +165,11 @@ impl Solid {
                 }
                 for w in 0..lp.len() {
                     let (e, f) = lp[w];
-                    if f { fwd[e] += 1 } else { bwd[e] += 1 }
+                    if f {
+                        fwd[e] += 1
+                    } else {
+                        bwd[e] += 1
+                    }
                     let (_, end) = self.directed(e, f);
                     let (ne, nf) = lp[(w + 1) % lp.len()];
                     let (nstart, _) = self.directed(ne, nf);
@@ -264,7 +267,6 @@ impl std::ops::Index<usize> for EdgeFaces {
     }
 }
 
-
 #[derive(Default)]
 pub struct Builder {
     verts: Vec<Vertex>,
@@ -278,10 +280,19 @@ pub struct Builder {
 
 impl Builder {
     pub fn new() -> Builder {
-        Builder { loops: vec![0], ..Builder::default() }
+        Builder {
+            loops: vec![0],
+            ..Builder::default()
+        }
     }
 
-    pub fn with_capacity(nv: usize, ne: usize, nloops: usize, nloop_edges: usize, nfaces: usize) -> Builder {
+    pub fn with_capacity(
+        nv: usize,
+        ne: usize,
+        nloops: usize,
+        nloop_edges: usize,
+        nfaces: usize,
+    ) -> Builder {
         let mut loops = Vec::with_capacity(nloops + 1);
         loops.push(0);
         Builder {
@@ -317,9 +328,15 @@ impl Builder {
                 for &(e, _) in lp {
                     let ed = solid.edges[e];
                     for v in [ed.v0, ed.v1] {
-                        b.vert_index.entry(weld_key(solid.verts[v].point)).or_insert(v);
+                        b.vert_index
+                            .entry(weld_key(solid.verts[v].point))
+                            .or_insert(v);
                     }
-                    let (lo, hi) = if ed.v0 < ed.v1 { (ed.v0, ed.v1) } else { (ed.v1, ed.v0) };
+                    let (lo, hi) = if ed.v0 < ed.v1 {
+                        (ed.v0, ed.v1)
+                    } else {
+                        (ed.v1, ed.v0)
+                    };
                     let mid = match ed.curve {
                         Curve::Line { .. } => {
                             (solid.verts[ed.v0].point + solid.verts[ed.v1].point) * 0.5
@@ -429,7 +446,12 @@ impl Builder {
         a1: f32,
     ) -> (EdgeId, bool) {
         crate::kernel::perf::count(crate::kernel::perf::Metric::BuilderArc);
-        let curve = Curve::Circle { center, axis, radius, ref_dir };
+        let curve = Curve::Circle {
+            center,
+            axis,
+            radius,
+            ref_dir,
+        };
         let mid = curve.point((a0 + a1) * 0.5);
         self.edge_between(a, b, mid, || Edge {
             curve,
@@ -451,7 +473,11 @@ impl Builder {
         t0: f32,
         t1: f32,
     ) -> (EdgeId, bool) {
-        let curve = Curve::Ellipse { center, a: ea, b: eb };
+        let curve = Curve::Ellipse {
+            center,
+            a: ea,
+            b: eb,
+        };
         let mid = curve.point((t0 + t1) * 0.5);
         self.edge_between(a, b, mid, || Edge {
             curve,
@@ -526,7 +552,8 @@ impl Builder {
     }
 
     pub fn face(&mut self, surface: Surface, sense: bool, outer: Loop, inners: Vec<Loop>) -> usize {
-        let inner_slices: Vec<&[(EdgeId, bool)]> = inners.iter().map(|l| l.edges.as_slice()).collect();
+        let inner_slices: Vec<&[(EdgeId, bool)]> =
+            inners.iter().map(|l| l.edges.as_slice()).collect();
         self.face_from(surface, sense, &outer.edges, &inner_slices)
     }
 

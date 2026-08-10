@@ -1,23 +1,22 @@
-
 use crate::kernel::build::{loop_of, ring, wall_between};
 use crate::kernel::geom::Surface;
-use crate::layout::{
-    EdgeClass, EffectiveWalls, GridCell, GridEdge, Orientation, SplitLine,
-    cell_edges, classify_edge_in, effective_walls, partition_cells,
-};
-use crate::kernel::split::{Cut, Side, trim};
 use crate::kernel::math::{Vec2, Vec3, vec3_of};
-use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
-use crate::kernel::region2d::{chain_loops, loops_within, region_difference, split_regions};
 use crate::kernel::program::{
     DirLoop as POpDirLoop, HoleProfile as PHoleProfile, Op as POp, PlaneRef as PPlaneRef, Program,
     run_all,
 };
-use crate::kernel::slab::{Op as SlabOp, Slab, SlabOpts, plan_bands};
+use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
+use crate::kernel::region2d::{chain_loops, loops_within, region_difference, split_regions};
 use crate::kernel::sketch::{
     Aabb, Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop, segs_bbox,
 };
+use crate::kernel::slab::{Op as SlabOp, Slab, SlabOpts, plan_bands};
+use crate::kernel::split::{Cut, Side, trim};
 use crate::kernel::topo::{Builder, Loop, Solid};
+use crate::layout::{
+    EdgeClass, EffectiveWalls, GridCell, GridEdge, Orientation, SplitLine, cell_edges,
+    classify_edge_in, effective_walls, partition_cells,
+};
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
 
@@ -84,7 +83,10 @@ pub struct LogicalBin {
 
 impl LogicalBin {
     pub fn rect(gx: u32, gy: u32) -> LogicalBin {
-        LogicalBin { cells: rect_cells(gx, gy), ..Default::default() }
+        LogicalBin {
+            cells: rect_cells(gx, gy),
+            ..Default::default()
+        }
     }
 }
 
@@ -147,7 +149,10 @@ impl Default for Params {
 
 impl Params {
     pub fn rect(gx: u32, gy: u32) -> Params {
-        Params { bins: vec![LogicalBin::rect(gx, gy)], ..Default::default() }
+        Params {
+            bins: vec![LogicalBin::rect(gx, gy)],
+            ..Default::default()
+        }
     }
 
     pub fn divisions(mut self, div_x: u32, div_y: u32) -> Params {
@@ -189,7 +194,11 @@ pub fn divisions_to_edges(gx: u32, gy: u32, dx: u32, dy: u32) -> Vec<GridEdge> {
         for i in 0..n {
             let idx = ((i + 1) as f32 * span as f32 / (n + 1) as f32).round() as i32;
             for y in 0..gy as i32 {
-                out.push(GridEdge { x: idx, y, orientation: Orientation::V });
+                out.push(GridEdge {
+                    x: idx,
+                    y,
+                    orientation: Orientation::V,
+                });
             }
         }
     }
@@ -199,7 +208,11 @@ pub fn divisions_to_edges(gx: u32, gy: u32, dx: u32, dy: u32) -> Vec<GridEdge> {
         for i in 0..n {
             let idx = ((i + 1) as f32 * span as f32 / (n + 1) as f32).round() as i32;
             for x in 0..gx as i32 {
-                out.push(GridEdge { x, y: idx, orientation: Orientation::H });
+                out.push(GridEdge {
+                    x,
+                    y: idx,
+                    orientation: Orientation::H,
+                });
             }
         }
     }
@@ -228,7 +241,11 @@ pub fn try_build(p: &Params) -> Result<Solid, String> {
         panic!("{:?} is not a closed manifold: {e}", p.mode);
     }
     let report = crate::audit(&solid);
-    assert!(report.is_ok(), "{:?} is not geometrically sound:\n{report}", p.mode);
+    assert!(
+        report.is_ok(),
+        "{:?} is not geometrically sound:\n{report}",
+        p.mode
+    );
     Ok(solid)
 }
 
@@ -242,7 +259,11 @@ pub fn program(p: &Params) -> Program {
             continue;
         }
         let walls = effective_walls(&bin.cells, &bin.cells, &p.open_edges, &p.divider_edges);
-        let tag = if p.bins.len() == 1 { "bin".to_string() } else { format!("bin {}", bi + 1) };
+        let tag = if p.bins.len() == 1 {
+            "bin".to_string()
+        } else {
+            format!("bin {}", bi + 1)
+        };
         plan_piece(p, &bin.cells, &bin.cells, walls, bin.slope, &tag, &mut prog);
     }
     prog
@@ -285,8 +306,11 @@ pub fn build_bin_solid(
         panic!("a bin solid is not a closed manifold: {e}");
     }
     let report = crate::audit(&solid);
-    assert!(report.is_ok(), "a bin solid is not geometrically sound:
-{report}");
+    assert!(
+        report.is_ok(),
+        "a bin solid is not geometrically sound:
+{report}"
+    );
     Ok(solid)
 }
 
@@ -314,12 +338,20 @@ pub fn carve_to_cells(
         );
     }
     let cell_rect = |c: &GridCell| {
-        RectF::new(c.x as f32 * GRID_PITCH, c.y as f32 * GRID_PITCH, GRID_PITCH, GRID_PITCH)
+        RectF::new(
+            c.x as f32 * GRID_PITCH,
+            c.y as f32 * GRID_PITCH,
+            GRID_PITCH,
+            GRID_PITCH,
+        )
     };
     let mut rects: Vec<RectF> = piece_cells.iter().map(cell_rect).collect();
     for c in piece_cells {
         for step in [-1i32, 1] {
-            let neighbour = GridCell { x: c.x, y: c.y + step };
+            let neighbour = GridCell {
+                x: c.x,
+                y: c.y + step,
+            };
             if bin_cells.contains(&neighbour) {
                 continue;
             }
@@ -356,7 +388,10 @@ fn piece_is_enclosed(bin_cells: &[GridCell], piece_cells: &[GridCell]) -> bool {
     }
     piece_cells.iter().all(|c| {
         [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().all(|&(dx, dy)| {
-            bin_cells.contains(&GridCell { x: c.x + dx, y: c.y + dy })
+            bin_cells.contains(&GridCell {
+                x: c.x + dx,
+                y: c.y + dy,
+            })
         })
     })
 }
@@ -365,7 +400,10 @@ fn piece_is_enclosed(bin_cells: &[GridCell], piece_cells: &[GridCell]) -> bool {
 /// whole bin needs no cut, and a split line that misses a piece's material is a
 /// no-op rather than an error -- an L-shaped bin needs that.
 fn straddles(solid: &Solid, cut: &Cut) -> bool {
-    solid.verts.iter().any(|v| cut.side_of_point(v.point) == Side::Negative)
+    solid
+        .verts
+        .iter()
+        .any(|v| cut.side_of_point(v.point) == Side::Negative)
 }
 
 pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
@@ -380,8 +418,12 @@ pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
             solid: build_baseplate(p),
         }]);
     }
-    let bins: Vec<(usize, &LogicalBin)> =
-        p.bins.iter().enumerate().filter(|(_, b)| !b.cells.is_empty()).collect();
+    let bins: Vec<(usize, &LogicalBin)> = p
+        .bins
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| !b.cells.is_empty())
+        .collect();
     let mut out = Vec::new();
     for (ord, (bi, bin)) in bins.iter().enumerate() {
         let parts = partition_cells(&bin.cells, &bin.split_lines);
@@ -412,7 +454,6 @@ pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
     Ok(out)
 }
 
-
 #[derive(Clone, Copy, Debug)]
 struct Step {
     from: (i32, i32),
@@ -433,19 +474,51 @@ fn boundary_steps(cells: &[GridCell]) -> Vec<Vec<Step>> {
     for &c in cells {
         let (x, y) = (c.x, c.y);
         if !present(x, y - 1) {
-            let s = Step { from: (x, y), to: (x + 1, y), edge: GridEdge { x, y, orientation: Orientation::H } };
+            let s = Step {
+                from: (x, y),
+                to: (x + 1, y),
+                edge: GridEdge {
+                    x,
+                    y,
+                    orientation: Orientation::H,
+                },
+            };
             adj.entry(s.from).or_default().push(s);
         }
         if !present(x + 1, y) {
-            let s = Step { from: (x + 1, y), to: (x + 1, y + 1), edge: GridEdge { x: x + 1, y, orientation: Orientation::V } };
+            let s = Step {
+                from: (x + 1, y),
+                to: (x + 1, y + 1),
+                edge: GridEdge {
+                    x: x + 1,
+                    y,
+                    orientation: Orientation::V,
+                },
+            };
             adj.entry(s.from).or_default().push(s);
         }
         if !present(x, y + 1) {
-            let s = Step { from: (x + 1, y + 1), to: (x, y + 1), edge: GridEdge { x, y: y + 1, orientation: Orientation::H } };
+            let s = Step {
+                from: (x + 1, y + 1),
+                to: (x, y + 1),
+                edge: GridEdge {
+                    x,
+                    y: y + 1,
+                    orientation: Orientation::H,
+                },
+            };
             adj.entry(s.from).or_default().push(s);
         }
         if !present(x - 1, y) {
-            let s = Step { from: (x, y + 1), to: (x, y), edge: GridEdge { x, y, orientation: Orientation::V } };
+            let s = Step {
+                from: (x, y + 1),
+                to: (x, y),
+                edge: GridEdge {
+                    x,
+                    y,
+                    orientation: Orientation::V,
+                },
+            };
             adj.entry(s.from).or_default().push(s);
         }
     }
@@ -499,7 +572,6 @@ fn dirv(d: (i32, i32)) -> Vec2 {
     Vec2::new(d.0 as f32, d.1 as f32)
 }
 
-
 #[derive(Clone, Copy)]
 struct OuterPiece {
     seg: Seg,
@@ -534,7 +606,11 @@ fn author_outer_loop(
 
         let a = from + d * PEG_TANGENT + nrm * ins;
         let b = to - d * PEG_TANGENT + nrm * ins;
-        pieces.push(OuterPiece { seg: Seg::Line { a, b }, shared: is_std, edge: Some(s.edge) });
+        pieces.push(OuterPiece {
+            seg: Seg::Line { a, b },
+            shared: is_std,
+            edge: Some(s.edge),
+        });
         if is_std {
             shared.sides.insert(s.edge);
         }
@@ -547,7 +623,11 @@ fn author_outer_loop(
         let both_std = is_std && (ins_next - HALF_TOL).abs() < 1e-6;
         let same_side = walled(&s.edge) == walled(&s_next.edge);
         if cross.abs() < 0.5 {
-            pieces.push(OuterPiece { seg: Seg::Line { a: start, b: end }, shared: false, edge: None });
+            pieces.push(OuterPiece {
+                seg: Seg::Line { a: start, b: end },
+                shared: false,
+                edge: None,
+            });
         } else if cross > 0.0 && both_std && same_side {
             let c = mm(s.to);
             let center = c + nrm * (ins + OUTER_R) + n1 * (ins_next + OUTER_R);
@@ -555,7 +635,14 @@ fn author_outer_loop(
             let a1 = f32::atan2(end.y - center.y, end.x - center.x);
             let (a0, a1) = short_arc(a0, a1);
             pieces.push(OuterPiece {
-                seg: Seg::Arc { a: start, b: end, center, radius: OUTER_R, a0, a1 },
+                seg: Seg::Arc {
+                    a: start,
+                    b: end,
+                    center,
+                    radius: OUTER_R,
+                    a0,
+                    a1,
+                },
                 shared: true,
                 edge: None,
             });
@@ -568,17 +655,40 @@ fn author_outer_loop(
             let a0 = f32::atan2(t1.y - center.y, t1.x - center.x);
             let a1 = f32::atan2(t2.y - center.y, t2.x - center.x);
             let (a0, a1) = short_arc(a0, a1);
-            pieces.push(OuterPiece { seg: Seg::Line { a: start, b: t1 }, shared: false, edge: None });
             pieces.push(OuterPiece {
-                seg: Seg::Arc { a: t1, b: t2, center, radius: OUTER_R, a0, a1 },
+                seg: Seg::Line { a: start, b: t1 },
                 shared: false,
                 edge: None,
             });
-            pieces.push(OuterPiece { seg: Seg::Line { a: t2, b: end }, shared: false, edge: None });
+            pieces.push(OuterPiece {
+                seg: Seg::Arc {
+                    a: t1,
+                    b: t2,
+                    center,
+                    radius: OUTER_R,
+                    a0,
+                    a1,
+                },
+                shared: false,
+                edge: None,
+            });
+            pieces.push(OuterPiece {
+                seg: Seg::Line { a: t2, b: end },
+                shared: false,
+                edge: None,
+            });
         } else {
             let q = mm(s.to) + nrm * ins + n1 * ins_next;
-            pieces.push(OuterPiece { seg: Seg::Line { a: start, b: q }, shared: false, edge: None });
-            pieces.push(OuterPiece { seg: Seg::Line { a: q, b: end }, shared: false, edge: None });
+            pieces.push(OuterPiece {
+                seg: Seg::Line { a: start, b: q },
+                shared: false,
+                edge: None,
+            });
+            pieces.push(OuterPiece {
+                seg: Seg::Line { a: q, b: end },
+                shared: false,
+                edge: None,
+            });
         }
     }
     pieces
@@ -594,7 +704,6 @@ fn short_arc(a0: f32, a1: f32) -> (f32, f32) {
     }
     (a0, a0 + d)
 }
-
 
 const W_EPS: f32 = 1e-3;
 
@@ -644,7 +753,9 @@ fn point_on_spans(spans: &[OpenSpan], pt: Vec2) -> bool {
 }
 
 fn seg_on_open(spans: &[OpenSpan], seg: &Seg) -> bool {
-    let Seg::Line { a, b } = *seg else { return false };
+    let Seg::Line { a, b } = *seg else {
+        return false;
+    };
     let horiz = (a.y - b.y).abs() < W_EPS;
     let vert = (a.x - b.x).abs() < W_EPS;
     if horiz == vert {
@@ -713,7 +824,9 @@ impl OuterLoops {
     fn split_at(&mut self, li: usize, p: Vec2, peg_splits: &mut HashMap<GridEdge, Vec<f32>>) {
         let pieces = &mut self.loops[li];
         for i in 0..pieces.len() {
-            let Seg::Line { a, b } = pieces[i].seg else { continue };
+            let Seg::Line { a, b } = pieces[i].seg else {
+                continue;
+            };
             if v2_eq(a, p) || v2_eq(b, p) {
                 let d = b - a;
                 let t = (p - a).dot(d) / d.length_squared();
@@ -737,8 +850,17 @@ impl OuterLoops {
                     peg_splits.entry(e).or_default().push(station);
                 }
             }
-            pieces[i] = OuterPiece { seg: Seg::Line { a, b: p }, ..pc };
-            pieces.insert(i + 1, OuterPiece { seg: Seg::Line { a: p, b }, ..pc });
+            pieces[i] = OuterPiece {
+                seg: Seg::Line { a, b: p },
+                ..pc
+            };
+            pieces.insert(
+                i + 1,
+                OuterPiece {
+                    seg: Seg::Line { a: p, b },
+                    ..pc
+                },
+            );
             let was = self.consumed[li][i];
             self.consumed[li].insert(i + 1, was);
             return;
@@ -793,7 +915,10 @@ struct CavityLoop {
 impl CavityLoop {
     fn untouched(segs: Vec<Seg>) -> CavityLoop {
         let n = segs.len();
-        CavityLoop { segs, coincident: vec![false; n] }
+        CavityLoop {
+            segs,
+            coincident: vec![false; n],
+        }
     }
     fn touched(&self) -> bool {
         self.coincident.iter().any(|&c| c)
@@ -833,7 +958,10 @@ fn resolve_open_runs(
             .expect("fully-open cavity: no outer loop found near its boundary");
         let segs = o.consume_all_near(probe);
         let n = segs.len();
-        return CavityLoop { segs, coincident: vec![true; n] };
+        return CavityLoop {
+            segs,
+            coincident: vec![true; n],
+        };
     }
 
     let start = on.iter().position(|&b| !b).unwrap();
@@ -912,7 +1040,6 @@ fn chain_fragments(mut frags: Vec<Vec<Seg>>) -> Vec<Vec<Seg>> {
     out
 }
 
-
 #[derive(Clone, Debug)]
 struct Island {
     segs: Vec<Seg>,
@@ -979,10 +1106,20 @@ fn inner_wall_quad(w: &InnerWall, r: f32) -> Option<Vec<Seg>> {
         let a0 = f32::atan2(t_in.y - center.y, t_in.x - center.x);
         let a1 = f32::atan2(t_out.y - center.y, t_out.x - center.x);
         let (a0, a1) = short_arc(a0, a1);
-        out.push(Seg::Arc { a: t_in, b: t_out, center, radius: r, a0, a1 });
+        out.push(Seg::Arc {
+            a: t_in,
+            b: t_out,
+            center,
+            radius: r,
+            a0,
+            a1,
+        });
         let next_in = tangents[(i + 1) % n_c].0;
         if (next_in - t_out).length() > 1e-4 {
-            out.push(Seg::Line { a: t_out, b: next_in });
+            out.push(Seg::Line {
+                a: t_out,
+                b: next_in,
+            });
         }
     }
     Some(out)
@@ -998,9 +1135,12 @@ fn inner_wall_quad_in(w: &InnerWall, r: f32, outer: &[Seg]) -> Option<Vec<Seg>> 
         return Some(sharp);
     }
     let floats_free = sharp.iter().all(|s| point_in_segs(s.start(), outer));
-    if floats_free { inner_wall_quad(w, r) } else { Some(sharp) }
+    if floats_free {
+        inner_wall_quad(w, r)
+    } else {
+        Some(sharp)
+    }
 }
-
 
 fn peg_profile(c: GridCell, w: f32, r: f32) -> Vec<Seg> {
     let cx = (c.x as f32 + 0.5) * GRID_PITCH;
@@ -1017,10 +1157,18 @@ fn peg_seg_free(s: &Seg, c: GridCell, shared: &SharedWithPegs) -> bool {
             let horiz = (a.y - b.y).abs() < W_EPS;
             let e = if horiz {
                 let y = if m.y < cy { c.y } else { c.y + 1 };
-                GridEdge { x: c.x, y, orientation: Orientation::H }
+                GridEdge {
+                    x: c.x,
+                    y,
+                    orientation: Orientation::H,
+                }
             } else {
                 let x = if m.x < cx { c.x } else { c.x + 1 };
-                GridEdge { x, y: c.y, orientation: Orientation::V }
+                GridEdge {
+                    x,
+                    y: c.y,
+                    orientation: Orientation::V,
+                }
             };
             !shared.sides.contains(&e)
         }
@@ -1066,12 +1214,20 @@ fn split_peg_profile(
             .filter(|&t| (t - c0.min(c1)) > W_EPS && (c0.max(c1) - t) > W_EPS)
             .collect();
         cuts.sort_by(|x, y| {
-            if c1 > c0 { x.total_cmp(y) } else { y.total_cmp(x) }
+            if c1 > c0 {
+                x.total_cmp(y)
+            } else {
+                y.total_cmp(x)
+            }
         });
         cuts.dedup_by(|x, y| (*x - *y).abs() < W_EPS);
         let mut prev = a;
         for t in cuts {
-            let p = if horiz { Vec2::new(t, a.y) } else { Vec2::new(a.x, t) };
+            let p = if horiz {
+                Vec2::new(t, a.y)
+            } else {
+                Vec2::new(a.x, t)
+            };
             out.push(Seg::Line { a: prev, b: p });
             prev = p;
         }
@@ -1080,7 +1236,6 @@ fn split_peg_profile(
     out
 }
 
-
 const STRIP_OUT: f32 = 1.0;
 
 fn edge_inside_cell(set: &HashSet<GridCell>, e: &GridEdge) -> Option<GridCell> {
@@ -1088,10 +1243,20 @@ fn edge_inside_cell(set: &HashSet<GridCell>, e: &GridEdge) -> Option<GridCell> {
         Orientation::V => (GridCell { x: e.x - 1, y: e.y }, GridCell { x: e.x, y: e.y }),
         Orientation::H => (GridCell { x: e.x, y: e.y - 1 }, GridCell { x: e.x, y: e.y }),
     };
-    if set.contains(&a) { Some(a) } else if set.contains(&b) { Some(b) } else { None }
+    if set.contains(&a) {
+        Some(a)
+    } else if set.contains(&b) {
+        Some(b)
+    } else {
+        None
+    }
 }
 
-fn plan_cavity(cells: &[GridCell], walls: &EffectiveWalls, wall_thickness: f32) -> (Vec<RectF>, Vec<RectF>) {
+fn plan_cavity(
+    cells: &[GridCell],
+    walls: &EffectiveWalls,
+    wall_thickness: f32,
+) -> (Vec<RectF>, Vec<RectF>) {
     let p = GRID_PITCH;
     let t = HALF_TOL + wall_thickness;
     let set: HashSet<GridCell> = cells.iter().copied().collect();
@@ -1103,7 +1268,9 @@ fn plan_cavity(cells: &[GridCell], walls: &EffectiveWalls, wall_thickness: f32) 
     let mut neg: Vec<RectF> = Vec::new();
 
     for e in &walls.walled {
-        let Some(inside) = edge_inside_cell(&set, e) else { continue };
+        let Some(inside) = edge_inside_cell(&set, e) else {
+            continue;
+        };
         match e.orientation {
             Orientation::H => {
                 let below = inside.y == e.y - 1;
@@ -1137,22 +1304,40 @@ fn plan_cavity(cells: &[GridCell], walls: &EffectiveWalls, wall_thickness: f32) 
 
     let mut lattice: HashSet<(i32, i32)> = HashSet::new();
     for c in cells {
-        for l in [(c.x, c.y), (c.x + 1, c.y), (c.x, c.y + 1), (c.x + 1, c.y + 1)] {
+        for l in [
+            (c.x, c.y),
+            (c.x + 1, c.y),
+            (c.x, c.y + 1),
+            (c.x + 1, c.y + 1),
+        ] {
             if !lattice.insert(l) {
                 continue;
             }
             let quads = [(-1, -1), (0, -1), (-1, 0), (0, 0)];
             let absent: Vec<(i32, i32)> = quads
                 .iter()
-                .filter(|(qx, qy)| !set.contains(&GridCell { x: l.0 + qx, y: l.1 + qy }))
+                .filter(|(qx, qy)| {
+                    !set.contains(&GridCell {
+                        x: l.0 + qx,
+                        y: l.1 + qy,
+                    })
+                })
                 .copied()
                 .collect();
             if absent.len() != 1 {
                 continue;
             }
             let (qx, qy) = absent[0];
-            let v_edge = GridEdge { x: l.0, y: l.1 + qy, orientation: Orientation::V };
-            let h_edge = GridEdge { x: l.0 + qx, y: l.1, orientation: Orientation::H };
+            let v_edge = GridEdge {
+                x: l.0,
+                y: l.1 + qy,
+                orientation: Orientation::V,
+            };
+            let h_edge = GridEdge {
+                x: l.0 + qx,
+                y: l.1,
+                orientation: Orientation::H,
+            };
             if !walls.walled.contains(&v_edge) || !walls.walled.contains(&h_edge) {
                 continue;
             }
@@ -1167,7 +1352,6 @@ fn plan_cavity(cells: &[GridCell], walls: &EffectiveWalls, wall_thickness: f32) 
 
     (pos, neg)
 }
-
 
 fn plan_piece(
     p: &Params,
@@ -1231,8 +1415,11 @@ fn plan_piece(
     let mut planned: Vec<(CavityLoop, Vec<Island>, f32, Option<Banded>)> = Vec::new();
     let corner_r = (OUTER_R - wt).max(0.0);
     for ol in &outers_traced {
-        let (convex_r, concave_r) =
-            if slope.is_some() { (0.0, 0.0) } else { (rc.max(corner_r), fr) };
+        let (convex_r, concave_r) = if slope.is_some() {
+            (0.0, 0.0)
+        } else {
+            (rc.max(corner_r), fr)
+        };
         let shape = if openish {
             shape_cavity_loop_open(ol, convex_r, concave_r, &spans)
         } else {
@@ -1245,7 +1432,11 @@ fn plan_piece(
         };
         let islands: Vec<Island> = holes_of(ol)
             .iter()
-            .map(|il| Island { segs: shape_cavity_loop(il, rc, fr), top: None, fr: 0.0 })
+            .map(|il| Island {
+                segs: shape_cavity_loop(il, rc, fr),
+                top: None,
+                fr: 0.0,
+            })
             .collect();
         let full_walls: Vec<Vec<Seg>> = p
             .inner_walls
@@ -1277,14 +1468,17 @@ fn plan_piece(
                 let mut best: Option<usize> = None;
                 for (i, (o, _)) in outs.iter().enumerate() {
                     if point_in_segs(pt, o)
-                        && best
-                            .is_none_or(|bi| loop_area(o).abs() < loop_area(&outs[bi].0).abs())
+                        && best.is_none_or(|bi| loop_area(o).abs() < loop_area(&outs[bi].0).abs())
                     {
                         best = Some(i);
                     }
                 }
                 if let Some(bi) = best {
-                    outs[bi].1.push(Island { segs: reverse_loop(&h), top: None, fr: 0.0 });
+                    outs[bi].1.push(Island {
+                        segs: reverse_loop(&h),
+                        top: None,
+                        fr: 0.0,
+                    });
                 }
             }
             for (o, isls) in outs {
@@ -1308,7 +1502,10 @@ fn plan_piece(
                     continue;
                 }
                 let corners: Vec<Vec2> = q.iter().map(|s| s.start()).collect();
-                let n_in = corners.iter().filter(|&&c| point_in_segs(c, &ecl.segs)).count();
+                let n_in = corners
+                    .iter()
+                    .filter(|&&c| point_in_segs(c, &ecl.segs))
+                    .count();
                 if n_in == 0 {
                     continue;
                 }
@@ -1320,7 +1517,11 @@ fn plan_piece(
                 }
                 if n_in == corners.len() {
                     let rounded = inner_wall_quad(w, fr).expect("non-degenerate (filtered above)");
-                    eisl.push(Island { segs: rounded, top: Some(t), fr: 0.0 });
+                    eisl.push(Island {
+                        segs: rounded,
+                        top: Some(t),
+                        fr: 0.0,
+                    });
                     continue 'walls;
                 }
                 if slope.is_some() {
@@ -1342,7 +1543,10 @@ fn plan_piece(
                 kept.extend(sa.b_inside.iter().map(|&(s, t)| (s.reversed(), t)));
                 bd.outline_a = chain_loops(kept);
                 let ob: Vec<Vec<(Seg, ())>> = vec![
-                    std::mem::take(&mut bd.outline_b).into_iter().map(|s| (s, ())).collect(),
+                    std::mem::take(&mut bd.outline_b)
+                        .into_iter()
+                        .map(|s| (s, ()))
+                        .collect(),
                 ];
                 let qb: Vec<Vec<(Seg, ())>> = vec![q.iter().map(|&s| (s, ())).collect()];
                 let sb = split_regions(&ob, &qb);
@@ -1397,7 +1601,11 @@ fn plan_piece(
                 loop_fr = 0.0;
             }
             if std::env::var("DIAG_LOOP").is_ok() {
-                eprintln!("loop_fr={loop_fr} segs={} islands={}", cl.segs.len(), islands.len());
+                eprintln!(
+                    "loop_fr={loop_fr} segs={} islands={}",
+                    cl.segs.len(),
+                    islands.len()
+                );
                 let n = cl.segs.len();
                 for i in 0..n {
                     let o = seg_tangent(&cl.segs[i], true);
@@ -1426,11 +1634,17 @@ fn plan_piece(
         .loops
         .iter()
         .map(|pieces| {
-            (pieces.iter().map(|p| p.seg).collect(), pieces.iter().map(|p| p.shared).collect())
+            (
+                pieces.iter().map(|p| p.seg).collect(),
+                pieces.iter().map(|p| p.shared).collect(),
+            )
         })
         .collect();
-    let full_hi_rings: Vec<Vec<Seg>> =
-        if openish { Vec::new() } else { outer_rings.iter().map(|(s, _)| s.clone()).collect() };
+    let full_hi_rings: Vec<Vec<Seg>> = if openish {
+        Vec::new()
+    } else {
+        outer_rings.iter().map(|(s, _)| s.clone()).collect()
+    };
 
     let mut cav_ops: Vec<(String, POp)> = Vec::new();
     let mut fillet_edges: Vec<(Seg, f32, f32)> = Vec::new();
@@ -1450,7 +1664,10 @@ fn plan_piece(
             cav_ops.push((
                 format!("cavity {ci} (open): floor"),
                 POp::PlanarFace {
-                    plane: PPlaneRef::Z { z: floor_z, up: true },
+                    plane: PPlaneRef::Z {
+                        z: floor_z,
+                        up: true,
+                    },
                     outer: (cl.segs.clone(), true),
                     holes: floor_holes,
                 },
@@ -1477,7 +1694,10 @@ fn plan_piece(
             island_tops.extend(tops);
             rim_holes.extend(rim);
             fillet_edges.extend(blends);
-            cav_ops.push((format!("cavity {ci}: banded slab stack"), POp::Slabs { stack, opts }));
+            cav_ops.push((
+                format!("cavity {ci}: banded slab stack"),
+                POp::Slabs { stack, opts },
+            ));
             continue;
         }
 
@@ -1495,10 +1715,17 @@ fn plan_piece(
                 let h_max = (m * span).min(cavity_depth - 0.5).max(0.0);
                 let eff_m = if span > 1e-6 { h_max / span } else { 0.0 };
                 let z_of = |pt: Vec2| floor_z + eff_m * (ux * pt.x + uy * pt.y - min_a);
-                let origin = Vec3::new(cl.segs[0].start().x, cl.segs[0].start().y, z_of(cl.segs[0].start()));
+                let origin = Vec3::new(
+                    cl.segs[0].start().x,
+                    cl.segs[0].start().y,
+                    z_of(cl.segs[0].start()),
+                );
                 let normal = Vec3::new(-eff_m * ux, -eff_m * uy, 1.0).normalize();
                 let floor_plane = PPlaneRef::Tilted { origin, normal };
-                let top_plane = PPlaneRef::Z { z: total_h, up: true };
+                let top_plane = PPlaneRef::Z {
+                    z: total_h,
+                    up: true,
+                };
 
                 cav_ops.push((
                     format!("cavity {ci}: sloped walls"),
@@ -1557,15 +1784,24 @@ fn plan_piece(
                 island_tops.extend(tops);
                 rim_holes.extend(rim);
                 fillet_edges.extend(blends);
-                cav_ops.push((format!("cavity {ci}: slab stack"), POp::Slabs { stack, opts }));
+                cav_ops.push((
+                    format!("cavity {ci}: slab stack"),
+                    POp::Slabs { stack, opts },
+                ));
             }
         }
     }
 
-    let sector_segs: Vec<Vec<Seg>> =
-        if openish { plan_wall_sectors(&o, &touched) } else { Vec::new() };
-    let top_walls: Vec<Vec<Seg>> =
-        if openish { sector_segs.clone() } else { full_hi_rings.clone() };
+    let sector_segs: Vec<Vec<Seg>> = if openish {
+        plan_wall_sectors(&o, &touched)
+    } else {
+        Vec::new()
+    };
+    let top_walls: Vec<Vec<Seg>> = if openish {
+        sector_segs.clone()
+    } else {
+        full_hi_rings.clone()
+    };
 
     let fastener_profile: Option<PHoleProfile> = match (p.magnet_holes, p.screw_holes) {
         (true, true) => Some(PHoleProfile::Counterbore {
@@ -1574,8 +1810,14 @@ fn plan_piece(
             head_r: MAGNET_RADIUS,
             head_d: MAGNET_DEPTH,
         }),
-        (true, false) => Some(PHoleProfile::Plain { radius: MAGNET_RADIUS, depth: MAGNET_DEPTH }),
-        (false, true) => Some(PHoleProfile::Plain { radius: SCREW_RADIUS, depth: SCREW_DEPTH }),
+        (true, false) => Some(PHoleProfile::Plain {
+            radius: MAGNET_RADIUS,
+            depth: MAGNET_DEPTH,
+        }),
+        (false, true) => Some(PHoleProfile::Plain {
+            radius: SCREW_RADIUS,
+            depth: SCREW_DEPTH,
+        }),
         (false, false) => None,
     };
     for (ci, (c, s_bot, s_mid, s_top)) in peg_profiles.iter().enumerate() {
@@ -1584,15 +1826,24 @@ fn plan_piece(
         let top_name = format!("{tag}: peg {ci} top");
         prog.push(
             format!("register {bot_name}"),
-            POp::Sketch { name: bot_name.clone(), profile: s_bot.clone() },
+            POp::Sketch {
+                name: bot_name.clone(),
+                profile: s_bot.clone(),
+            },
         );
         prog.push(
             format!("register {mid_name}"),
-            POp::Sketch { name: mid_name.clone(), profile: s_mid.clone() },
+            POp::Sketch {
+                name: mid_name.clone(),
+                profile: s_mid.clone(),
+            },
         );
         prog.push(
             format!("register {top_name}"),
-            POp::Sketch { name: top_name.clone(), profile: s_top.clone() },
+            POp::Sketch {
+                name: top_name.clone(),
+                profile: s_top.clone(),
+            },
         );
         prog.push(
             format!("{tag}: peg {ci} loft"),
@@ -1685,7 +1936,10 @@ fn plan_piece(
             prog.push(
                 label,
                 POp::PlanarFace {
-                    plane: PPlaneRef::Z { z: PEG_HEIGHT, up: false },
+                    plane: PPlaneRef::Z {
+                        z: PEG_HEIGHT,
+                        up: false,
+                    },
                     outer: (outer, true),
                     holes: hole_loops,
                 },
@@ -1747,12 +2001,14 @@ fn plan_piece(
             } else {
                 format!("{tag}: rim face {i}")
             };
-            let hole_loops: Vec<POpDirLoop> =
-                holes.into_iter().map(|h| (h, true)).collect();
+            let hole_loops: Vec<POpDirLoop> = holes.into_iter().map(|h| (h, true)).collect();
             prog.push(
                 label,
                 POp::PlanarFace {
-                    plane: PPlaneRef::Z { z: total_h, up: true },
+                    plane: PPlaneRef::Z {
+                        z: total_h,
+                        up: true,
+                    },
                     outer: (outer, true),
                     holes: hole_loops,
                 },
@@ -1761,7 +2017,12 @@ fn plan_piece(
     }
 
     if !fillet_edges.is_empty() {
-        prog.push(format!("{tag}: floor fillet"), POp::Fillet { edges: fillet_edges });
+        prog.push(
+            format!("{tag}: floor fillet"),
+            POp::Fillet {
+                edges: fillet_edges,
+            },
+        );
     }
 }
 
@@ -1837,14 +2098,30 @@ fn shape_cavity_loop_open(lp: &TracedLoop, rc: f32, rf: f32, spans: &[OpenSpan])
         }
         r
     };
-    shape_loop(lp, &LoopStyle { inset: &inset, radius: &radius })
+    shape_loop(
+        lp,
+        &LoopStyle {
+            inset: &inset,
+            radius: &radius,
+        },
+    )
 }
 
 fn shape_cavity_loop(lp: &TracedLoop, rc: f32, rf: f32) -> Vec<Seg> {
     let inset = |_: usize, _: Vec2, _: Vec2| 0.0f32;
     let radius = move |_: usize, convex: bool| if convex { rc } else { rf };
-    let segs = shape_loop(lp, &LoopStyle { inset: &inset, radius: &radius });
-    if loop_area(&segs) < 0.0 { reverse_loop(&segs) } else { segs }
+    let segs = shape_loop(
+        lp,
+        &LoopStyle {
+            inset: &inset,
+            radius: &radius,
+        },
+    );
+    if loop_area(&segs) < 0.0 {
+        reverse_loop(&segs)
+    } else {
+        segs
+    }
 }
 
 fn seg_tangent(s: &Seg, end: bool) -> Vec2 {
@@ -1875,7 +2152,6 @@ fn is_convex_arc(shape: &[Seg], s: &Seg) -> bool {
     }
 }
 
-
 fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<Seg> {
     let n = segs.len();
     if n < 2 || (convex_r <= 0.0 && concave_r <= 0.0) {
@@ -1888,7 +2164,9 @@ fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<Seg> 
     let mut tan_half = vec![0.0f32; n];
     for i in 0..n {
         let (cur, next) = (&segs[i], &segs[(i + 1) % n]);
-        let (Seg::Line { .. }, Seg::Line { .. }) = (cur, next) else { continue };
+        let (Seg::Line { .. }, Seg::Line { .. }) = (cur, next) else {
+            continue;
+        };
         let d_in = seg_tangent(cur, true);
         let d_out = seg_tangent(next, false);
         let dot = d_in.dot(d_out).clamp(-1.0, 1.0);
@@ -1899,7 +2177,11 @@ fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<Seg> 
             continue;
         }
         let cross = d_in.x * d_out.y - d_in.y * d_out.x;
-        let r = if (cross > 0.0) == ccw { convex_r } else { concave_r };
+        let r = if (cross > 0.0) == ccw {
+            convex_r
+        } else {
+            concave_r
+        };
         if r <= 0.0 {
             continue;
         }
@@ -1914,7 +2196,9 @@ fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<Seg> 
     while changed {
         changed = false;
         for i in 0..n {
-            let Seg::Line { a, b } = segs[i] else { continue };
+            let Seg::Line { a, b } = segs[i] else {
+                continue;
+            };
             let prev = (i + n - 1) % n;
             let want = trim[prev] + trim[i];
             let len = (b - a).length() * USABLE;
@@ -1946,7 +2230,10 @@ fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<Seg> 
         let seg = match seg {
             Seg::Line { a, b } => {
                 let d = (b - a).normalize_or_zero();
-                Seg::Line { a: a + d * trim[prev], b: b - d * trim[i] }
+                Seg::Line {
+                    a: a + d * trim[prev],
+                    b: b - d * trim[i],
+                }
             }
             other => other,
         };
@@ -1969,7 +2256,14 @@ fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<Seg> 
         let a0 = f32::atan2(p_in.y - center.y, p_in.x - center.x);
         let a1 = f32::atan2(p_out.y - center.y, p_out.x - center.x);
         let (a0, a1) = short_arc(a0, a1);
-        out.push(Seg::Arc { a: p_in, b: p_out, center, radius: arc_r[i], a0, a1 });
+        out.push(Seg::Arc {
+            a: p_in,
+            b: p_out,
+            center,
+            radius: arc_r[i],
+            a0,
+            a1,
+        });
     }
     out
 }
@@ -1980,8 +2274,17 @@ fn plan_cavity_flat(
     floor_z: f32,
     total_h: f32,
     loop_fr: f32,
-) -> (Vec<(SlabOp, Slab)>, SlabOpts, Vec<Vec<Seg>>, Vec<Vec<Seg>>, Vec<(Seg, f32, f32)>) {
-    let mut stack = vec![(SlabOp::Union, Slab::new(vec![shape.to_vec()], floor_z, total_h))];
+) -> (
+    Vec<(SlabOp, Slab)>,
+    SlabOpts,
+    Vec<Vec<Seg>>,
+    Vec<Vec<Seg>>,
+    Vec<(Seg, f32, f32)>,
+) {
+    let mut stack = vec![(
+        SlabOp::Union,
+        Slab::new(vec![shape.to_vec()], floor_z, total_h),
+    )];
     for isl in islands {
         stack.push((
             SlabOp::Difference,
@@ -2000,16 +2303,31 @@ fn plan_cavity_flat(
     let top_band = plan_bands(&stack)
         .map(|(_, bands)| bands.last().cloned().unwrap_or_default())
         .unwrap_or_default();
-    let tops: Vec<Vec<Seg>> =
-        top_band.iter().filter(|l| loop_area(l) < 0.0).cloned().collect();
-    let rim: Vec<Vec<Seg>> =
-        top_band.iter().filter(|l| loop_area(l) > 0.0).cloned().collect();
+    let tops: Vec<Vec<Seg>> = top_band
+        .iter()
+        .filter(|l| loop_area(l) < 0.0)
+        .cloned()
+        .collect();
+    let rim: Vec<Vec<Seg>> = top_band
+        .iter()
+        .filter(|l| loop_area(l) > 0.0)
+        .cloned()
+        .collect();
     assert_eq!(
         tops.len() + rim.len(),
         top_band.len(),
         "a top-band loop has zero area, so it is neither void nor island"
     );
-    (stack, SlabOpts { cavity: true, open_at: vec![total_h] }, tops, rim, blends)
+    (
+        stack,
+        SlabOpts {
+            cavity: true,
+            open_at: vec![total_h],
+        },
+        tops,
+        rim,
+        blends,
+    )
 }
 
 fn plan_cavity_banded(
@@ -2017,12 +2335,24 @@ fn plan_cavity_banded(
     islands: &[Island],
     floor_z: f32,
     total_h: f32,
-) -> (Vec<(SlabOp, Slab)>, SlabOpts, Vec<Vec<Seg>>, Vec<Vec<Seg>>, Vec<(Seg, f32, f32)>) {
+) -> (
+    Vec<(SlabOp, Slab)>,
+    SlabOpts,
+    Vec<Vec<Seg>>,
+    Vec<Vec<Seg>>,
+    Vec<(Seg, f32, f32)>,
+) {
     const TRANSITION_R: f32 = 4.0;
 
-    let mut stack = vec![(SlabOp::Union, Slab::new(vec![bd.outline_b.clone()], floor_z, total_h))];
+    let mut stack = vec![(
+        SlabOp::Union,
+        Slab::new(vec![bd.outline_b.clone()], floor_z, total_h),
+    )];
     for n in &bd.notches {
-        stack.push((SlabOp::Difference, Slab::new(vec![n.quad.clone()], floor_z, n.top)));
+        stack.push((
+            SlabOp::Difference,
+            Slab::new(vec![n.quad.clone()], floor_z, n.top),
+        ));
     }
     for isl in islands {
         stack.push((
@@ -2030,15 +2360,24 @@ fn plan_cavity_banded(
             Slab::new(vec![isl.segs.clone()], floor_z, isl.top.unwrap_or(total_h)),
         ));
     }
-    let opts = SlabOpts { cavity: true, open_at: vec![total_h] };
+    let opts = SlabOpts {
+        cavity: true,
+        open_at: vec![total_h],
+    };
 
     let top_band = plan_bands(&stack)
         .map(|(_, bands)| bands.last().cloned().unwrap_or_default())
         .unwrap_or_default();
-    let rim: Vec<Vec<Seg>> =
-        top_band.iter().filter(|l| loop_area(l) > 0.0).cloned().collect();
-    let tops: Vec<Vec<Seg>> =
-        top_band.iter().filter(|l| loop_area(l) < 0.0).cloned().collect();
+    let rim: Vec<Vec<Seg>> = top_band
+        .iter()
+        .filter(|l| loop_area(l) > 0.0)
+        .cloned()
+        .collect();
+    let tops: Vec<Vec<Seg>> = top_band
+        .iter()
+        .filter(|l| loop_area(l) < 0.0)
+        .cloned()
+        .collect();
     assert_eq!(
         tops.len() + rim.len(),
         top_band.len(),
@@ -2056,7 +2395,6 @@ fn plan_cavity_banded(
 
     (stack, opts, tops, rim, blends)
 }
-
 
 fn slope_span(cells: &[GridCell], ux: f32, uy: f32) -> (f32, f32) {
     let mut min_a = f32::INFINITY;
@@ -2082,7 +2420,6 @@ fn uphill_unit(dir: SlopeDir) -> (f32, f32) {
     }
 }
 
-
 fn point_in_rect_loop(pt: Vec2, lp: &TracedLoop) -> bool {
     let n = lp.pts.len();
     let mut inside = false;
@@ -2099,11 +2436,12 @@ fn point_in_rect_loop(pt: Vec2, lp: &TracedLoop) -> bool {
     inside
 }
 
-
 fn stitch_loops_2d(free: Vec<Seg>) -> Vec<(Vec<Seg>, Vec<Vec<Seg>>)> {
     let chained = chain_loops(free.into_iter().map(|s| (s, ())).collect());
-    let loops: Vec<Vec<Seg>> =
-        chained.into_iter().map(|lp| lp.into_iter().map(|(s, _)| s).collect()).collect();
+    let loops: Vec<Vec<Seg>> = chained
+        .into_iter()
+        .map(|lp| lp.into_iter().map(|(s, _)| s).collect())
+        .collect();
     if loops.is_empty() {
         return Vec::new();
     }
@@ -2215,7 +2553,6 @@ fn containment(loops: &[Vec<Seg>], bbox: &[Aabb]) -> Vec<Vec<usize>> {
         .collect()
 }
 
-
 fn build_baseplate(p: &Params) -> Solid {
     let cells = p.all_cells();
     if cells.is_empty() {
@@ -2226,7 +2563,14 @@ fn build_baseplate(p: &Params) -> Solid {
     let traced = trace_rects(
         &cells
             .iter()
-            .map(|c| RectF::new(c.x as f32 * GRID_PITCH, c.y as f32 * GRID_PITCH, GRID_PITCH, GRID_PITCH))
+            .map(|c| {
+                RectF::new(
+                    c.x as f32 * GRID_PITCH,
+                    c.y as f32 * GRID_PITCH,
+                    GRID_PITCH,
+                    GRID_PITCH,
+                )
+            })
             .collect::<Vec<_>>(),
         &[],
     );
@@ -2238,8 +2582,18 @@ fn build_baseplate(p: &Params) -> Solid {
     let mut first_outer_bot: Option<Loop> = None;
     for lp in &traced {
         let segs = {
-            let s = shape_loop(lp, &LoopStyle { inset: &inset, radius: &radius });
-            if loop_area(&s) < 0.0 && !lp.is_hole() { reverse_loop(&s) } else { s }
+            let s = shape_loop(
+                lp,
+                &LoopStyle {
+                    inset: &inset,
+                    radius: &radius,
+                },
+            );
+            if loop_area(&s) < 0.0 && !lp.is_hole() {
+                reverse_loop(&s)
+            } else {
+                s
+            }
         };
         let r_bot = ring(&mut b, &segs, 0.0);
         let r_top = ring(&mut b, &segs, PEG_HEIGHT);

@@ -1,4 +1,3 @@
-
 use gridfinity_cad::gridfinity::{
     self, BinSlope, GRID_PITCH, InnerWall, LogicalBin, Mode, Params, SlopeDir, rect_cells,
 };
@@ -6,9 +5,10 @@ use gridfinity_cad::kernel::mesh::Mesh;
 use gridfinity_cad::kernel::tess::tessellate;
 use gridfinity_cad::layout::{Axis, GridCell, GridEdge, Orientation, SplitLine, partition_cells};
 use gridfinity_cad::{Solid, audit, tessellation_leaks};
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashSet};
-use std::panic::{AssertUnwindSafe, catch_unwind};
-
+use std::panic::{AssertUnwindSafe, PanicHookInfo, catch_unwind};
+use std::sync::Mutex;
 
 struct Rng(u64);
 
@@ -57,8 +57,13 @@ fn gen_cells(rng: &mut Rng) -> Vec<GridCell> {
     let mut cells = rect_cells(gx, gy);
     if cells.len() > 2 && rng.chance(1, 3) {
         let victim = rng.below(cells.len() as u32) as usize;
-        let kept: Vec<GridCell> =
-            cells.iter().copied().enumerate().filter(|(i, _)| *i != victim).map(|(_, c)| c).collect();
+        let kept: Vec<GridCell> = cells
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(i, _)| *i != victim)
+            .map(|(_, c)| c)
+            .collect();
         if edge_connected(&kept) {
             cells = kept;
         }
@@ -96,7 +101,10 @@ fn gen_case(rng: &mut Rng, profile: Profile) -> Params {
     };
 
     let mut p = Params {
-        bins: vec![LogicalBin { cells: cells.clone(), ..Default::default() }],
+        bins: vec![LogicalBin {
+            cells: cells.clone(),
+            ..Default::default()
+        }],
         ..base
     };
 
@@ -113,7 +121,11 @@ fn gen_case(rng: &mut Rng, profile: Profile) -> Params {
         p.floor_fillet = rng.quantised(0.0, 5.6, 0.2);
         p.magnet_holes = rng.chance(1, 3);
         p.screw_holes = p.magnet_holes && rng.chance(1, 2);
-        p.mode = if rng.chance(1, 8) { Mode::Baseplate } else { Mode::Bin };
+        p.mode = if rng.chance(1, 8) {
+            Mode::Baseplate
+        } else {
+            Mode::Bin
+        };
         if rng.chance(1, 6) {
             p.bins[0].slope = Some(BinSlope {
                 angle_deg: rng.quantised(2.0, 20.0, 1.0),
@@ -130,23 +142,50 @@ fn gen_case(rng: &mut Rng, profile: Profile) -> Params {
             p.divider_edges.push(GridEdge {
                 x: c.x,
                 y: c.y,
-                orientation: if rng.chance(1, 2) { Orientation::H } else { Orientation::V },
+                orientation: if rng.chance(1, 2) {
+                    Orientation::H
+                } else {
+                    Orientation::V
+                },
             });
         }
     }
     p
 }
 
-
 const TESS_SEGS: usize = 6;
 
-fn catching(f: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
-    let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let outcome = catch_unwind(AssertUnwindSafe(f));
-    std::panic::set_hook(prev);
+type Hook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
 
-    match outcome {
+static QUIET_DEPTH: Mutex<usize> = Mutex::new(0);
+static LOUD_HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+
+struct Quiet;
+
+fn quiet_panics() -> Quiet {
+    let mut depth = QUIET_DEPTH.lock().unwrap();
+    if *depth == 0 {
+        *LOUD_HOOK.lock().unwrap() = Some(std::panic::take_hook());
+        std::panic::set_hook(Box::new(|_| {}));
+    }
+    *depth += 1;
+    Quiet
+}
+
+impl Drop for Quiet {
+    fn drop(&mut self) {
+        let mut depth = QUIET_DEPTH.lock().unwrap();
+        *depth -= 1;
+        if *depth == 0 {
+            if let Some(loud) = LOUD_HOOK.lock().unwrap().take() {
+                std::panic::set_hook(loud);
+            }
+        }
+    }
+}
+
+fn catching(f: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    match catch_unwind(AssertUnwindSafe(f)) {
         Ok(r) => r,
         Err(e) => {
             let msg = e
@@ -160,15 +199,24 @@ fn catching(f: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
 }
 
 fn sound(solid: &Solid, what: &str) -> Result<(), String> {
-    solid.validate().map_err(|e| format!("{what}validate: {e}"))?;
+    solid
+        .validate()
+        .map_err(|e| format!("{what}validate: {e}"))?;
     let report = audit(solid);
     if !report.is_ok() {
         return Err(format!("{what}audit: {report}"));
     }
     let leaks = tessellation_leaks(&tessellate(solid, TESS_SEGS));
     if !leaks.is_empty() {
-        let named = leaks.iter().map(|l| format!("{l:?}")).min().unwrap_or_default();
-        return Err(format!("{what}tessellation: {} leak(s), first {named}", leaks.len()));
+        let named = leaks
+            .iter()
+            .map(|l| format!("{l:?}"))
+            .min()
+            .unwrap_or_default();
+        return Err(format!(
+            "{what}tessellation: {} leak(s), first {named}",
+            leaks.len()
+        ));
     }
     Ok(())
 }
@@ -197,57 +245,80 @@ fn signature(err: &str) -> String {
     out.chars().take(140).collect()
 }
 
+fn keep_if<C: Clone>(best: &mut C, edit: impl FnOnce(&mut C), accept: impl Fn(&C) -> bool) {
+    let mut q = best.clone();
+    edit(&mut q);
+    if accept(&q) {
+        *best = q;
+    }
+}
 
-fn shrink(p: &Params, sig: &str) -> Params {
-    let same = |q: &Params| check(q).is_err_and(|e| signature(&e) == sig);
-    let mut best = p.clone();
-
-    for i in (0..best.inner_walls.len()).rev() {
-        let mut q = best.clone();
-        q.inner_walls.remove(i);
-        if same(&q) {
-            best = q;
-        }
-    }
-    for i in (0..best.bins[0].cells.len()).rev() {
-        if best.bins[0].cells.len() <= 1 {
-            break;
-        }
-        let mut q = best.clone();
-        q.bins[0].cells.remove(i);
-        if edge_connected(&q.bins[0].cells) && same(&q) {
-            best = q;
-        }
-    }
-    for i in (0..best.divider_edges.len()).rev() {
-        let mut q = best.clone();
-        q.divider_edges.remove(i);
-        if same(&q) {
-            best = q;
-        }
-    }
-    if best.bins[0].slope.is_some() {
-        let mut q = best.clone();
-        q.bins[0].slope = None;
-        if same(&q) {
-            best = q;
-        }
-    }
+fn relax_params<C: Clone>(
+    best: &mut C,
+    params_of: impl Fn(&mut C) -> &mut Params,
+    accept: impl Fn(&C) -> bool,
+) {
     let d = Params::default();
     for (get, set) in [
         (
             (|p: &Params| p.floor_fillet) as fn(&Params) -> f32,
             (|p: &mut Params, v: f32| p.floor_fillet = v) as fn(&mut Params, f32),
         ),
-        (|p| p.cavity_corner_radius, |p, v| p.cavity_corner_radius = v),
+        (
+            |p| p.cavity_corner_radius,
+            |p, v| p.cavity_corner_radius = v,
+        ),
         (|p| p.wall_thickness, |p, v| p.wall_thickness = v),
     ] {
-        let mut q = best.clone();
-        set(&mut q, get(&d));
-        if same(&q) {
-            best = q;
-        }
+        keep_if(best, |q| set(params_of(q), get(&d)), &accept);
     }
+    keep_if(
+        best,
+        |q| {
+            let p = params_of(q);
+            p.magnet_holes = false;
+            p.screw_holes = false;
+        },
+        &accept,
+    );
+}
+
+fn shrink(p: &Params, sig: &str) -> Params {
+    let same = |q: &Params| check(q).is_err_and(|e| signature(&e) == sig);
+    let mut best = p.clone();
+
+    for i in (0..best.inner_walls.len()).rev() {
+        keep_if(
+            &mut best,
+            |q| {
+                q.inner_walls.remove(i);
+            },
+            &same,
+        );
+    }
+    for i in (0..best.bins[0].cells.len()).rev() {
+        if best.bins[0].cells.len() <= 1 {
+            break;
+        }
+        keep_if(
+            &mut best,
+            |q| {
+                q.bins[0].cells.remove(i);
+            },
+            |q| edge_connected(&q.bins[0].cells) && same(q),
+        );
+    }
+    for i in (0..best.divider_edges.len()).rev() {
+        keep_if(
+            &mut best,
+            |q| {
+                q.divider_edges.remove(i);
+            },
+            &same,
+        );
+    }
+    keep_if(&mut best, |q| q.bins[0].slope = None, &same);
+    relax_params(&mut best, |q| q, &same);
     best
 }
 
@@ -257,8 +328,10 @@ fn repro(p: &Params) -> String {
     let cells = &p.bins[0].cells;
     let slope = p.bins[0].slope;
     if *cells != d.bins[0].cells || slope.is_some() {
-        let cs: Vec<String> =
-            cells.iter().map(|c| format!("GridCell {{ x: {}, y: {} }}", c.x, c.y)).collect();
+        let cs: Vec<String> = cells
+            .iter()
+            .map(|c| format!("GridCell {{ x: {}, y: {} }}", c.x, c.y))
+            .collect();
         let sl = match slope {
             Some(s) => format!(
                 ", slope: Some(BinSlope {{ angle_deg: {:?}, dir: SlopeDir::{:?} }})",
@@ -276,7 +349,11 @@ fn repro(p: &Params) -> String {
     }
     for (name, v, dv) in [
         ("wall_thickness", p.wall_thickness, d.wall_thickness),
-        ("cavity_corner_radius", p.cavity_corner_radius, d.cavity_corner_radius),
+        (
+            "cavity_corner_radius",
+            p.cavity_corner_radius,
+            d.cavity_corner_radius,
+        ),
         ("floor_fillet", p.floor_fillet, d.floor_fillet),
     ] {
         if v != dv {
@@ -325,52 +402,84 @@ fn repro(p: &Params) -> String {
     format!("Params {{ {}, ..Params::default() }}", f.join(", "))
 }
 
-
 struct Finding {
     count: usize,
-    repro: String,
+    first: usize,
     detail: String,
 }
 
-fn run(profile: Profile, cases: u32, seed: u64) -> String {
+fn sweep<C>(
+    cases: u32,
+    seed: u64,
+    generate: impl Fn(&mut Rng) -> C,
+    check_one: impl Fn(&C) -> Result<(), String> + Sync,
+    shrink_one: impl Fn(&C, &str) -> C + Sync,
+    describe: impl Fn(&C) -> String,
+) -> String
+where
+    C: Send + Sync,
+{
     let mut rng = Rng::new(seed);
+    let pool: Vec<C> = (0..cases).map(|_| generate(&mut rng)).collect();
+
+    let quiet = quiet_panics();
+    let errors: Vec<Option<String>> = pool.par_iter().map(|c| check_one(c).err()).collect();
+
     let mut found: BTreeMap<String, Finding> = BTreeMap::new();
     let mut failures = 0usize;
-
-    for _ in 0..cases {
-        let p = gen_case(&mut rng, profile);
-        let Err(err) = check(&p) else { continue };
+    for (i, err) in errors.iter().enumerate() {
+        let Some(err) = err else { continue };
         failures += 1;
-        let sig = signature(&err);
-        match found.get_mut(&sig) {
+        match found.get_mut(&signature(err)) {
             Some(f) => f.count += 1,
             None => {
-                let small = shrink(&p, &sig);
                 found.insert(
-                    sig,
-                    Finding { count: 1, repro: repro(&small), detail: err },
+                    signature(err),
+                    Finding {
+                        count: 1,
+                        first: i,
+                        detail: err.clone(),
+                    },
                 );
             }
         }
     }
-
     if found.is_empty() {
         return String::new();
     }
+
+    let entries: Vec<(&String, &Finding)> = found.iter().collect();
+    let smallest: Vec<C> = entries
+        .par_iter()
+        .map(|(sig, f)| shrink_one(&pool[f.first], sig.as_str()))
+        .collect();
+    drop(quiet);
+
     let mut out = format!(
         "{failures}/{cases} cases failed, {} distinct defect(s) (seed {seed}):\n",
         found.len()
     );
-    for (i, f) in found.values().enumerate() {
+    for (i, ((_, f), small)) in entries.iter().zip(smallest.iter()).enumerate() {
         out.push_str(&format!(
             "\n[{}] x{}  {}\n     {}\n",
             i + 1,
             f.count,
             f.detail.lines().next().unwrap_or(""),
-            f.repro
+            describe(small)
         ));
     }
     out
+}
+
+fn run(profile: Profile, cases: u32, seed: u64) -> String {
+    sweep(
+        cases,
+        seed,
+        |rng| gen_case(rng, profile),
+        check,
+        shrink,
+        repro,
+    )
 }
 
 const ENCLOSED_PIECE: &str = "surrounded on every side";
@@ -378,6 +487,7 @@ const SHAPE_EXTENT: i32 = 4;
 const VOLUME_DRIFT: f64 = 0.002;
 const STEPS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
+#[derive(Clone)]
 struct ShapeCase {
     params: Params,
     pieces: Vec<Vec<GridCell>>,
@@ -395,7 +505,10 @@ fn gen_polyomino(rng: &mut Rng, target: usize) -> Vec<GridCell> {
         }
         let from = cells[rng.below(cells.len() as u32) as usize];
         let (dx, dy) = rng.pick(&STEPS);
-        let next = GridCell { x: from.x + dx, y: from.y + dy };
+        let next = GridCell {
+            x: from.x + dx,
+            y: from.y + dy,
+        };
         let inside = (0..SHAPE_EXTENT).contains(&next.x) && (0..SHAPE_EXTENT).contains(&next.y);
         if inside && !cells.contains(&next) {
             cells.push(next);
@@ -409,7 +522,10 @@ fn adjacent_pairs(cells: &[GridCell]) -> Vec<(GridCell, GridCell)> {
     let mut out = Vec::new();
     for &c in cells {
         for (dx, dy) in [(1, 0), (0, 1)] {
-            let n = GridCell { x: c.x + dx, y: c.y + dy };
+            let n = GridCell {
+                x: c.x + dx,
+                y: c.y + dy,
+            };
             if cells.contains(&n) {
                 out.push((c, n));
             }
@@ -420,7 +536,9 @@ fn adjacent_pairs(cells: &[GridCell]) -> Vec<(GridCell, GridCell)> {
 
 fn flood_parts(cells: &[GridCell], severed: &[(GridCell, GridCell)]) -> Vec<Vec<GridCell>> {
     let joined = |a: GridCell, b: GridCell| {
-        !severed.iter().any(|&(p, q)| (p == a && q == b) || (p == b && q == a))
+        !severed
+            .iter()
+            .any(|&(p, q)| (p == a && q == b) || (p == b && q == a))
     };
     let mut unseen = cells.to_vec();
     let mut parts: Vec<Vec<GridCell>> = Vec::new();
@@ -430,7 +548,10 @@ fn flood_parts(cells: &[GridCell], severed: &[(GridCell, GridCell)]) -> Vec<Vec<
         while let Some(c) = queue.pop() {
             part.push(c);
             for (dx, dy) in STEPS {
-                let n = GridCell { x: c.x + dx, y: c.y + dy };
+                let n = GridCell {
+                    x: c.x + dx,
+                    y: c.y + dy,
+                };
                 if !joined(c, n) {
                     continue;
                 }
@@ -450,12 +571,17 @@ fn flood_parts(cells: &[GridCell], severed: &[(GridCell, GridCell)]) -> Vec<Vec<
 fn gen_shape_case(rng: &mut Rng) -> ShapeCase {
     let target = rng.below(8) as usize + 2;
     let cells = gen_polyomino(rng, target);
-    let severed: Vec<(GridCell, GridCell)> =
-        adjacent_pairs(&cells).into_iter().filter(|_| rng.chance(1, 3)).collect();
+    let severed: Vec<(GridCell, GridCell)> = adjacent_pairs(&cells)
+        .into_iter()
+        .filter(|_| rng.chance(1, 3))
+        .collect();
     let pieces = flood_parts(&cells, &severed);
 
     let mut params = Params {
-        bins: vec![LogicalBin { cells, ..Default::default() }],
+        bins: vec![LogicalBin {
+            cells,
+            ..Default::default()
+        }],
         height_units: rng.below(5) + 1,
         wall_thickness: rng.quantised(0.8, 2.6, 0.2),
         cavity_corner_radius: rng.quantised(0.0, 4.0, 0.5),
@@ -509,7 +635,7 @@ fn check_shape(c: &ShapeCase) -> Result<(), String> {
 
 fn shrink_shape(c: &ShapeCase, sig: &str) -> ShapeCase {
     let same = |q: &ShapeCase| check_shape(q).is_err_and(|e| signature(&e) == sig);
-    let mut best = ShapeCase { params: c.params.clone(), pieces: c.pieces.clone() };
+    let mut best = c.clone();
 
     loop {
         let cells = best.params.bins[0].cells.clone();
@@ -523,13 +649,21 @@ fn shrink_shape(c: &ShapeCase, sig: &str) -> ShapeCase {
                 let pieces: Vec<Vec<GridCell>> = best
                     .pieces
                     .iter()
-                    .map(|p| p.iter().copied().filter(|&c| c != victim).collect::<Vec<_>>())
+                    .map(|p| {
+                        p.iter()
+                            .copied()
+                            .filter(|&c| c != victim)
+                            .collect::<Vec<_>>()
+                    })
                     .filter(|p: &Vec<GridCell>| !p.is_empty())
                     .collect();
                 if pieces.iter().any(|p| flood_parts(p, &[]).len() != 1) {
                     return None;
                 }
-                let mut q = ShapeCase { params: best.params.clone(), pieces };
+                let mut q = ShapeCase {
+                    params: best.params.clone(),
+                    pieces,
+                };
                 q.params.bins[0].cells = kept;
                 same(&q).then_some(q)
             })
@@ -540,91 +674,49 @@ fn shrink_shape(c: &ShapeCase, sig: &str) -> ShapeCase {
         best = smaller;
     }
 
-    let d = Params::default();
-    for (get, set) in [
-        (
-            (|p: &Params| p.floor_fillet) as fn(&Params) -> f32,
-            (|p: &mut Params, v: f32| p.floor_fillet = v) as fn(&mut Params, f32),
-        ),
-        (|p| p.cavity_corner_radius, |p, v| p.cavity_corner_radius = v),
-        (|p| p.wall_thickness, |p, v| p.wall_thickness = v),
-    ] {
-        let mut q = ShapeCase { params: best.params.clone(), pieces: best.pieces.clone() };
-        set(&mut q.params, get(&d));
-        if same(&q) {
-            best = q;
-        }
-    }
-    if best.params.magnet_holes {
-        let mut q = ShapeCase { params: best.params.clone(), pieces: best.pieces.clone() };
-        q.params.magnet_holes = false;
-        q.params.screw_holes = false;
-        if same(&q) {
-            best = q;
-        }
-    }
+    relax_params(&mut best, |q| &mut q.params, &same);
     best
 }
 
 fn cell_list(cells: &[GridCell]) -> String {
-    let cs: Vec<String> =
-        cells.iter().map(|c| format!("GridCell {{ x: {}, y: {} }}", c.x, c.y)).collect();
+    let cs: Vec<String> = cells
+        .iter()
+        .map(|c| format!("GridCell {{ x: {}, y: {} }}", c.x, c.y))
+        .collect();
     format!("vec![{}]", cs.join(", "))
 }
 
 fn repro_shape(c: &ShapeCase) -> String {
     let pieces: Vec<String> = c.pieces.iter().map(|p| cell_list(p)).collect();
-    format!("{}\n     pieces: vec![{}]", repro(&c.params), pieces.join(", "))
+    format!(
+        "{}\n     pieces: vec![{}]",
+        repro(&c.params),
+        pieces.join(", ")
+    )
 }
 
 fn run_shapes(cases: u32, seed: u64) -> String {
-    let mut rng = Rng::new(seed);
-    let mut found: BTreeMap<String, Finding> = BTreeMap::new();
-    let mut failures = 0usize;
-
-    for _ in 0..cases {
-        let c = gen_shape_case(&mut rng);
-        let Err(err) = check_shape(&c) else { continue };
-        failures += 1;
-        let sig = signature(&err);
-        match found.get_mut(&sig) {
-            Some(f) => f.count += 1,
-            None => {
-                let small = shrink_shape(&c, &sig);
-                found.insert(sig, Finding { count: 1, repro: repro_shape(&small), detail: err });
-            }
-        }
-    }
-
-    if found.is_empty() {
-        return String::new();
-    }
-    let mut out = format!(
-        "{failures}/{cases} cases failed, {} distinct defect(s) (seed {seed}):\n",
-        found.len()
-    );
-    for (i, f) in found.values().enumerate() {
-        out.push_str(&format!(
-            "\n[{}] x{}  {}\n     {}\n",
-            i + 1,
-            f.count,
-            f.detail.lines().next().unwrap_or(""),
-            f.repro
-        ));
-    }
-    out
+    sweep(
+        cases,
+        seed,
+        gen_shape_case,
+        check_shape,
+        shrink_shape,
+        repro_shape,
+    )
 }
 
 const SPLIT_TOL: f32 = 0.15;
 const QUANTUM: f32 = 20.0;
 
-struct SplitCase {
-    params: Params,
-}
-
 fn chunk_cells(cells: &[GridCell], lines: &[SplitLine]) -> Vec<Vec<(i32, i32)>> {
     let key = |c: GridCell| {
-        let across = |axis, at| lines.iter().filter(|l| l.axis == axis && l.index <= at).count();
+        let across = |axis, at| {
+            lines
+                .iter()
+                .filter(|l| l.axis == axis && l.index <= at)
+                .count()
+        };
         (across(Axis::Y, c.y), across(Axis::X, c.x))
     };
     let mut groups: BTreeMap<(usize, usize), Vec<(i32, i32)>> = BTreeMap::new();
@@ -645,7 +737,7 @@ fn as_pairs(cells: &[GridCell]) -> Vec<(i32, i32)> {
     v
 }
 
-fn gen_split_case(rng: &mut Rng) -> SplitCase {
+fn gen_split_case(rng: &mut Rng) -> Params {
     let target = rng.below(8) as usize + 2;
     let cells = gen_polyomino(rng, target);
     let mut split_lines = Vec::new();
@@ -657,7 +749,11 @@ fn gen_split_case(rng: &mut Rng) -> SplitCase {
         }
     }
     let mut params = Params {
-        bins: vec![LogicalBin { cells, split_lines, ..Default::default() }],
+        bins: vec![LogicalBin {
+            cells,
+            split_lines,
+            ..Default::default()
+        }],
         height_units: rng.below(5) + 1,
         wall_thickness: rng.quantised(0.8, 2.6, 0.2),
         cavity_corner_radius: rng.quantised(0.0, 4.0, 0.5),
@@ -666,7 +762,7 @@ fn gen_split_case(rng: &mut Rng) -> SplitCase {
         ..Params::default()
     };
     params.screw_holes = params.magnet_holes && rng.chance(1, 2);
-    SplitCase { params }
+    params
 }
 
 fn mesh_parts(mesh: &Mesh) -> usize {
@@ -680,7 +776,10 @@ fn mesh_parts(mesh: &Mesh) -> usize {
     }
     for t in mesh.indices.chunks_exact(3) {
         for pair in [(t[0], t[1]), (t[1], t[2])] {
-            let (a, b) = (root(&mut owner, pair.0 as usize), root(&mut owner, pair.1 as usize));
+            let (a, b) = (
+                root(&mut owner, pair.0 as usize),
+                root(&mut owner, pair.1 as usize),
+            );
             owner[a] = b;
         }
     }
@@ -720,9 +819,14 @@ fn grid_gap(a: &[GridCell], b: &[GridCell]) -> f32 {
 fn footprint(mesh: &Mesh) -> Vec<(f32, f32)> {
     let mut seen: HashSet<(i32, i32)> = HashSet::new();
     for p in &mesh.positions {
-        seen.insert(((p.x * QUANTUM).round() as i32, (p.y * QUANTUM).round() as i32));
+        seen.insert((
+            (p.x * QUANTUM).round() as i32,
+            (p.y * QUANTUM).round() as i32,
+        ));
     }
-    seen.into_iter().map(|(x, y)| (x as f32 / QUANTUM, y as f32 / QUANTUM)).collect()
+    seen.into_iter()
+        .map(|(x, y)| (x as f32 / QUANTUM, y as f32 / QUANTUM))
+        .collect()
 }
 
 fn closest(a: &[(f32, f32)], b: &[(f32, f32)]) -> f32 {
@@ -735,9 +839,9 @@ fn closest(a: &[(f32, f32)], b: &[(f32, f32)]) -> f32 {
     best
 }
 
-fn check_split(c: &SplitCase) -> Result<(), String> {
+fn check_split(params: &Params) -> Result<(), String> {
     catching(|| {
-        let bin = &c.params.bins[0];
+        let bin = &params.bins[0];
         let parts = partition_cells(&bin.cells, &bin.split_lines);
         let mut got: Vec<Vec<(i32, i32)>> = parts.iter().map(|p| as_pairs(&p.cells)).collect();
         got.sort();
@@ -752,7 +856,7 @@ fn check_split(c: &SplitCase) -> Result<(), String> {
             ));
         }
 
-        let whole = gridfinity::build_bin_solid(&c.params, &bin.cells, bin.slope)
+        let whole = gridfinity::build_bin_solid(params, &bin.cells, bin.slope)
             .map_err(|e| format!("build error: {e}"))?;
         sound(&whole, "whole ")?;
         let expected = mesh_volume(&whole);
@@ -776,9 +880,17 @@ fn check_split(c: &SplitCase) -> Result<(), String> {
                     part.cells.len()
                 ));
             }
-            let trespass = parts.iter().enumerate().filter(|(j, _)| *j != i).find_map(|(j, other)| {
-                mesh.positions.iter().find(|p| well_inside(&other.cells, p.x, p.y)).map(|p| (j, *p))
-            });
+            let trespass =
+                parts
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .find_map(|(j, other)| {
+                        mesh.positions
+                            .iter()
+                            .find(|p| well_inside(&other.cells, p.x, p.y))
+                            .map(|p| (j, *p))
+                    });
             if let Some((j, p)) = trespass {
                 return Err(format!(
                     "piece {i} keeps material at ({:.3}, {:.3}), which stands over piece {j}",
@@ -824,12 +936,12 @@ fn check_split(c: &SplitCase) -> Result<(), String> {
     })
 }
 
-fn shrink_split(c: &SplitCase, sig: &str) -> SplitCase {
-    let same = |q: &SplitCase| check_split(q).is_err_and(|e| signature(&e) == sig);
-    let mut best = SplitCase { params: c.params.clone() };
+fn shrink_split(p: &Params, sig: &str) -> Params {
+    let same = |q: &Params| check_split(q).is_err_and(|e| signature(&e) == sig);
+    let mut best = p.clone();
 
     loop {
-        let cells = best.params.bins[0].cells.clone();
+        let cells = best.bins[0].cells.clone();
         let Some(smaller) = cells
             .iter()
             .filter_map(|&victim| {
@@ -837,8 +949,8 @@ fn shrink_split(c: &SplitCase, sig: &str) -> SplitCase {
                 if !edge_connected(&kept) {
                     return None;
                 }
-                let mut q = SplitCase { params: best.params.clone() };
-                q.params.bins[0].cells = kept;
+                let mut q = best.clone();
+                q.bins[0].cells = kept;
                 same(&q).then_some(q)
             })
             .next()
@@ -848,89 +960,49 @@ fn shrink_split(c: &SplitCase, sig: &str) -> SplitCase {
         best = smaller;
     }
 
-    for i in (0..best.params.bins[0].split_lines.len()).rev() {
-        let mut q = SplitCase { params: best.params.clone() };
-        q.params.bins[0].split_lines.remove(i);
-        if same(&q) {
-            best = q;
-        }
+    for i in (0..best.bins[0].split_lines.len()).rev() {
+        keep_if(
+            &mut best,
+            |q| {
+                q.bins[0].split_lines.remove(i);
+            },
+            &same,
+        );
     }
-
-    let d = Params::default();
-    for (get, set) in [
-        (
-            (|p: &Params| p.floor_fillet) as fn(&Params) -> f32,
-            (|p: &mut Params, v: f32| p.floor_fillet = v) as fn(&mut Params, f32),
-        ),
-        (|p| p.cavity_corner_radius, |p, v| p.cavity_corner_radius = v),
-        (|p| p.wall_thickness, |p, v| p.wall_thickness = v),
-    ] {
-        let mut q = SplitCase { params: best.params.clone() };
-        set(&mut q.params, get(&d));
-        if same(&q) {
-            best = q;
-        }
-    }
-    if best.params.magnet_holes {
-        let mut q = SplitCase { params: best.params.clone() };
-        q.params.magnet_holes = false;
-        q.params.screw_holes = false;
-        if same(&q) {
-            best = q;
-        }
-    }
+    relax_params(&mut best, |q| q, &same);
     best
 }
 
-fn repro_split(c: &SplitCase) -> String {
-    let lines: Vec<String> = c.params.bins[0]
+fn repro_split(p: &Params) -> String {
+    let lines: Vec<String> = p.bins[0]
         .split_lines
         .iter()
-        .map(|l| format!("SplitLine {{ axis: Axis::{:?}, index: {} }}", l.axis, l.index))
+        .map(|l| {
+            format!(
+                "SplitLine {{ axis: Axis::{:?}, index: {} }}",
+                l.axis, l.index
+            )
+        })
         .collect();
-    format!("{}\n     split_lines: vec![{}]", repro(&c.params), lines.join(", "))
+    format!("{}\n     split_lines: vec![{}]", repro(p), lines.join(", "))
 }
 
 fn run_splits(cases: u32, seed: u64) -> String {
-    let mut rng = Rng::new(seed);
-    let mut found: BTreeMap<String, Finding> = BTreeMap::new();
-    let mut failures = 0usize;
-
-    for _ in 0..cases {
-        let c = gen_split_case(&mut rng);
-        let Err(err) = check_split(&c) else { continue };
-        failures += 1;
-        let sig = signature(&err);
-        match found.get_mut(&sig) {
-            Some(f) => f.count += 1,
-            None => {
-                let small = shrink_split(&c, &sig);
-                found.insert(sig, Finding { count: 1, repro: repro_split(&small), detail: err });
-            }
-        }
-    }
-
-    if found.is_empty() {
-        return String::new();
-    }
-    let mut out = format!(
-        "{failures}/{cases} cases failed, {} distinct defect(s) (seed {seed}):\n",
-        found.len()
-    );
-    for (i, f) in found.values().enumerate() {
-        out.push_str(&format!(
-            "\n[{}] x{}  {}\n     {}\n",
-            i + 1,
-            f.count,
-            f.detail.lines().next().unwrap_or(""),
-            f.repro
-        ));
-    }
-    out
+    sweep(
+        cases,
+        seed,
+        gen_split_case,
+        check_split,
+        shrink_split,
+        repro_split,
+    )
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 #[test]

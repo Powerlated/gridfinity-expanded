@@ -1,4 +1,3 @@
-
 use crate::kernel::hash::FxHashSet;
 
 pub const PITCH: i32 = 42;
@@ -127,10 +126,26 @@ pub fn classify_edge_in(s: &CellSet, e: GridEdge) -> EdgeClass {
 
 pub fn cell_edges(c: GridCell) -> [GridEdge; 4] {
     [
-        GridEdge { x: c.x, y: c.y, orientation: Orientation::V },
-        GridEdge { x: c.x + 1, y: c.y, orientation: Orientation::V },
-        GridEdge { x: c.x, y: c.y, orientation: Orientation::H },
-        GridEdge { x: c.x, y: c.y + 1, orientation: Orientation::H },
+        GridEdge {
+            x: c.x,
+            y: c.y,
+            orientation: Orientation::V,
+        },
+        GridEdge {
+            x: c.x + 1,
+            y: c.y,
+            orientation: Orientation::V,
+        },
+        GridEdge {
+            x: c.x,
+            y: c.y,
+            orientation: Orientation::H,
+        },
+        GridEdge {
+            x: c.x,
+            y: c.y + 1,
+            orientation: Orientation::H,
+        },
     ]
 }
 
@@ -164,9 +179,7 @@ pub fn internal_edges(cells: &[GridCell]) -> Vec<GridEdge> {
 }
 
 pub fn sort_edges(edges: &mut [GridEdge]) {
-    edges.sort_by(|a, b| {
-        (a.orientation, a.x, a.y).cmp(&(b.orientation, b.x, b.y))
-    });
+    edges.sort_by(|a, b| (a.orientation, a.x, a.y).cmp(&(b.orientation, b.x, b.y)));
 }
 
 #[derive(Clone, Debug, Default)]
@@ -240,12 +253,14 @@ pub fn partition_cells(cells: &[GridCell], split_lines: &[SplitLine]) -> Vec<Pie
     }
     let mut out: Vec<Piece> = groups
         .into_iter()
-        .filter(|(_, cs)| {
-            cs.iter().any(|c| s.contains(c))
-        })
+        .filter(|(_, cs)| cs.iter().any(|c| s.contains(c)))
         .map(|((col, row), mut cs)| {
             cs.sort_by(|a, b| (a.x, a.y).cmp(&(b.x, b.y)));
-            Piece { col, row, cells: cs }
+            Piece {
+                col,
+                row,
+                cells: cs,
+            }
         })
         .collect();
     out.sort_by(|a, b| (a.row, a.col).cmp(&(b.row, b.col)));
@@ -283,7 +298,11 @@ mod tests {
         let whole = cells(&[(0, 0), (1, 0)]);
         let piece = cells(&[(0, 0)]);
         let w = effective_walls(&piece, &whole, &[], &[]);
-        let seam = GridEdge { x: 1, y: 0, orientation: Orientation::V };
+        let seam = GridEdge {
+            x: 1,
+            y: 0,
+            orientation: Orientation::V,
+        };
         assert!(w.open.contains(&seam));
         assert!(!w.dividers.contains(&seam));
     }
@@ -292,7 +311,11 @@ mod tests {
     fn seam_becomes_divider_when_requested() {
         let whole = cells(&[(0, 0), (1, 0)]);
         let piece = cells(&[(0, 0)]);
-        let seam = GridEdge { x: 1, y: 0, orientation: Orientation::V };
+        let seam = GridEdge {
+            x: 1,
+            y: 0,
+            orientation: Orientation::V,
+        };
         let w = effective_walls(&piece, &whole, &[], &[seam]);
         assert!(w.walled.contains(&seam), "seam divider becomes a full wall");
         assert!(!w.open.contains(&seam));
@@ -302,7 +325,11 @@ mod tests {
     #[test]
     fn open_edge_removes_perimeter_wall() {
         let whole = cells(&[(0, 0)]);
-        let open_south = GridEdge { x: 0, y: 0, orientation: Orientation::H };
+        let open_south = GridEdge {
+            x: 0,
+            y: 0,
+            orientation: Orientation::H,
+        };
         let w = effective_walls(&whole, &whole, &[open_south], &[]);
         assert!(w.open.contains(&open_south));
         assert_eq!(w.walled.len(), 3);
@@ -311,7 +338,13 @@ mod tests {
     #[test]
     fn partition_single_x_split() {
         let whole = cells(&[(0, 0), (1, 0), (2, 0)]);
-        let pieces = partition_cells(&whole, &[SplitLine { axis: Axis::X, index: 1 }]);
+        let pieces = partition_cells(
+            &whole,
+            &[SplitLine {
+                axis: Axis::X,
+                index: 1,
+            }],
+        );
         assert_eq!(pieces.len(), 2);
         assert_eq!(pieces[0].cells.len(), 1);
         assert_eq!(pieces[1].cells.len(), 2);
@@ -320,7 +353,13 @@ mod tests {
     #[test]
     fn partition_stale_line_is_harmless() {
         let whole = cells(&[(0, 0), (1, 0)]);
-        let pieces = partition_cells(&whole, &[SplitLine { axis: Axis::X, index: 10 }]);
+        let pieces = partition_cells(
+            &whole,
+            &[SplitLine {
+                axis: Axis::X,
+                index: 10,
+            }],
+        );
         assert_eq!(pieces.len(), 1);
     }
 
@@ -330,8 +369,14 @@ mod tests {
         let pieces = partition_cells(
             &whole,
             &[
-                SplitLine { axis: Axis::X, index: 1 },
-                SplitLine { axis: Axis::Y, index: 1 },
+                SplitLine {
+                    axis: Axis::X,
+                    index: 1,
+                },
+                SplitLine {
+                    axis: Axis::Y,
+                    index: 1,
+                },
             ],
         );
         assert_eq!(pieces.len(), 4);

@@ -1,7 +1,6 @@
 #[global_allocator]
 static MI: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-
 use gridfinity_cad::gridfinity::{LogicalBin, Params, try_build};
 use gridfinity_cad::kernel::tess::tessellate;
 use gridfinity_cad::layout::GridCell;
@@ -30,8 +29,7 @@ fn blob_phase(w: i32, h: i32, phase: f32) -> Vec<GridCell> {
     for x in 0..w {
         for y in 0..h {
             let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
-            let wob =
-                1.0 + 0.18 * (dy * 0.9 + phase).sin() + 0.12 * (dx * 1.3 + phase).cos();
+            let wob = 1.0 + 0.18 * (dy * 0.9 + phase).sin() + 0.12 * (dx * 1.3 + phase).cos();
             if (dx * dx + dy * dy).sqrt() <= r * wob {
                 cells.push(GridCell { x, y });
             }
@@ -98,7 +96,13 @@ fn pipeline_bench() {
 }
 
 fn params_for(cells: Vec<GridCell>, base: Params) -> Params {
-    Params { bins: vec![LogicalBin { cells, ..Default::default() }], ..base }
+    Params {
+        bins: vec![LogicalBin {
+            cells,
+            ..Default::default()
+        }],
+        ..base
+    }
 }
 
 fn time_one(w: i32, h: i32) {
@@ -152,7 +156,10 @@ fn tess_bench() {
         best = best.min(t.elapsed().as_secs_f64() * 1e3);
         tris = tess.tris.len();
     }
-    println!("\ntess best of 25: {best:.3}ms for {tris} tris ({} faces)", solid.faces.len());
+    println!(
+        "\ntess best of 25: {best:.3}ms for {tris} tris ({} faces)",
+        solid.faces.len()
+    );
     let d = gridfinity_cad::kernel::tess::tess_diag();
     let avg = |x: u64| x as f64 / 1e6 / 25.0;
     println!(
@@ -212,7 +219,16 @@ fn plan_bench() {
 #[ignore = "benchmark: cargo test --release --test scale -- --ignored --nocapture"]
 fn scale_report() {
     println!();
-    for (w, h) in [(2, 2), (4, 4), (6, 6), (8, 8), (12, 12), (16, 16), (24, 24), (32, 32)] {
+    for (w, h) in [
+        (2, 2),
+        (4, 4),
+        (6, 6),
+        (8, 8),
+        (12, 12),
+        (16, 16),
+        (24, 24),
+        (32, 32),
+    ] {
         time_one(w, h);
     }
 }
@@ -222,10 +238,20 @@ fn scale_report() {
 fn scale_features() {
     let variants: [(&str, Params); 4] = [
         ("default (h3, fillet 3.0, rc 2.5)", Params::default()),
-        ("no floor fillet", Params { floor_fillet: 0.0, ..Default::default() }),
+        (
+            "no floor fillet",
+            Params {
+                floor_fillet: 0.0,
+                ..Default::default()
+            },
+        ),
         (
             "no fillet, no cavity radius",
-            Params { floor_fillet: 0.0, cavity_corner_radius: 0.0, ..Default::default() },
+            Params {
+                floor_fillet: 0.0,
+                cavity_corner_radius: 0.0,
+                ..Default::default()
+            },
         ),
         (
             "no fillet/radius, 1 height unit",

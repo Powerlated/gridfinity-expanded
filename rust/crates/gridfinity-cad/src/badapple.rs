@@ -40,7 +40,11 @@ pub fn bounds() -> ([f32; 3], [f32; 3]) {
     let h = 2.0 * gridfinity::HEIGHT_PER_UNIT;
     (
         [0.0, 0.0, 0.0],
-        [W as f32 * gridfinity::GRID_PITCH, H as f32 * gridfinity::GRID_PITCH, h],
+        [
+            W as f32 * gridfinity::GRID_PITCH,
+            H as f32 * gridfinity::GRID_PITCH,
+            h,
+        ],
     )
 }
 
@@ -72,17 +76,28 @@ pub fn components(frame: &[u8]) -> Vec<Vec<GridCell>> {
             seen[sy * W + sx] = true;
             stack.push((sx, sy));
             while let Some((x, y)) = stack.pop() {
-                cells.push(GridCell { x: x as i32, y: (H - 1 - y) as i32 });
+                cells.push(GridCell {
+                    x: x as i32,
+                    y: (H - 1 - y) as i32,
+                });
                 let mut nb = |nx: usize, ny: usize, stack: &mut Vec<(usize, usize)>| {
                     if !seen[ny * W + nx] && white(frame, nx, ny) {
                         seen[ny * W + nx] = true;
                         stack.push((nx, ny));
                     }
                 };
-                if x > 0 { nb(x - 1, y, &mut stack); }
-                if x + 1 < W { nb(x + 1, y, &mut stack); }
-                if y > 0 { nb(x, y - 1, &mut stack); }
-                if y + 1 < H { nb(x, y + 1, &mut stack); }
+                if x > 0 {
+                    nb(x - 1, y, &mut stack);
+                }
+                if x + 1 < W {
+                    nb(x + 1, y, &mut stack);
+                }
+                if y > 0 {
+                    nb(x, y - 1, &mut stack);
+                }
+                if y + 1 < H {
+                    nb(x, y + 1, &mut stack);
+                }
             }
             out.push(cells);
         }
@@ -104,6 +119,9 @@ mod tests {
     #[test]
     fn first_frame_is_black_and_mid_clip_is_not() {
         assert!(components(frame(0)).is_empty(), "frame 0 is a black screen");
-        assert!(!components(frame(frame_count() / 2)).is_empty(), "mid clip has cells");
+        assert!(
+            !components(frame(frame_count() / 2)).is_empty(),
+            "mid clip has cells"
+        );
     }
 }

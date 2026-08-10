@@ -1,4 +1,3 @@
-
 use crate::kernel::math::Vec2;
 use std::f32::consts::PI;
 
@@ -163,8 +162,10 @@ pub struct Aabb {
 }
 
 impl Aabb {
-    pub const EMPTY: Aabb =
-        Aabb { min: Vec2::new(f32::INFINITY, f32::INFINITY), max: Vec2::new(f32::NEG_INFINITY, f32::NEG_INFINITY) };
+    pub const EMPTY: Aabb = Aabb {
+        min: Vec2::new(f32::INFINITY, f32::INFINITY),
+        max: Vec2::new(f32::NEG_INFINITY, f32::NEG_INFINITY),
+    };
 
     #[inline]
     pub fn contains(&self, p: Vec2) -> bool {
@@ -178,16 +179,32 @@ impl Aabb {
 
     #[inline]
     pub fn union(self, o: Aabb) -> Aabb {
-        Aabb { min: self.min.min(o.min), max: self.max.max(o.max) }
+        Aabb {
+            min: self.min.min(o.min),
+            max: self.max.max(o.max),
+        }
     }
 }
 
 impl Seg {
     pub fn bbox(&self) -> Aabb {
         match *self {
-            Seg::Line { a, b } => Aabb { min: a.min(b), max: a.max(b) },
-            Seg::Arc { a, b, center, radius, a0, a1 } => {
-                let mut bb = Aabb { min: a.min(b), max: a.max(b) };
+            Seg::Line { a, b } => Aabb {
+                min: a.min(b),
+                max: a.max(b),
+            },
+            Seg::Arc {
+                a,
+                b,
+                center,
+                radius,
+                a0,
+                a1,
+            } => {
+                let mut bb = Aabb {
+                    min: a.min(b),
+                    max: a.max(b),
+                };
                 let (lo, hi) = (a0.min(a1), a0.max(a1));
                 let q = PI / 2.0;
                 let k0 = (lo / q).ceil() as i32;
@@ -233,7 +250,14 @@ pub fn seg_crossings(pt: Vec2, seg: &Seg) -> u32 {
                     cross(a.y, b.y, a.x + (pt.y - a.y) / (b.y - a.y) * (b.x - a.x));
                 }
             }
-            Seg::Arc { a, b, center, radius, a0, a1 } => {
+            Seg::Arc {
+                a,
+                b,
+                center,
+                radius,
+                a0,
+                a1,
+            } => {
                 let (lo, hi) = (a0.min(a1), a0.max(a1));
                 let k0 = ((lo - PI / 2.0) / PI).floor() as i32 + 1;
                 let k1 = ((hi - PI / 2.0) / PI).ceil() as i32 - 1;
@@ -299,7 +323,11 @@ mod tests {
     fn stadium_rounded_rect_extrudes_to_a_valid_solid() {
         let sk = Sketch::rounded_rect(20.0, 20.0, 40.0, 2.4, 1.2);
         assert_eq!(sk.loops[0].len(), 6, "two straight runs + four arcs");
-        assert!(sk.loops[0].iter().all(|s| (s.end() - s.start()).length() > 1e-6));
+        assert!(
+            sk.loops[0]
+                .iter()
+                .all(|s| (s.end() - s.start()).length() > 1e-6)
+        );
         let solid = extrude(&sk, 0.0, 15.0);
         solid.validate().expect("stadium prism must be manifold");
     }
@@ -311,11 +339,18 @@ mod tests {
         let segs = &sk.loops[0];
         for i in 0..segs.len() {
             let gap = segs[(i + 1) % segs.len()].start() - segs[i].end();
-            assert!(gap.length() < 1e-6, "loop breaks between seg {i} and the next");
+            assert!(
+                gap.length() < 1e-6,
+                "loop breaks between seg {i} and the next"
+            );
         }
         let r = h / 2.0;
         let want = (w - h) * h + std::f32::consts::PI * r * r;
-        assert!((loop_area(segs) - want).abs() < 1e-3, "area {}", loop_area(segs));
+        assert!(
+            (loop_area(segs) - want).abs() < 1e-3,
+            "area {}",
+            loop_area(segs)
+        );
     }
 
     #[test]
@@ -330,7 +365,13 @@ mod tests {
             let t = i as f32 / 2048.0;
             let p = match *s {
                 Seg::Line { a, b } => a + (b - a) * t,
-                Seg::Arc { center, radius, a0, a1, .. } => {
+                Seg::Arc {
+                    center,
+                    radius,
+                    a0,
+                    a1,
+                    ..
+                } => {
                     let ang = a0 + (a1 - a0) * t;
                     center + Vec2::new(ang.cos(), ang.sin()) * radius
                 }

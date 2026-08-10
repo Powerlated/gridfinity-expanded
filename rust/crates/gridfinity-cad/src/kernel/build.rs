@@ -1,4 +1,3 @@
-
 use crate::kernel::geom::Surface;
 use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::sketch::{Seg, Sketch, loop_area, reverse_loop};
@@ -49,9 +48,22 @@ pub fn ring_into(b: &mut Builder, segs: &[Seg], z: f32, out: &mut RingEdges) {
         let (v0, v1) = (out.verts[k], out.verts[k1]);
         out.edges.push(match segs[k] {
             Seg::Line { .. } => b.line(v0, v1),
-            Seg::Arc { center, radius, a0, a1, .. } => {
-                b.arc(v0, v1, vec3_of(center.x, center.y, z), Vec3::Z, radius, Vec3::X, a0, a1)
-            }
+            Seg::Arc {
+                center,
+                radius,
+                a0,
+                a1,
+                ..
+            } => b.arc(
+                v0,
+                v1,
+                vec3_of(center.x, center.y, z),
+                Vec3::Z,
+                radius,
+                Vec3::X,
+                a0,
+                a1,
+            ),
         });
     }
 }
@@ -79,9 +91,24 @@ pub fn ring_on_plane(b: &mut Builder, segs: &[Seg], plane: (Vec3, Vec3)) -> Ring
         let k1 = (k + 1) % n;
         edges.push(match segs[k] {
             Seg::Line { .. } => b.line(verts[k], verts[k1]),
-            Seg::Arc { center, radius, a0, a1, .. } => {
+            Seg::Arc {
+                center,
+                radius,
+                a0,
+                a1,
+                ..
+            } => {
                 let cz = z_of(center);
-                b.arc(verts[k], verts[k1], vec3_of(center.x, center.y, cz), Vec3::Z, radius, Vec3::X, a0, a1)
+                b.arc(
+                    verts[k],
+                    verts[k1],
+                    vec3_of(center.x, center.y, cz),
+                    Vec3::Z,
+                    radius,
+                    Vec3::X,
+                    a0,
+                    a1,
+                )
             }
         });
     }
@@ -106,7 +133,11 @@ pub fn wall_between(
     let mut va = first_v;
     for k in 0..n {
         let k1 = (k + 1) % n;
-        let vb = if k1 == 0 { first_v } else { b.line(lo.verts[k1], hi.verts[k1]) };
+        let vb = if k1 == 0 {
+            first_v
+        } else {
+            b.line(lo.verts[k1], hi.verts[k1])
+        };
         let (be, bd) = lo.edges[k];
         let (te, td) = hi.edges[k];
         let surface = match segs_lo[k] {
@@ -142,9 +173,22 @@ pub fn seg_edge(b: &mut Builder, seg: &Seg, z: f32) -> (EdgeId, bool) {
     let v1 = b.vertex(vec3_of(seg.end().x, seg.end().y, z));
     match *seg {
         Seg::Line { .. } => b.line(v0, v1),
-        Seg::Arc { center, radius, a0, a1, .. } => {
-            b.arc(v0, v1, vec3_of(center.x, center.y, z), Vec3::Z, radius, Vec3::X, a0, a1)
-        }
+        Seg::Arc {
+            center,
+            radius,
+            a0,
+            a1,
+            ..
+        } => b.arc(
+            v0,
+            v1,
+            vec3_of(center.x, center.y, z),
+            Vec3::Z,
+            radius,
+            Vec3::X,
+            a0,
+            a1,
+        ),
     }
 }
 
@@ -162,7 +206,12 @@ pub fn wall_seg(
     let top = seg_edge(b, seg, zb);
     let chain = |b: &mut Builder, p: Vec2, breaks: &[f32]| -> Vec<(EdgeId, bool)> {
         let mut hs: Vec<f32> = vec![za];
-        hs.extend(breaks.iter().copied().filter(|&h| h > za + 1e-4 && h < zb - 1e-4));
+        hs.extend(
+            breaks
+                .iter()
+                .copied()
+                .filter(|&h| h > za + 1e-4 && h < zb - 1e-4),
+        );
         hs.sort_by(f32::total_cmp);
         hs.push(zb);
         hs.dedup_by(|x, y| (*x - *y).abs() < 1e-4);
@@ -260,16 +309,34 @@ pub struct Ring<'a> {
 pub fn loft(rings: &[Ring]) -> Solid {
     assert!(rings.len() >= 2, "loft needs at least two rings");
     let mut b = Builder::new();
-    let leveled: Vec<Vec<Seg>> = rings.iter().map(|r| ccw(r.sketch.loops[0].clone())).collect();
+    let leveled: Vec<Vec<Seg>> = rings
+        .iter()
+        .map(|r| ccw(r.sketch.loops[0].clone()))
+        .collect();
     let re: Vec<RingEdges> = rings
         .iter()
         .zip(&leveled)
         .map(|(r, segs)| ring(&mut b, segs, r.z))
         .collect();
     for i in 0..rings.len() - 1 {
-        wall_between(&mut b, &leveled[i], &leveled[i + 1], &re[i], &re[i + 1], rings[i].z, rings[i + 1].z, true);
+        wall_between(
+            &mut b,
+            &leveled[i],
+            &leveled[i + 1],
+            &re[i],
+            &re[i + 1],
+            rings[i].z,
+            rings[i + 1].z,
+            true,
+        );
     }
-    cap(&mut b, rings[rings.len() - 1].z, true, &re[rings.len() - 1], &[]);
+    cap(
+        &mut b,
+        rings[rings.len() - 1].z,
+        true,
+        &re[rings.len() - 1],
+        &[],
+    );
     cap(&mut b, rings[0].z, false, &re[0], &[]);
     b.build()
 }

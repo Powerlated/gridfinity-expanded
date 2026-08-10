@@ -308,7 +308,10 @@ impl Planar {
         }
         let (pt, he_from, he_to) = (&self.pt, &self.he_from, &self.he_to);
         let angle = |h: u32| -> f32 {
-            let (a, b) = (pt[he_from[h as usize] as usize], pt[he_to[h as usize] as usize]);
+            let (a, b) = (
+                pt[he_from[h as usize] as usize],
+                pt[he_to[h as usize] as usize],
+            );
             (b.y - a.y).atan2(b.x - a.x)
         };
         for v in 0..n {
@@ -450,7 +453,11 @@ impl Planar {
             } else {
                 let mut last = st.pop().unwrap();
                 while let Some(&t) = st.last() {
-                    let c = cross(pt[seq[k] as usize], pt[seq[last] as usize], pt[seq[t] as usize]);
+                    let c = cross(
+                        pt[seq[k] as usize],
+                        pt[seq[last] as usize],
+                        pt[seq[t] as usize],
+                    );
                     let ok = if left[k] { c < 0.0 } else { c > 0.0 };
                     if !ok {
                         break;
@@ -499,7 +506,10 @@ mod tests {
     fn check(uv: &[Vec2], spans: &[(usize, usize)]) -> Vec<[usize; 3]> {
         let mut tris = Vec::new();
         let mut p = Planar::default();
-        assert!(p.run(uv, spans, &mut tris), "triangulation produced nothing");
+        assert!(
+            p.run(uv, spans, &mut tris),
+            "triangulation produced nothing"
+        );
 
         let mut want = 0.0f64;
         let mut boundary: FxHashMap<(usize, usize), i32> = FxHashMap::default();
@@ -540,13 +550,25 @@ mod tests {
         for (&(u, v), &n) in &edges {
             let rev = edges.get(&(v, u)).copied().unwrap_or(0);
             if boundary.contains_key(&(u, v)) {
-                assert_eq!((n, rev), (1, 0), "boundary edge {u}->{v} used {n}x, {rev}x back");
+                assert_eq!(
+                    (n, rev),
+                    (1, 0),
+                    "boundary edge {u}->{v} used {n}x, {rev}x back"
+                );
             } else {
-                assert_eq!((n, rev), (1, 1), "interior edge {u}->{v} used {n}x, {rev}x back");
+                assert_eq!(
+                    (n, rev),
+                    (1, 1),
+                    "interior edge {u}->{v} used {n}x, {rev}x back"
+                );
             }
         }
         for (&(u, v), _) in &boundary {
-            assert_eq!(edges.get(&(u, v)).copied().unwrap_or(0), 1, "boundary {u}->{v} missing");
+            assert_eq!(
+                edges.get(&(u, v)).copied().unwrap_or(0),
+                1,
+                "boundary {u}->{v} missing"
+            );
         }
         for &(s, e) in spans {
             for (i, ok) in seen.iter().enumerate().take(e).skip(s) {
@@ -565,14 +587,20 @@ mod tests {
     #[test]
     fn square() {
         let mut uv = Vec::new();
-        let a = ring(&mut uv, &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        let a = ring(
+            &mut uv,
+            &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+        );
         assert_eq!(check(&uv, &[a]).len(), 2);
     }
 
     #[test]
     fn square_with_a_square_hole() {
         let mut uv = Vec::new();
-        let a = ring(&mut uv, &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        let a = ring(
+            &mut uv,
+            &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+        );
         let h = ring(&mut uv, &[(3.0, 3.0), (3.0, 7.0), (7.0, 7.0), (7.0, 3.0)]);
         check(&uv, &[a, h]);
     }
@@ -580,7 +608,10 @@ mod tests {
     #[test]
     fn many_holes_on_a_lattice() {
         let mut uv = Vec::new();
-        let mut spans = vec![ring(&mut uv, &[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)])];
+        let mut spans = vec![ring(
+            &mut uv,
+            &[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)],
+        )];
         for i in 0..6 {
             for j in 0..6 {
                 let (x, y) = (5.0 + i as f32 * 15.0, 5.0 + j as f32 * 15.0);
@@ -647,7 +678,10 @@ mod tests {
     #[test]
     fn hole_orientation_is_normalised_either_way() {
         let mut uv = Vec::new();
-        let a = ring(&mut uv, &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        let a = ring(
+            &mut uv,
+            &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+        );
         let h = ring(&mut uv, &[(3.0, 3.0), (7.0, 3.0), (7.0, 7.0), (3.0, 7.0)]);
         check(&uv, &[a, h]);
     }

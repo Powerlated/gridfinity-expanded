@@ -1,8 +1,7 @@
-
-use crate::kernel::math::Vec2;
-use crate::kernel::sketch::{Aabb, Seg, loop_area, point_in_segs};
-use crate::kernel::perf;
 use crate::kernel::hash::FxHashMap;
+use crate::kernel::math::Vec2;
+use crate::kernel::perf;
+use crate::kernel::sketch::{Aabb, Seg, loop_area, point_in_segs};
 
 const EPS: f32 = 1e-4;
 
@@ -47,7 +46,6 @@ fn boxes_meet(x: Aabb, y: Aabb) -> bool {
         && y.min.y - BOX_TOL <= x.max.y
 }
 
-
 pub struct RegionSplit<T> {
     pub a_outside: Vec<(Seg, T)>,
     pub a_inside: Vec<(Seg, T)>,
@@ -76,7 +74,9 @@ fn coincident_with<'a>(loops: &'a [Vec<Seg>], piece: &Seg) -> Option<&'a Seg> {
 pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> RegionSplit<T> {
     if verify_prune() {
         let strip = |r: &[Vec<(Seg, T)>]| -> Vec<Vec<Seg>> {
-            r.iter().map(|l| l.iter().map(|&(s, _)| s).collect()).collect()
+            r.iter()
+                .map(|l| l.iter().map(|&(s, _)| s).collect())
+                .collect()
         };
         let (sa, sb) = (strip(a), strip(b));
         assert_prune_kept_every_crossing(
@@ -89,8 +89,10 @@ pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> Regio
         a.iter().map(|l| vec![Vec::new(); l.len()]).collect();
     let mut b_cuts: Vec<Vec<Vec<(f32, Vec2)>>> =
         b.iter().map(|l| vec![Vec::new(); l.len()]).collect();
-    let b_boxes: Vec<Vec<Aabb>> =
-        b.iter().map(|l| l.iter().map(|(s, _)| s.bbox()).collect()).collect();
+    let b_boxes: Vec<Vec<Aabb>> = b
+        .iter()
+        .map(|l| l.iter().map(|(s, _)| s.bbox()).collect())
+        .collect();
     let b_loop_box: Vec<Aabb> = b_boxes
         .iter()
         .map(|l| l.iter().fold(Aabb::EMPTY, |acc, x| acc.union(*x)))
@@ -116,12 +118,13 @@ pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> Regio
     }
 
     let bare = |r: &[Vec<(Seg, T)>]| -> Vec<Vec<Seg>> {
-        r.iter().map(|l| l.iter().map(|&(s, _)| s).collect()).collect()
+        r.iter()
+            .map(|l| l.iter().map(|&(s, _)| s).collect())
+            .collect()
     };
     let (a_bare, b_bare) = (bare(a), bare(b));
-    let inside = |loops: &[Vec<Seg>], p: Vec2| {
-        loops.iter().filter(|l| point_in_segs(p, l)).count() % 2 == 1
-    };
+    let inside =
+        |loops: &[Vec<Seg>], p: Vec2| loops.iter().filter(|l| point_in_segs(p, l)).count() % 2 == 1;
 
     let mut out = RegionSplit {
         a_outside: Vec::new(),
@@ -184,12 +187,18 @@ pub fn presplit_regions(regions: &[Vec<Vec<Seg>>]) -> Vec<Vec<Vec<Seg>>> {
         .collect();
     let boxes: Vec<Vec<Vec<Aabb>>> = regions
         .iter()
-        .map(|r| r.iter().map(|l| l.iter().map(|s| s.bbox()).collect()).collect())
+        .map(|r| {
+            r.iter()
+                .map(|l| l.iter().map(|s| s.bbox()).collect())
+                .collect()
+        })
         .collect();
     let loop_box: Vec<Vec<Aabb>> = boxes
         .iter()
         .map(|r| {
-            r.iter().map(|l| l.iter().fold(Aabb::EMPTY, |acc, x| acc.union(*x))).collect()
+            r.iter()
+                .map(|l| l.iter().fold(Aabb::EMPTY, |acc, x| acc.union(*x)))
+                .collect()
         })
         .collect();
     let region_box: Vec<Aabb> = loop_box
@@ -248,11 +257,17 @@ pub fn presplit_regions(regions: &[Vec<Vec<Seg>>]) -> Vec<Vec<Vec<Seg>>> {
 }
 
 fn tagged(loops: &[Vec<Seg>]) -> Vec<Vec<(Seg, ())>> {
-    loops.iter().map(|l| l.iter().map(|&s| (s, ())).collect()).collect()
+    loops
+        .iter()
+        .map(|l| l.iter().map(|&s| (s, ())).collect())
+        .collect()
 }
 
 fn untag(loops: Vec<Vec<(Seg, ())>>) -> Vec<Vec<Seg>> {
-    loops.into_iter().map(|l| l.into_iter().map(|(s, _)| s).collect()).collect()
+    loops
+        .into_iter()
+        .map(|l| l.into_iter().map(|(s, _)| s).collect())
+        .collect()
 }
 
 pub fn region_union(a: &[Vec<Seg>], b: &[Vec<Seg>]) -> Vec<Vec<Seg>> {
@@ -285,7 +300,6 @@ fn line_param(a: Vec2, b: Vec2, p: Vec2) -> f32 {
     if l2 <= 0.0 { 0.0 } else { (p - a).dot(d) / l2 }
 }
 
-
 fn seg_param(seg: &Seg, p: Vec2) -> f32 {
     match *seg {
         Seg::Line { a, b } => line_param(a, b, p),
@@ -309,7 +323,13 @@ fn on_seg(seg: &Seg, p: Vec2) -> bool {
             let t = line_param(a, b, p);
             (-EPS..=1.0 + EPS).contains(&t) && (a + (b - a) * t - p).length() < 1e-3
         }
-        Seg::Arc { center, radius, a0, a1, .. } => {
+        Seg::Arc {
+            center,
+            radius,
+            a0,
+            a1,
+            ..
+        } => {
             if ((p - center).length() - radius).abs() > 1e-3 {
                 return false;
             }
@@ -331,7 +351,10 @@ fn circle_line_pts(center: Vec2, radius: f32, q0: Vec2, q1: Vec2) -> Vec<Vec2> {
         return Vec::new();
     }
     let sq = disc.sqrt();
-    [(-qb - sq) / (2.0 * qa), (-qb + sq) / (2.0 * qa)].into_iter().map(|u| q0 + e * u).collect()
+    [(-qb - sq) / (2.0 * qa), (-qb + sq) / (2.0 * qa)]
+        .into_iter()
+        .map(|u| q0 + e * u)
+        .collect()
 }
 
 fn circle_circle_pts(c0: Vec2, r0: f32, c1: Vec2, r1: f32) -> Vec<Vec2> {
@@ -367,17 +390,34 @@ fn seg_seg_points(p: &Seg, q: &Seg) -> Vec<Vec2> {
         | (Seg::Line { a, b }, Seg::Arc { center, radius, .. }) => {
             circle_line_pts(center, radius, a, b)
         }
-        (Seg::Arc { center: c0, radius: r0, .. }, Seg::Arc { center: c1, radius: r1, .. }) => {
-            circle_circle_pts(c0, r0, c1, r1)
-        }
+        (
+            Seg::Arc {
+                center: c0,
+                radius: r0,
+                ..
+            },
+            Seg::Arc {
+                center: c1,
+                radius: r1,
+                ..
+            },
+        ) => circle_circle_pts(c0, r0, c1, r1),
     };
-    raw.into_iter().filter(|&pt| on_seg(p, pt) && on_seg(q, pt)).collect()
+    raw.into_iter()
+        .filter(|&pt| on_seg(p, pt) && on_seg(q, pt))
+        .collect()
 }
 
 fn seg_mid(seg: &Seg) -> Vec2 {
     match *seg {
         Seg::Line { a, b } => (a + b) * 0.5,
-        Seg::Arc { center, radius, a0, a1, .. } => {
+        Seg::Arc {
+            center,
+            radius,
+            a0,
+            a1,
+            ..
+        } => {
             let t = (a0 + a1) * 0.5;
             center + Vec2::new(t.cos(), t.sin()) * radius
         }
@@ -399,7 +439,14 @@ fn split_seg(seg: &Seg, cuts: &mut Vec<(f32, Vec2)>) -> Vec<Seg> {
             out.push(Seg::Line { a: prev, b });
             out
         }
-        Seg::Arc { a, b, center, radius, a0, a1 } => {
+        Seg::Arc {
+            a,
+            b,
+            center,
+            radius,
+            a0,
+            a1,
+        } => {
             let fwd = a1 >= a0;
             let (lo, hi) = (a0.min(a1), a0.max(a1));
             let span = (hi - lo).max(1e-9);
@@ -414,10 +461,24 @@ fn split_seg(seg: &Seg, cuts: &mut Vec<(f32, Vec2)>) -> Vec<Seg> {
             let mut out = Vec::with_capacity(cuts.len() + 1);
             let mut prev = (a0, a);
             for &(t, p) in cuts.iter() {
-                out.push(Seg::Arc { a: prev.1, b: p, center, radius, a0: prev.0, a1: t });
+                out.push(Seg::Arc {
+                    a: prev.1,
+                    b: p,
+                    center,
+                    radius,
+                    a0: prev.0,
+                    a1: t,
+                });
                 prev = (t, p);
             }
-            out.push(Seg::Arc { a: prev.1, b, center, radius, a0: prev.0, a1 });
+            out.push(Seg::Arc {
+                a: prev.1,
+                b,
+                center,
+                radius,
+                a0: prev.0,
+                a1,
+            });
             out
         }
     }
@@ -496,13 +557,18 @@ mod tests {
     }
 
     fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<Seg> {
-        Sketch::rectangle((x0 + x1) * 0.5, (y0 + y1) * 0.5, x1 - x0, y1 - y0).loops.remove(0)
+        Sketch::rectangle((x0 + x1) * 0.5, (y0 + y1) * 0.5, x1 - x0, y1 - y0)
+            .loops
+            .remove(0)
     }
 
     fn assert_conserved(a: &[Vec<Seg>], b: &[Vec<Seg>]) {
         let lhs = area(a) + area(b);
         let rhs = area(&region_union(a, b)) + area(&region_intersection(a, b));
-        assert!((lhs - rhs).abs() < 1e-2, "area not conserved: {lhs} vs {rhs}");
+        assert!(
+            (lhs - rhs).abs() < 1e-2,
+            "area not conserved: {lhs} vs {rhs}"
+        );
     }
 
     #[test]
@@ -510,7 +576,11 @@ mod tests {
         let outline = vec![rect(0.0, 0.0, 100.0, 100.0)];
         let notch = vec![rect(40.0, 80.0, 60.0, 120.0)];
         let below = region_difference(&outline, &notch);
-        assert!((area(&below) - 9600.0).abs() < 1e-2, "notched area {}", area(&below));
+        assert!(
+            (area(&below) - 9600.0).abs() < 1e-2,
+            "notched area {}",
+            area(&below)
+        );
 
         let cap = region_difference(&outline, &below);
         assert!(
@@ -561,7 +631,11 @@ mod tests {
 
     #[test]
     fn rounded_rect_against_circle_uses_arc_arc() {
-        let a = vec![Sketch::rounded_rect(0.0, 0.0, 20.0, 20.0, 5.0).loops.remove(0)];
+        let a = vec![
+            Sketch::rounded_rect(0.0, 0.0, 20.0, 20.0, 5.0)
+                .loops
+                .remove(0),
+        ];
         let b = vec![Sketch::circle(11.0, 11.0, 4.0).loops.remove(0)];
         let corner = Seg::Arc {
             a: Vec2::new(10.0, 5.0),
@@ -572,7 +646,10 @@ mod tests {
             a1: std::f32::consts::FRAC_PI_2,
         };
         let hits: usize = b[0].iter().map(|s| seg_seg_points(&corner, s).len()).sum();
-        assert_eq!(hits, 2, "arc/arc path must cross the corner arc exactly twice");
+        assert_eq!(
+            hits, 2,
+            "arc/arc path must cross the corner arc exactly twice"
+        );
         let i = region_intersection(&a, &b);
         assert!(!i.is_empty(), "arc/arc intersection produced nothing");
         assert!(area(&i) > 0.0 && area(&i) < std::f32::consts::PI * 16.0);
@@ -585,7 +662,11 @@ mod tests {
         let b = vec![Sketch::circle(10.0, 10.0, 4.0).loops.remove(0)];
         let d = region_difference(&a, &b);
         let expect = 400.0 - std::f32::consts::PI * 16.0;
-        assert!((area(&d) - expect).abs() < 1e-2, "bore area {} vs {expect}", area(&d));
+        assert!(
+            (area(&d) - expect).abs() < 1e-2,
+            "bore area {} vs {expect}",
+            area(&d)
+        );
     }
 }
 
@@ -607,7 +688,14 @@ pub fn point_seg_distance(p: Vec2, seg: &Seg) -> f32 {
             let t = ((p - a).dot(d) / l2).clamp(0.0, 1.0);
             (p - (a + d * t)).length()
         }
-        Seg::Arc { a, b, center, radius, a0, a1 } => {
+        Seg::Arc {
+            a,
+            b,
+            center,
+            radius,
+            a0,
+            a1,
+        } => {
             let v = p - center;
             if v.length() > 1e-9 && arc_covers(a0, a1, f32::atan2(v.y, v.x)) {
                 (v.length() - radius).abs()
@@ -621,7 +709,13 @@ pub fn point_seg_distance(p: Vec2, seg: &Seg) -> f32 {
 fn extremal_points(seg: &Seg, toward: Vec2) -> Vec<Vec2> {
     match *seg {
         Seg::Line { .. } => Vec::new(),
-        Seg::Arc { center, radius, a0, a1, .. } => {
+        Seg::Arc {
+            center,
+            radius,
+            a0,
+            a1,
+            ..
+        } => {
             if toward.length() < 1e-9 {
                 return Vec::new();
             }
@@ -715,7 +809,10 @@ mod distance_tests {
     use std::f32::consts::PI;
 
     fn line(ax: f32, ay: f32, bx: f32, by: f32) -> Seg {
-        Seg::Line { a: Vec2::new(ax, ay), b: Vec2::new(bx, by) }
+        Seg::Line {
+            a: Vec2::new(ax, ay),
+            b: Vec2::new(bx, by),
+        }
     }
 
     #[test]
@@ -753,12 +850,20 @@ mod distance_tests {
     #[test]
     fn arc_to_arc_uses_the_centre_line() {
         let right = Seg::Arc {
-            a: Vec2::new(0.0, 1.0), b: Vec2::new(0.0, -1.0),
-            center: Vec2::ZERO, radius: 1.0, a0: PI / 2.0, a1: -PI / 2.0,
+            a: Vec2::new(0.0, 1.0),
+            b: Vec2::new(0.0, -1.0),
+            center: Vec2::ZERO,
+            radius: 1.0,
+            a0: PI / 2.0,
+            a1: -PI / 2.0,
         };
         let left = Seg::Arc {
-            a: Vec2::new(10.0, 1.0), b: Vec2::new(10.0, -1.0),
-            center: Vec2::new(10.0, 0.0), radius: 1.0, a0: PI / 2.0, a1: 1.5 * PI,
+            a: Vec2::new(10.0, 1.0),
+            b: Vec2::new(10.0, -1.0),
+            center: Vec2::new(10.0, 0.0),
+            radius: 1.0,
+            a0: PI / 2.0,
+            a1: 1.5 * PI,
         };
         let d = seg_seg_distance(&right, &left);
         assert!((d - 8.0).abs() < 1e-4, "want 10 - 1 - 1 = 8, got {d}");
@@ -835,14 +940,26 @@ mod prune_verification {
         let _g = verifying();
         let apart = |x: f32| {
             vec![vec![vec![
-                Seg::Line { a: Vec2::new(x, 0.0), b: Vec2::new(x + 1.0, 0.0) },
-                Seg::Line { a: Vec2::new(x + 1.0, 0.0), b: Vec2::new(x + 1.0, 1.0) },
-                Seg::Line { a: Vec2::new(x + 1.0, 1.0), b: Vec2::new(x, 0.0) },
+                Seg::Line {
+                    a: Vec2::new(x, 0.0),
+                    b: Vec2::new(x + 1.0, 0.0),
+                },
+                Seg::Line {
+                    a: Vec2::new(x + 1.0, 0.0),
+                    b: Vec2::new(x + 1.0, 1.0),
+                },
+                Seg::Line {
+                    a: Vec2::new(x + 1.0, 1.0),
+                    b: Vec2::new(x, 0.0),
+                },
             ]]]
         };
         let mut regions = apart(0.0);
         regions.extend(apart(50.0));
         presplit_regions(&regions);
-        assert!(verify_prune(), "the flag must still be set inside the scope");
+        assert!(
+            verify_prune(),
+            "the flag must still be set inside the scope"
+        );
     }
 }

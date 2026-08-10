@@ -1,5 +1,4 @@
-
-use crate::layout::{Axis, GridCell, GridFootprint, Piece, SplitLine, partition_cells, PITCH};
+use crate::layout::{Axis, GridCell, GridFootprint, PITCH, Piece, SplitLine, partition_cells};
 
 pub const BED_MARGIN: f32 = 5.0;
 
@@ -11,19 +10,63 @@ pub struct PrinterProfile {
 }
 
 pub const PRINTER_PROFILES: &[PrinterProfile] = &[
-    PrinterProfile { name: "Bambu Lab A1 Mini", bed_width: 180, bed_depth: 180 },
-    PrinterProfile { name: "Bambu Lab P1S / X1C", bed_width: 256, bed_depth: 256 },
-    PrinterProfile { name: "Creality Ender 3 / V2", bed_width: 220, bed_depth: 220 },
-    PrinterProfile { name: "Creality K1", bed_width: 220, bed_depth: 220 },
-    PrinterProfile { name: "Elegoo Centauri Carbon", bed_width: 256, bed_depth: 256 },
-    PrinterProfile { name: "Prusa MK4 / MK3S+", bed_width: 250, bed_depth: 210 },
-    PrinterProfile { name: "Prusa Mini+", bed_width: 180, bed_depth: 180 },
-    PrinterProfile { name: "Voron 2.4 (250mm)", bed_width: 250, bed_depth: 250 },
-    PrinterProfile { name: "Voron 2.4 (300mm)", bed_width: 300, bed_depth: 300 },
-    PrinterProfile { name: "Custom", bed_width: 220, bed_depth: 220 },
+    PrinterProfile {
+        name: "Bambu Lab A1 Mini",
+        bed_width: 180,
+        bed_depth: 180,
+    },
+    PrinterProfile {
+        name: "Bambu Lab P1S / X1C",
+        bed_width: 256,
+        bed_depth: 256,
+    },
+    PrinterProfile {
+        name: "Creality Ender 3 / V2",
+        bed_width: 220,
+        bed_depth: 220,
+    },
+    PrinterProfile {
+        name: "Creality K1",
+        bed_width: 220,
+        bed_depth: 220,
+    },
+    PrinterProfile {
+        name: "Elegoo Centauri Carbon",
+        bed_width: 256,
+        bed_depth: 256,
+    },
+    PrinterProfile {
+        name: "Prusa MK4 / MK3S+",
+        bed_width: 250,
+        bed_depth: 210,
+    },
+    PrinterProfile {
+        name: "Prusa Mini+",
+        bed_width: 180,
+        bed_depth: 180,
+    },
+    PrinterProfile {
+        name: "Voron 2.4 (250mm)",
+        bed_width: 250,
+        bed_depth: 250,
+    },
+    PrinterProfile {
+        name: "Voron 2.4 (300mm)",
+        bed_width: 300,
+        bed_depth: 300,
+    },
+    PrinterProfile {
+        name: "Custom",
+        bed_width: 220,
+        bed_depth: 220,
+    },
 ];
 
-pub const DEFAULT_PRINTER: PrinterProfile = PrinterProfile { name: "Prusa MK4 / MK3S+", bed_width: 250, bed_depth: 210 };
+pub const DEFAULT_PRINTER: PrinterProfile = PrinterProfile {
+    name: "Prusa MK4 / MK3S+",
+    bed_width: 250,
+    bed_depth: 210,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BedFitResult {
@@ -122,10 +165,16 @@ fn build_plan(
 ) -> (Vec<SplitLine>, usize) {
     let mut lines = Vec::new();
     for rel in axis_split_indices(min_x, span_x, max_w) {
-        lines.push(SplitLine { axis: Axis::X, index: min_x + rel });
+        lines.push(SplitLine {
+            axis: Axis::X,
+            index: min_x + rel,
+        });
     }
     for rel in axis_split_indices(min_y, span_y, max_d) {
-        lines.push(SplitLine { axis: Axis::Y, index: min_y + rel });
+        lines.push(SplitLine {
+            axis: Axis::Y,
+            index: min_y + rel,
+        });
     }
     let n = lines.len();
     (lines, n)
@@ -140,8 +189,14 @@ pub fn compute_auto_split_lines(cells: &[GridCell], printer: PrinterProfile) -> 
 
     let mut best: Option<(Vec<SplitLine>, (usize, usize, i32))> = None;
     for (max_w, max_d) in [
-        (max_cells_for_bed(printer.bed_width), max_cells_for_bed(printer.bed_depth)),
-        (max_cells_for_bed(printer.bed_depth), max_cells_for_bed(printer.bed_width)),
+        (
+            max_cells_for_bed(printer.bed_width),
+            max_cells_for_bed(printer.bed_depth),
+        ),
+        (
+            max_cells_for_bed(printer.bed_depth),
+            max_cells_for_bed(printer.bed_width),
+        ),
     ] {
         let (lines, n) = build_plan(cells, min_x, span_x, min_y, span_y, max_w, max_d);
         let pieces = partition_cells(cells, &lines);
@@ -195,7 +250,11 @@ mod tests {
         assert!(!lines.is_empty(), "expected a split plan");
         let pieces = partition_cells(&c, &lines);
         for p in &pieces {
-            assert!(check_bed_fit(&p.cells, PRINTER_PROFILES[0]).fits, "piece {:?} too big", p.cells);
+            assert!(
+                check_bed_fit(&p.cells, PRINTER_PROFILES[0]).fits,
+                "piece {:?} too big",
+                p.cells
+            );
         }
     }
 

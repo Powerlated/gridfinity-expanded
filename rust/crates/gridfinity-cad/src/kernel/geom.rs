@@ -1,4 +1,3 @@
-
 use crate::kernel::math::Vec3;
 use std::f32::consts::PI;
 
@@ -28,7 +27,12 @@ pub enum Surface {
         u_dir: Vec3,
         v_dir: Vec3,
     },
-    Cylinder { base: Vec3, axis: Vec3, radius: f32, ref_dir: Vec3 },
+    Cylinder {
+        base: Vec3,
+        axis: Vec3,
+        radius: f32,
+        ref_dir: Vec3,
+    },
     Cone {
         apex: Vec3,
         axis: Vec3,
@@ -42,13 +46,22 @@ pub enum Surface {
         minor_r: f32,
         ref_dir: Vec3,
     },
-    Sphere { center: Vec3, axis: Vec3, radius: f32, ref_dir: Vec3 },
+    Sphere {
+        center: Vec3,
+        axis: Vec3,
+        radius: f32,
+        ref_dir: Vec3,
+    },
 }
 
 impl Surface {
     pub fn plane(origin: Vec3, normal: Vec3) -> Surface {
         let normal = normal.normalize();
-        let a = if normal.z.abs() < 0.9 { Vec3::Z } else { Vec3::X };
+        let a = if normal.z.abs() < 0.9 {
+            Vec3::Z
+        } else {
+            Vec3::X
+        };
         let u_dir = a.cross(normal).normalize();
         let v_dir = normal.cross(u_dir);
         Surface::Plane {
@@ -69,23 +82,49 @@ impl Surface {
     }
 
     pub fn cylinder_z(base: Vec3, radius: f32) -> Surface {
-        Surface::Cylinder { base, axis: Vec3::Z, radius, ref_dir: Vec3::X }
+        Surface::Cylinder {
+            base,
+            axis: Vec3::Z,
+            radius,
+            ref_dir: Vec3::X,
+        }
     }
 
     pub fn cylinder(base: Vec3, axis: Vec3, radius: f32, ref_dir: Vec3) -> Surface {
-        Surface::Cylinder { base, axis, radius, ref_dir }
+        Surface::Cylinder {
+            base,
+            axis,
+            radius,
+            ref_dir,
+        }
     }
 
     pub fn cone_z(apex: Vec3, half_angle: f32) -> Surface {
-        Surface::Cone { apex, axis: Vec3::Z, half_angle, ref_dir: Vec3::X }
+        Surface::Cone {
+            apex,
+            axis: Vec3::Z,
+            half_angle,
+            ref_dir: Vec3::X,
+        }
     }
 
     pub fn torus_z(center: Vec3, major_r: f32, minor_r: f32) -> Surface {
-        Surface::Torus { center, axis: Vec3::Z, major_r, minor_r, ref_dir: Vec3::X }
+        Surface::Torus {
+            center,
+            axis: Vec3::Z,
+            major_r,
+            minor_r,
+            ref_dir: Vec3::X,
+        }
     }
 
     pub fn sphere(center: Vec3, radius: f32) -> Surface {
-        Surface::Sphere { center, axis: Vec3::Z, radius, ref_dir: Vec3::X }
+        Surface::Sphere {
+            center,
+            axis: Vec3::Z,
+            radius,
+            ref_dir: Vec3::X,
+        }
     }
 
     #[inline]
@@ -102,7 +141,9 @@ impl Surface {
                 v_dir,
                 ..
             } => origin + u * u_dir + v * v_dir,
-            Surface::Cylinder { base, axis, radius, .. } => base + radius * radial + v * axis,
+            Surface::Cylinder {
+                base, axis, radius, ..
+            } => base + radius * radial + v * axis,
             Surface::Cone {
                 apex,
                 axis,
@@ -119,9 +160,12 @@ impl Surface {
                 minor_r,
                 ..
             } => center + (major_r + minor_r * v.cos()) * radial + minor_r * v.sin() * axis,
-            Surface::Sphere { center, axis, radius, .. } => {
-                center + radius * (v.sin() * radial + v.cos() * axis)
-            }
+            Surface::Sphere {
+                center,
+                axis,
+                radius,
+                ..
+            } => center + radius * (v.sin() * radial + v.cos() * axis),
         }
     }
 
@@ -129,7 +173,9 @@ impl Surface {
         match *self {
             Surface::Plane { normal, .. } => normal,
             Surface::Cylinder { .. } => radial.normalize(),
-            Surface::Cone { axis, half_angle, .. } => {
+            Surface::Cone {
+                axis, half_angle, ..
+            } => {
                 let sgn = if v >= 0.0 { -1.0 } else { 1.0 };
                 (half_angle.cos() * radial + sgn * half_angle.sin() * axis).normalize()
             }
@@ -157,18 +203,31 @@ impl Surface {
     pub fn signed_distance(&self, p: Vec3) -> f32 {
         match *self {
             Surface::Plane { origin, normal, .. } => (p - origin).dot(normal),
-            Surface::Cylinder { base, axis, radius, .. } => {
+            Surface::Cylinder {
+                base, axis, radius, ..
+            } => {
                 let d = p - base;
                 (d - axis * d.dot(axis)).length() - radius
             }
             Surface::Sphere { center, radius, .. } => (p - center).length() - radius,
-            Surface::Cone { apex, axis, half_angle, .. } => {
+            Surface::Cone {
+                apex,
+                axis,
+                half_angle,
+                ..
+            } => {
                 let d = p - apex;
                 let along = d.dot(axis);
                 let perp = (d - axis * along).length();
                 perp * half_angle.cos() - along.abs() * half_angle.sin()
             }
-            Surface::Torus { center, axis, major_r, minor_r, .. } => {
+            Surface::Torus {
+                center,
+                axis,
+                major_r,
+                minor_r,
+                ..
+            } => {
                 let d = p - center;
                 let along = d.dot(axis);
                 let perp = (d - axis * along).length();
@@ -190,7 +249,12 @@ impl Surface {
                 (d - axis * d.dot(axis)).normalize_or(axis)
             }
             Surface::Sphere { center, .. } => (p - center).normalize_or(Vec3::Z),
-            Surface::Cone { apex, axis, half_angle, .. } => {
+            Surface::Cone {
+                apex,
+                axis,
+                half_angle,
+                ..
+            } => {
                 let d = p - apex;
                 let along = d.dot(axis);
                 let radial = (d - axis * along).normalize_or(Vec3::ZERO);
@@ -200,7 +264,12 @@ impl Surface {
                 let side = if along < 0.0 { -1.0 } else { 1.0 };
                 (radial * half_angle.cos() - axis * side * half_angle.sin()).normalize()
             }
-            Surface::Torus { center, axis, major_r, .. } => {
+            Surface::Torus {
+                center,
+                axis,
+                major_r,
+                ..
+            } => {
                 let d = p - center;
                 let along = d.dot(axis);
                 let radial = (d - axis * along).normalize_or(Vec3::ZERO);
@@ -234,12 +303,22 @@ impl Surface {
                 let d = p - origin;
                 (d.dot(u_dir), d.dot(v_dir))
             }
-            Surface::Cylinder { base, axis, ref_dir: _, .. } => {
+            Surface::Cylinder {
+                base,
+                axis,
+                ref_dir: _,
+                ..
+            } => {
                 let rel = p - base;
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
                 (u, rel.dot(axis))
             }
-            Surface::Cone { apex, axis, ref_dir: _, .. } => {
+            Surface::Cone {
+                apex,
+                axis,
+                ref_dir: _,
+                ..
+            } => {
                 let rel = p - apex;
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
                 (u, rel.dot(axis))
@@ -258,7 +337,12 @@ impl Surface {
                 let v = wrap_angle(rel.dot(axis).atan2(ring));
                 (u, v)
             }
-            Surface::Sphere { center, axis, radius, ref_dir: _ } => {
+            Surface::Sphere {
+                center,
+                axis,
+                radius,
+                ref_dir: _,
+            } => {
                 let rel = (p - center) / radius;
                 let v = rel.dot(axis).clamp(-1.0, 1.0).acos();
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
@@ -281,7 +365,11 @@ impl Surface {
 
     pub fn prepare(&self) -> Prepared {
         let (d0, d1) = self.frame();
-        Prepared { surface: *self, d0, d1 }
+        Prepared {
+            surface: *self,
+            d0,
+            d1,
+        }
     }
 
     pub fn point(&self, uv: Uv) -> Vec3 {
@@ -352,14 +440,21 @@ fn wrap_angle(a: f32) -> f32 {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Curve {
-    Line { p0: Vec3, dir: Vec3 },
+    Line {
+        p0: Vec3,
+        dir: Vec3,
+    },
     Circle {
         center: Vec3,
         axis: Vec3,
         radius: f32,
         ref_dir: Vec3,
     },
-    Ellipse { center: Vec3, a: Vec3, b: Vec3 },
+    Ellipse {
+        center: Vec3,
+        a: Vec3,
+        b: Vec3,
+    },
     TorusSection {
         center: Vec3,
         axis: Vec3,
@@ -380,7 +475,12 @@ impl Curve {
     }
 
     pub fn circle_z(center: Vec3, radius: f32) -> Curve {
-        Curve::Circle { center, axis: Vec3::Z, radius, ref_dir: Vec3::X }
+        Curve::Circle {
+            center,
+            axis: Vec3::Z,
+            radius,
+            ref_dir: Vec3::X,
+        }
     }
 
     pub fn point(&self, t: f32) -> Vec3 {
@@ -396,7 +496,15 @@ impl Curve {
                 center + radius * (t.cos() * d0 + t.sin() * d1)
             }
             Curve::Ellipse { center, a, b } => center + t.cos() * a + t.sin() * b,
-            Curve::TorusSection { center, axis, ref_dir, major, minor, offset, branch } => {
+            Curve::TorusSection {
+                center,
+                axis,
+                ref_dir,
+                major,
+                minor,
+                offset,
+                branch,
+            } => {
                 let (d0, d1) = radial_frame(axis, ref_dir);
                 let rad = major + minor * t.cos();
                 let cos_u = (offset / rad).clamp(-1.0, 1.0);

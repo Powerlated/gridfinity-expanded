@@ -166,6 +166,7 @@ fn build_loop(req: &Receiver<usize>, out: &SyncSender<Piece>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rayon::prelude::*;
     use std::time::Instant;
 
     #[test]
@@ -176,8 +177,9 @@ mod tests {
         for f in probes {
             let (want_verts, want_tris) = build_frame(f);
             w.request(f);
+            let deadline = Instant::now() + std::time::Duration::from_secs(120);
             let mut got = None;
-            for _ in 0..2000 {
+            while Instant::now() < deadline {
                 if let Some((r, _)) = w.try_recv() {
                     got = Some(r);
                     break;
@@ -363,12 +365,14 @@ mod tests {
     #[test]
     fn face_shapes() {
         let p = cell_params();
+        let blobs: Vec<Vec<GridCell>> = (0..(10.0 * FPS) as usize)
+            .into_par_iter()
+            .flat_map_iter(|f| components(frame_bits(f)))
+            .collect();
         let mut best: Vec<GridCell> = Vec::new();
-        for f in 0..(10.0 * FPS) as usize {
-            for c in components(frame_bits(f)) {
-                if c.len() > best.len() {
-                    best = c;
-                }
+        for c in &blobs {
+            if c.len() > best.len() {
+                best = c.clone();
             }
         }
         let solid = gridfinity::build_piece(&p, &best, &best, None).unwrap();
@@ -432,20 +436,25 @@ mod tests {
         // The many-hole bridging path only fires on faces with thousands of
         // loops, which no ordinary bin produces -- these blobs are its only
         // real exercise, so sweep the sample rather than trusting one shape.
-        let (mut checked, mut cells_seen, mut leaky, mut total) = (0usize, 0usize, 0usize, 0usize);
-        for f in 0..(10.0 * FPS) as usize {
-            for c in components(frame_bits(f)) {
-                if c.len() < 40 {
-                    continue;
-                }
-                let s = gridfinity::build_piece(&p, &c, &c, None).unwrap();
+        let mut seen: std::collections::HashSet<Vec<(i32, i32)>> = std::collections::HashSet::new();
+        let sweep: Vec<&Vec<GridCell>> = blobs
+            .iter()
+            .filter(|c| c.len() >= 40)
+            .filter(|c| {
+                let mut key: Vec<(i32, i32)> = c.iter().map(|g| (g.x, g.y)).collect();
+                key.sort_unstable();
+                seen.insert(key)
+            })
+            .collect();
+        let (checked, cells_seen) = (sweep.len(), sweep.iter().map(|c| c.len()).sum::<usize>());
+        let (leaky, total) = sweep
+            .par_iter()
+            .map(|c| {
+                let s = gridfinity::build_piece(&p, c, c, None).unwrap();
                 let n = gridfinity_cad::tessellation_leaks(&tessellate(&s, 1)).len();
-                leaky += (n > 0) as usize;
-                total += n;
-                checked += 1;
-                cells_seen += c.len();
-            }
-        }
+                ((n > 0) as usize, n)
+            })
+            .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
         println!(
             "swept {checked} blobs ({cells_seen} cells): {leaky} leaky, {total} leak edges"
         );

@@ -1,4 +1,3 @@
-
 use crate::kernel::math::{Vec2, Vec3, weld_key};
 use crate::kernel::mesh::{Mesh, weld_triangles};
 use crate::kernel::topo::{EdgeId, Solid};
@@ -172,7 +171,11 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
             for &(e, fwd) in lp {
                 let samples = es.get(e);
                 for k in 0..samples.len() - 1 {
-                    let p = if fwd { samples[k] } else { samples[samples.len() - 1 - k] };
+                    let p = if fwd {
+                        samples[k]
+                    } else {
+                        samples[samples.len() - 1 - k]
+                    };
                     let p_uv = prep.project(p);
                     sc.pts3.push(p);
                     sc.uv.push(Vec2::new(p_uv.0, p_uv.1));
@@ -247,9 +250,15 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
         out.face_of_tri.reserve(sc.tris.len());
         for &[a, b, c] in &sc.tris {
             let (p, nm) = if flip {
-                ([sc.pts3[a], sc.pts3[c], sc.pts3[b]], [sc.nrm[a], sc.nrm[c], sc.nrm[b]])
+                (
+                    [sc.pts3[a], sc.pts3[c], sc.pts3[b]],
+                    [sc.nrm[a], sc.nrm[c], sc.nrm[b]],
+                )
             } else {
-                ([sc.pts3[a], sc.pts3[b], sc.pts3[c]], [sc.nrm[a], sc.nrm[b], sc.nrm[c]])
+                (
+                    [sc.pts3[a], sc.pts3[b], sc.pts3[c]],
+                    [sc.nrm[a], sc.nrm[b], sc.nrm[c]],
+                )
             };
             out.face_of_tri.push(fi);
             out.tris.push(Tri { pos: p, nrm: nm });
@@ -264,7 +273,6 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
     );
     out
 }
-
 
 fn tess_grid_face(
     solid: &crate::kernel::topo::Solid,
@@ -411,14 +419,21 @@ fn tess_grid_quad(
     let mut emit = |a: (usize, usize), b: (usize, usize), c: (usize, usize)| {
         let g = |q: (usize, usize)| sc.grid[q.0 * n + q.1];
         let nrm_at = |i: usize, j: usize| sc.gnrm[i * n + j];
-        let (pa, pb, pc) = if flip { (g(a), g(c), g(b)) } else { (g(a), g(b), g(c)) };
+        let (pa, pb, pc) = if flip {
+            (g(a), g(c), g(b))
+        } else {
+            (g(a), g(b), g(c))
+        };
         let (na, nb, nc) = if flip {
             (nrm_at(a.0, a.1), nrm_at(c.0, c.1), nrm_at(b.0, b.1))
         } else {
             (nrm_at(a.0, a.1), nrm_at(b.0, b.1), nrm_at(c.0, c.1))
         };
         out.face_of_tri.push(fid);
-        out.tris.push(Tri { pos: [pa, pb, pc], nrm: [na, nb, nc] });
+        out.tris.push(Tri {
+            pos: [pa, pb, pc],
+            nrm: [na, nb, nc],
+        });
     };
     for i in 0..m - 1 {
         for j in 0..n - 1 {
@@ -466,9 +481,12 @@ fn assert_tiles_the_loops(sc: &Scratch) {
     for (&(u, v), &n) in &seen {
         let want_n = if want.contains(&(u, v)) { 1 } else { 2 };
         assert_eq!(
-            n, want_n,
+            n,
+            want_n,
             "triangulation of a {}-loop face is not a tiling: edge ({:?}, {:?}) in {n} triangles, want {want_n}",
-            sc.spans.len(), sc.uv[u], sc.uv[v]
+            sc.spans.len(),
+            sc.uv[u],
+            sc.uv[v]
         );
     }
     for e in &want {

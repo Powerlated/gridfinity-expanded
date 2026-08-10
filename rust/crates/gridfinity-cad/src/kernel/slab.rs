@@ -1,9 +1,8 @@
-
 use crate::kernel::build::{RingEdges, ring, wall_seg};
-use crate::kernel::region2d::{presplit_regions, region_difference, region_union};
-use crate::kernel::sketch::{Seg, loop_area, point_in_segs};
 use crate::kernel::geom::Surface;
 use crate::kernel::math::{Vec3, vec3_of};
+use crate::kernel::region2d::{presplit_regions, region_difference, region_union};
+use crate::kernel::sketch::{Seg, loop_area, point_in_segs};
 use crate::kernel::topo::{Builder, Loop, Solid};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,8 +47,11 @@ pub fn plan_bands(ops: &[(Op, Slab)]) -> Result<(Vec<f32>, Vec<Vec<Vec<Seg>>>), 
         return Err("slab: empty stack".into());
     }
 
-    let split: Vec<Vec<Vec<Seg>>> =
-        presplit_regions(&ops.iter().map(|(_, s)| s.region.clone()).collect::<Vec<_>>());
+    let split: Vec<Vec<Vec<Seg>>> = presplit_regions(
+        &ops.iter()
+            .map(|(_, s)| s.region.clone())
+            .collect::<Vec<_>>(),
+    );
 
     let mut zs: Vec<f32> = ops.iter().flat_map(|(_, s)| [s.z0, s.z1]).collect();
     zs.sort_by(f32::total_cmp);
@@ -104,9 +106,10 @@ pub fn emit_slabs(
         }
         let below = if k == 0 { &empty } else { &bands[k - 1] };
         let above = if k == bands.len() { &empty } else { &bands[k] };
-        for (up, region) in
-            [(true, region_difference(below, above)), (false, region_difference(above, below))]
-        {
+        for (up, region) in [
+            (true, region_difference(below, above)),
+            (false, region_difference(above, below)),
+        ] {
             for (outer, holes) in group_loops(&region) {
                 let o = ring(b, &outer, z);
                 let hs: Vec<RingEdges> = holes.iter().map(|h| ring(b, h, z)).collect();
@@ -171,7 +174,11 @@ mod tests {
     use crate::kernel::tess::tessellate;
 
     fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<Vec<Seg>> {
-        vec![Sketch::rectangle((x0 + x1) * 0.5, (y0 + y1) * 0.5, x1 - x0, y1 - y0).loops.remove(0)]
+        vec![
+            Sketch::rectangle((x0 + x1) * 0.5, (y0 + y1) * 0.5, x1 - x0, y1 - y0)
+                .loops
+                .remove(0),
+        ]
     }
 
     fn circ(cx: f32, cy: f32, r: f32) -> Vec<Vec<Seg>> {
@@ -197,7 +204,11 @@ mod tests {
         }
         for (&(a, b), &n) in dir.iter() {
             assert_eq!(n, 1, "edge ({a},{b}) used {n}x");
-            assert_eq!(dir.get(&(b, a)).copied().unwrap_or(0), 1, "edge ({a},{b}) unpaired");
+            assert_eq!(
+                dir.get(&(b, a)).copied().unwrap_or(0),
+                1,
+                "edge ({a},{b}) unpaired"
+            );
         }
     }
 
@@ -217,7 +228,11 @@ mod tests {
         ])
         .expect("stacked union");
         watertight(&s);
-        assert!((volume(&s) - (2000.0 + 500.0)).abs() < 1e-2, "vol {}", volume(&s));
+        assert!(
+            (volume(&s) - (2000.0 + 500.0)).abs() < 1e-2,
+            "vol {}",
+            volume(&s)
+        );
     }
 
     #[test]
@@ -228,18 +243,29 @@ mod tests {
         ])
         .expect("overlapping union");
         watertight(&s);
-        assert!((volume(&s) - 175.0 * 4.0).abs() < 1e-2, "vol {}", volume(&s));
+        assert!(
+            (volume(&s) - 175.0 * 4.0).abs() < 1e-2,
+            "vol {}",
+            volume(&s)
+        );
     }
 
     #[test]
     fn pocket_difference_makes_walls() {
         let s = build_slabs(&[
             (Op::Union, Slab::new(rect(0.0, 0.0, 20.0, 20.0), 0.0, 10.0)),
-            (Op::Difference, Slab::new(rect(2.0, 2.0, 18.0, 18.0), 2.0, 10.0)),
+            (
+                Op::Difference,
+                Slab::new(rect(2.0, 2.0, 18.0, 18.0), 2.0, 10.0),
+            ),
         ])
         .expect("pocket");
         watertight(&s);
-        assert!((volume(&s) - (4000.0 - 256.0 * 8.0)).abs() < 1e-2, "vol {}", volume(&s));
+        assert!(
+            (volume(&s) - (4000.0 - 256.0 * 8.0)).abs() < 1e-2,
+            "vol {}",
+            volume(&s)
+        );
     }
 
     #[test]
@@ -251,7 +277,11 @@ mod tests {
         .expect("bore");
         watertight(&s);
         let expect = (400.0 - std::f32::consts::PI as f64 * 9.0) * 5.0;
-        assert!((volume(&s) - expect).abs() < 0.2, "vol {} vs {expect}", volume(&s));
+        assert!(
+            (volume(&s) - expect).abs() < 0.2,
+            "vol {} vs {expect}",
+            volume(&s)
+        );
     }
 
     #[test]
@@ -270,7 +300,10 @@ mod tests {
         emit_slabs(
             &mut b,
             &[(Op::Union, Slab::new(pocket.clone(), 2.0, 10.0))],
-            &SlabOpts { cavity: true, open_at: vec![10.0] },
+            &SlabOpts {
+                cavity: true,
+                open_at: vec![10.0],
+            },
         )
         .expect("carve pocket");
 
@@ -280,7 +313,11 @@ mod tests {
         let s = b.build();
         s.validate().expect("carved solid is manifold");
         watertight(&s);
-        assert!((volume(&s) - (4000.0 - 2048.0)).abs() < 1e-2, "vol {}", volume(&s));
+        assert!(
+            (volume(&s) - (4000.0 - 2048.0)).abs() < 1e-2,
+            "vol {}",
+            volume(&s)
+        );
     }
 
     #[test]
@@ -292,6 +329,10 @@ mod tests {
         .expect("blind bore");
         watertight(&s);
         let expect = 4000.0 - std::f32::consts::PI as f64 * 9.0 * 6.0;
-        assert!((volume(&s) - expect).abs() < 0.2, "vol {} vs {expect}", volume(&s));
+        assert!(
+            (volume(&s) - expect).abs() < 0.2,
+            "vol {} vs {expect}",
+            volume(&s)
+        );
     }
 }

@@ -75,8 +75,11 @@ fn components(solid: &Solid) -> (Vec<usize>, usize) {
     let loops: Vec<(usize, u32)> = (0..solid.faces.len())
         .flat_map(|f| solid.loop_ids(f).map(move |l| (f, l)))
         .collect();
-    let index: std::collections::HashMap<u32, usize> =
-        loops.iter().enumerate().map(|(i, &(_, l))| (l, i)).collect();
+    let index: std::collections::HashMap<u32, usize> = loops
+        .iter()
+        .enumerate()
+        .map(|(i, &(_, l))| (l, i))
+        .collect();
     let mut parent: Vec<usize> = (0..loops.len()).collect();
     fn find(parent: &mut Vec<usize>, mut x: usize) -> usize {
         while parent[x] != x {
@@ -85,7 +88,8 @@ fn components(solid: &Solid) -> (Vec<usize>, usize) {
         }
         x
     }
-    let mut by_edge: std::collections::HashMap<EdgeId, Vec<usize>> = std::collections::HashMap::new();
+    let mut by_edge: std::collections::HashMap<EdgeId, Vec<usize>> =
+        std::collections::HashMap::new();
     for &(_, lid) in &loops {
         for &(e, _) in solid.loop_by_id(lid) {
             by_edge.entry(e).or_default().push(index[&lid]);
@@ -117,7 +121,9 @@ pub fn misoriented_loops(solid: &Solid) -> Vec<(usize, u32)> {
     let (label, n) = components(solid);
     let mut vote = vec![0.0f32; n];
     for (i, &(fid, lid)) in loops.iter().enumerate() {
-        let Some(a) = outward_area(solid, fid, lid) else { continue };
+        let Some(a) = outward_area(solid, fid, lid) else {
+            continue;
+        };
         let outer = solid.loop_ids(fid).next() == Some(lid);
         let want = if outer { 1.0 } else { -1.0 };
         vote[label[i]] += a * want;
@@ -185,7 +191,8 @@ mod tests {
         assert!(flipped > 0, "reversing every loop must break the invariant");
         normalize(&mut raw);
         assert!(misoriented_loops(&raw).is_empty());
-        raw.validate().expect("renormalising restores a manifold solid");
+        raw.validate()
+            .expect("renormalising restores a manifold solid");
     }
 
     #[test]
@@ -193,7 +200,9 @@ mod tests {
         let solid = crate::gridfinity::build(&crate::gridfinity::Params::rect(2, 1));
         let before = signed_volume(&solid);
         let mut flipped = solid.clone();
-        let all: Vec<u32> = (0..flipped.faces.len()).flat_map(|f| flipped.loop_ids(f)).collect();
+        let all: Vec<u32> = (0..flipped.faces.len())
+            .flat_map(|f| flipped.loop_ids(f))
+            .collect();
         for lid in all {
             flipped.reverse_loop(lid);
         }
@@ -205,4 +214,3 @@ mod tests {
         );
     }
 }
-

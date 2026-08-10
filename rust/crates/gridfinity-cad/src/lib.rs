@@ -1,5 +1,3 @@
-﻿
-
 pub mod kernel;
 
 #[cfg(feature = "badapple")]
@@ -10,7 +8,9 @@ pub mod printers;
 pub mod region;
 
 pub use gridfinity::{Params, build as build_gridfinity};
-pub use kernel::audit::{audit, tessellation_leaks, AuditReport, Defect, Severity, Category, TessLeak};
+pub use kernel::audit::{
+    AuditReport, Category, Defect, Severity, TessLeak, audit, tessellation_leaks,
+};
 pub use kernel::mesh::Mesh;
 pub use kernel::tess::{Tessellation, tessellate};
 pub use kernel::topo::Solid;
@@ -23,11 +23,11 @@ static TEST_ALLOC: kernel::perf::CountingAlloc<mimalloc::MiMalloc> =
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gridfinity::{BinSlope, LogicalBin, Mode, SlopeDir};
     use crate::kernel::build::{Ring, extrude, loft};
     use crate::kernel::geom;
-    use crate::gridfinity::{BinSlope, LogicalBin, Mode, SlopeDir};
-    use crate::layout::{Axis, GridCell, GridEdge, Orientation, SplitLine};
     use crate::kernel::sketch::Sketch;
+    use crate::layout::{Axis, GridCell, GridEdge, Orientation, SplitLine};
     use std::collections::HashMap;
 
     static PERF_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -66,7 +66,10 @@ mod tests {
         assert_eq!(buffer.len(), mesh.indices.len() * 6);
         for v in buffer.chunks_exact(6) {
             let p = kernel::math::Vec3::new(v[0], v[1], v[2]);
-            assert!(welded.contains(&kernel::math::weld_key(p)), "{p:?} is not a welded position");
+            assert!(
+                welded.contains(&kernel::math::weld_key(p)),
+                "{p:?} is not a welded position"
+            );
             assert!((kernel::math::Vec3::new(v[3], v[4], v[5]).length() - 1.0).abs() < 1e-3);
         }
 
@@ -120,10 +123,17 @@ mod tests {
                     continue;
                 }
                 let p = curve.point(t) - center;
-                assert!((p.x - offset).abs() < 1e-4, "offset {offset} t {t}: x {}", p.x);
+                assert!(
+                    (p.x - offset).abs() < 1e-4,
+                    "offset {offset} t {t}: x {}",
+                    p.x
+                );
                 let radial = (p.x * p.x + p.y * p.y).sqrt() - major;
                 let on_torus = radial * radial + p.z * p.z - minor * minor;
-                assert!(on_torus.abs() < 1e-3, "offset {offset} t {t}: torus residual {on_torus}");
+                assert!(
+                    on_torus.abs() < 1e-3,
+                    "offset {offset} t {t}: torus residual {on_torus}"
+                );
             }
         }
     }
@@ -174,7 +184,10 @@ mod tests {
     fn sloped_model_is_a_runnable_program() {
         use crate::kernel::program;
         let mut p = gridfinity::Params::default();
-        p.bins[0].slope = Some(BinSlope { angle_deg: 15.0, dir: SlopeDir::PlusX });
+        p.bins[0].slope = Some(BinSlope {
+            angle_deg: 15.0,
+            dir: SlopeDir::PlusX,
+        });
         let prog = gridfinity::program(&p);
         for n in 0..=prog.len() {
             program::run(&prog, |i| i < n)
@@ -220,10 +233,22 @@ mod tests {
         let r1 = Sketch::rounded_rect(0.0, 0.0, 37.2, 37.2, 1.5);
         let r2 = Sketch::rounded_rect(0.0, 0.0, 41.5, 41.5, 3.75);
         let solid = loft(&[
-            Ring { z: 0.0, sketch: &r0 },
-            Ring { z: 0.8, sketch: &r1 },
-            Ring { z: 2.6, sketch: &r1 },
-            Ring { z: 4.75, sketch: &r2 },
+            Ring {
+                z: 0.0,
+                sketch: &r0,
+            },
+            Ring {
+                z: 0.8,
+                sketch: &r1,
+            },
+            Ring {
+                z: 2.6,
+                sketch: &r1,
+            },
+            Ring {
+                z: 4.75,
+                sketch: &r2,
+            },
         ]);
         let _mesh = tessellate(&solid, 6).to_mesh();
     }
@@ -265,7 +290,10 @@ mod tests {
     #[test]
     fn l_shaped_bin_is_watertight() {
         let p = gridfinity::Params {
-            bins: vec![LogicalBin { cells: cells(&[(0, 0), (1, 0), (0, 1)]), ..Default::default() }],
+            bins: vec![LogicalBin {
+                cells: cells(&[(0, 0), (1, 0), (0, 1)]),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         let solid = gridfinity::build(&p);
@@ -279,8 +307,14 @@ mod tests {
     fn two_logical_bins_are_watertight() {
         let p = gridfinity::Params {
             bins: vec![
-                LogicalBin { cells: cells(&[(0, 0)]), ..Default::default() },
-                LogicalBin { cells: cells(&[(1, 0), (2, 0)]), ..Default::default() },
+                LogicalBin {
+                    cells: cells(&[(0, 0)]),
+                    ..Default::default()
+                },
+                LogicalBin {
+                    cells: cells(&[(1, 0), (2, 0)]),
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };
@@ -296,15 +330,27 @@ mod tests {
     #[test]
     fn partial_divider_finger_is_watertight() {
         let p = gridfinity::Params {
-            divider_edges: vec![GridEdge { x: 1, y: 0, orientation: Orientation::V }],
+            divider_edges: vec![GridEdge {
+                x: 1,
+                y: 0,
+                orientation: Orientation::V,
+            }],
             ..gridfinity::Params::rect(2, 2)
         };
         let solid = gridfinity::build(&p);
         let _mesh = tessellate(&solid, 6).to_mesh();
         let full = gridfinity::Params {
             divider_edges: vec![
-                GridEdge { x: 1, y: 0, orientation: Orientation::V },
-                GridEdge { x: 1, y: 1, orientation: Orientation::V },
+                GridEdge {
+                    x: 1,
+                    y: 0,
+                    orientation: Orientation::V,
+                },
+                GridEdge {
+                    x: 1,
+                    y: 1,
+                    orientation: Orientation::V,
+                },
             ],
             ..gridfinity::Params::rect(2, 2)
         };
@@ -327,7 +373,10 @@ mod tests {
     fn l_shaped_baseplate_is_watertight() {
         let p = gridfinity::Params {
             mode: Mode::Baseplate,
-            bins: vec![LogicalBin { cells: cells(&[(0, 0), (1, 0), (1, 1)]), ..Default::default() }],
+            bins: vec![LogicalBin {
+                cells: cells(&[(0, 0), (1, 0), (1, 1)]),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         let _solid = gridfinity::build(&p);
@@ -335,9 +384,11 @@ mod tests {
 
     #[test]
     fn featured_bins_stay_watertight() {
-        for (magnet, screw, dx, dy, fillet) in
-            [(true, false, 2, 1, 3.0), (false, true, 1, 3, 0.0), (true, true, 2, 2, 2.0)]
-        {
+        for (magnet, screw, dx, dy, fillet) in [
+            (true, false, 2, 1, 3.0),
+            (false, true, 1, 3, 0.0),
+            (true, true, 2, 2, 2.0),
+        ] {
             let base = gridfinity::Params::rect(dx.max(2), dy.max(2)).divisions(dx - 1, dy - 1);
             let p = gridfinity::Params {
                 magnet_holes: magnet,
@@ -360,12 +411,19 @@ mod tests {
         let header_tris = u32::from_le_bytes(stl[80..84].try_into().unwrap()) as usize;
         assert_eq!(header_tris, mesh.tri_count());
         assert_eq!(stl.len(), 84 + 50 * header_tris);
-        assert!(header_tris > 200, "a real bin should have many facets, got {header_tris}");
+        assert!(
+            header_tris > 200,
+            "a real bin should have many facets, got {header_tris}"
+        );
     }
 
     #[test]
     fn divider_edges_split_bin_is_watertight() {
-        let divider = vec![GridEdge { x: 1, y: 0, orientation: Orientation::V }];
+        let divider = vec![GridEdge {
+            x: 1,
+            y: 0,
+            orientation: Orientation::V,
+        }];
         let p = gridfinity::Params {
             divider_edges: divider,
             ..gridfinity::Params::rect(3, 1)
@@ -385,25 +443,59 @@ mod tests {
     fn uneven_dividers_stay_watertight() {
         let mut dividers = Vec::new();
         for y in 0..3 {
-            dividers.push(GridEdge { x: 1, y, orientation: Orientation::V });
-            dividers.push(GridEdge { x: 3, y, orientation: Orientation::V });
+            dividers.push(GridEdge {
+                x: 1,
+                y,
+                orientation: Orientation::V,
+            });
+            dividers.push(GridEdge {
+                x: 3,
+                y,
+                orientation: Orientation::V,
+            });
         }
         for x in 0..4 {
-            dividers.push(GridEdge { x, y: 2, orientation: Orientation::H });
+            dividers.push(GridEdge {
+                x,
+                y: 2,
+                orientation: Orientation::H,
+            });
         }
-        let p = gridfinity::Params { divider_edges: dividers, ..gridfinity::Params::rect(4, 3) };
+        let p = gridfinity::Params {
+            divider_edges: dividers,
+            ..gridfinity::Params::rect(4, 3)
+        };
         let _solid = gridfinity::build(&p);
     }
 
     #[test]
     fn divider_ring_island_is_watertight() {
         let dividers = vec![
-            GridEdge { x: 1, y: 1, orientation: Orientation::V },
-            GridEdge { x: 2, y: 1, orientation: Orientation::V },
-            GridEdge { x: 1, y: 1, orientation: Orientation::H },
-            GridEdge { x: 1, y: 2, orientation: Orientation::H },
+            GridEdge {
+                x: 1,
+                y: 1,
+                orientation: Orientation::V,
+            },
+            GridEdge {
+                x: 2,
+                y: 1,
+                orientation: Orientation::V,
+            },
+            GridEdge {
+                x: 1,
+                y: 1,
+                orientation: Orientation::H,
+            },
+            GridEdge {
+                x: 1,
+                y: 2,
+                orientation: Orientation::H,
+            },
         ];
-        let p = gridfinity::Params { divider_edges: dividers, ..gridfinity::Params::rect(3, 3) };
+        let p = gridfinity::Params {
+            divider_edges: dividers,
+            ..gridfinity::Params::rect(3, 3)
+        };
         let _solid = gridfinity::build(&p);
     }
 
@@ -463,7 +555,10 @@ mod tests {
         let full_mesh = tessellate(&gridfinity::build(&full), 6).to_mesh();
         let dv_full = signed_volume(&full_mesh) - signed_volume(&base);
         assert!(dv > 100.0, "partial wall adds material, dv={dv}");
-        assert!(dv_full > dv + 100.0, "full wall adds more, {dv_full} vs {dv}");
+        assert!(
+            dv_full > dv + 100.0,
+            "full wall adds more, {dv_full} vs {dv}"
+        );
     }
 
     #[test]
@@ -505,7 +600,10 @@ mod tests {
             _ => false,
         });
         assert!(ramp, "wall-top runout blend is missing");
-        let ell = solid.edges.iter().any(|e| matches!(e.curve, geom::Curve::Ellipse { .. }));
+        let ell = solid
+            .edges
+            .iter()
+            .any(|e| matches!(e.curve, geom::Curve::Ellipse { .. }));
         assert!(ell, "runout ellipse is missing");
     }
 
@@ -523,7 +621,9 @@ mod tests {
             ..gridfinity::Params::default()
         };
         let solid = gridfinity::build(&p);
-        solid.validate().expect("crossing inner-wall topology valid");
+        solid
+            .validate()
+            .expect("crossing inner-wall topology valid");
         let mesh = tessellate(&solid, 6).to_mesh();
         assert_watertight(&mesh);
         let base = tessellate(&gridfinity::build(&gridfinity::Params::default()), 6).to_mesh();
@@ -568,8 +668,16 @@ mod tests {
         let closed_mesh = tessellate(&gridfinity::build(&closed), 6).to_mesh();
         let open = gridfinity::Params {
             open_edges: vec![
-                GridEdge { x: 0, y: 2, orientation: Orientation::H },
-                GridEdge { x: 1, y: 2, orientation: Orientation::H },
+                GridEdge {
+                    x: 0,
+                    y: 2,
+                    orientation: Orientation::H,
+                },
+                GridEdge {
+                    x: 1,
+                    y: 2,
+                    orientation: Orientation::H,
+                },
             ],
             ..gridfinity::Params::default()
         };
@@ -582,13 +690,21 @@ mod tests {
             "removing a wall must remove material"
         );
         let (min, max) = mesh.bounds();
-        assert!((max.y - min.y - 83.5).abs() < 1e-2, "depth {}", max.y - min.y);
+        assert!(
+            (max.y - min.y - 83.5).abs() < 1e-2,
+            "depth {}",
+            max.y - min.y
+        );
     }
 
     #[test]
     fn single_open_edge_and_corner_pinch_watertight() {
         let p = gridfinity::Params {
-            open_edges: vec![GridEdge { x: 0, y: 2, orientation: Orientation::H }],
+            open_edges: vec![GridEdge {
+                x: 0,
+                y: 2,
+                orientation: Orientation::H,
+            }],
             ..gridfinity::Params::default()
         };
         let _solid = gridfinity::build(&p);
@@ -600,7 +716,10 @@ mod tests {
         for e in crate::layout::perimeter_edges(&cells(&[(0, 0)])) {
             open_edges.push(e);
         }
-        let p = gridfinity::Params { open_edges, ..gridfinity::Params::rect(1, 1) };
+        let p = gridfinity::Params {
+            open_edges,
+            ..gridfinity::Params::rect(1, 1)
+        };
         let solid = gridfinity::build(&p);
         solid.validate().expect("fully-open bin topology valid");
         let mesh = tessellate(&solid, 6).to_mesh();
@@ -613,10 +732,22 @@ mod tests {
     fn open_edge_with_divider_finger_watertight() {
         let p = gridfinity::Params {
             open_edges: vec![
-                GridEdge { x: 0, y: 1, orientation: Orientation::H },
-                GridEdge { x: 1, y: 1, orientation: Orientation::H },
+                GridEdge {
+                    x: 0,
+                    y: 1,
+                    orientation: Orientation::H,
+                },
+                GridEdge {
+                    x: 1,
+                    y: 1,
+                    orientation: Orientation::H,
+                },
             ],
-            divider_edges: vec![GridEdge { x: 1, y: 0, orientation: Orientation::V }],
+            divider_edges: vec![GridEdge {
+                x: 1,
+                y: 0,
+                orientation: Orientation::V,
+            }],
             ..gridfinity::Params::rect(2, 1)
         };
         let _solid = gridfinity::build(&p);
@@ -625,11 +756,16 @@ mod tests {
     #[test]
     fn split_bin_pieces_are_watertight() {
         let mut p = gridfinity::Params::rect(3, 1);
-        p.bins[0].split_lines = vec![SplitLine { axis: Axis::X, index: 1 }];
+        p.bins[0].split_lines = vec![SplitLine {
+            axis: Axis::X,
+            index: 1,
+        }];
         let pieces = gridfinity::build_pieces(&p);
         assert_eq!(pieces.len(), 2);
         for pc in &pieces {
-            pc.solid.validate().unwrap_or_else(|e| panic!("{}: {e}", pc.name));
+            pc.solid
+                .validate()
+                .unwrap_or_else(|e| panic!("{}: {e}", pc.name));
             let mesh = tessellate(&pc.solid, 6).to_mesh();
             assert_watertight(&mesh);
         }
@@ -641,19 +777,31 @@ mod tests {
     #[test]
     fn split_seam_divider_walls_both_pieces() {
         let mut p = gridfinity::Params::rect(2, 1);
-        p.bins[0].split_lines = vec![SplitLine { axis: Axis::X, index: 1 }];
-        p.divider_edges = vec![GridEdge { x: 1, y: 0, orientation: Orientation::V }];
+        p.bins[0].split_lines = vec![SplitLine {
+            axis: Axis::X,
+            index: 1,
+        }];
+        p.divider_edges = vec![GridEdge {
+            x: 1,
+            y: 0,
+            orientation: Orientation::V,
+        }];
         let pieces = gridfinity::build_pieces(&p);
         assert_eq!(pieces.len(), 2);
         let mut volumes = Vec::new();
         for pc in &pieces {
-            pc.solid.validate().unwrap_or_else(|e| panic!("{}: {e}", pc.name));
+            pc.solid
+                .validate()
+                .unwrap_or_else(|e| panic!("{}: {e}", pc.name));
             let mesh = tessellate(&pc.solid, 6).to_mesh();
             assert_watertight(&mesh);
             volumes.push(signed_volume(&mesh));
         }
         let mut p_open = gridfinity::Params::rect(2, 1);
-        p_open.bins[0].split_lines = vec![SplitLine { axis: Axis::X, index: 1 }];
+        p_open.bins[0].split_lines = vec![SplitLine {
+            axis: Axis::X,
+            index: 1,
+        }];
         let open_pieces = gridfinity::build_pieces(&p_open);
         let open_vol: f64 = open_pieces
             .iter()
@@ -671,11 +819,16 @@ mod tests {
             }],
             ..gridfinity::Params::default()
         };
-        p.bins[0].split_lines = vec![SplitLine { axis: Axis::Y, index: 1 }];
+        p.bins[0].split_lines = vec![SplitLine {
+            axis: Axis::Y,
+            index: 1,
+        }];
         let pieces = gridfinity::build_pieces(&p);
         assert_eq!(pieces.len(), 2);
         for pc in &pieces {
-            pc.solid.validate().unwrap_or_else(|e| panic!("{}: {e}", pc.name));
+            pc.solid
+                .validate()
+                .unwrap_or_else(|e| panic!("{}: {e}", pc.name));
             assert_watertight(&tessellate(&pc.solid, 6).to_mesh());
         }
     }
@@ -690,8 +843,11 @@ mod tests {
             ..gridfinity::Params::default()
         };
         let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap();
-        let corner = gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(1, 0)])).unwrap();
-        let ell = gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(0, 0), (0, 1), (1, 1)])).unwrap();
+        let corner =
+            gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(1, 0)])).unwrap();
+        let ell =
+            gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(0, 0), (0, 1), (1, 1)]))
+                .unwrap();
         for piece in [&corner, &ell] {
             piece.validate().expect("manifold");
             assert_watertight(&tessellate(piece, 6).to_mesh());
@@ -706,7 +862,10 @@ mod tests {
 
     fn carve_conserves_volume(shape: &[(i32, i32)], parts: &[&[(i32, i32)]], height_units: u32) {
         let p = gridfinity::Params {
-            bins: vec![LogicalBin { cells: cells(shape), ..Default::default() }],
+            bins: vec![LogicalBin {
+                cells: cells(shape),
+                ..Default::default()
+            }],
             height_units,
             ..gridfinity::Params::default()
         };
@@ -731,7 +890,11 @@ mod tests {
 
     #[test]
     fn carving_a_reentrant_bin_keeps_the_corner_fillet_that_overhangs_the_grid() {
-        carve_conserves_volume(&[(0, 0), (1, 0), (1, 1)], &[&[(0, 0)], &[(1, 0), (1, 1)]], 4);
+        carve_conserves_volume(
+            &[(0, 0), (1, 0), (1, 1)],
+            &[&[(0, 0)], &[(1, 0), (1, 1)]],
+            4,
+        );
         carve_conserves_volume(
             &[(0, 0), (1, 0), (2, 0), (1, 1)],
             &[&[(1, 1)], &[(0, 0), (1, 0), (2, 0)]],
@@ -752,7 +915,10 @@ mod tests {
             4,
         );
         let p = gridfinity::Params {
-            bins: vec![LogicalBin { cells: cells(&[(0, 0), (1, 0), (2, 0)]), ..Default::default() }],
+            bins: vec![LogicalBin {
+                cells: cells(&[(0, 0), (1, 0), (2, 0)]),
+                ..Default::default()
+            }],
             height_units: 4,
             ..gridfinity::Params::default()
         };
@@ -773,7 +939,11 @@ mod tests {
             }
             (n, inners)
         };
-        assert_eq!(rim_faces(&whole), (1, 1), "the whole strip's rim is one face around one cavity");
+        assert_eq!(
+            rim_faces(&whole),
+            (1, 1),
+            "the whole strip's rim is one face around one cavity"
+        );
         assert_eq!(
             rim_faces(&middle),
             (2, 0),
@@ -786,16 +956,21 @@ mod tests {
         for wall_thickness in [0.4f32, 0.8, 1.0, 1.2, 2.0, 3.0] {
             for cavity_corner_radius in [0.0f32, 0.5, 1.0, 2.5, 4.0] {
                 let p = gridfinity::Params {
-                    bins: vec![LogicalBin { cells: cells(&[(0, 0)]), ..Default::default() }],
+                    bins: vec![LogicalBin {
+                        cells: cells(&[(0, 0)]),
+                        ..Default::default()
+                    }],
                     wall_thickness,
                     cavity_corner_radius,
                     ..gridfinity::Params::default()
                 };
-                let solid = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None)
-                    .unwrap_or_else(|e| panic!("wt {wall_thickness} rc {cavity_corner_radius}: {e}"));
-                solid
-                    .validate()
-                    .unwrap_or_else(|e| panic!("wt {wall_thickness} rc {cavity_corner_radius}: {e}"));
+                let solid =
+                    gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap_or_else(|e| {
+                        panic!("wt {wall_thickness} rc {cavity_corner_radius}: {e}")
+                    });
+                solid.validate().unwrap_or_else(|e| {
+                    panic!("wt {wall_thickness} rc {cavity_corner_radius}: {e}")
+                });
             }
         }
     }
@@ -805,10 +980,23 @@ mod tests {
         for shape in [
             vec![(1, 0), (0, 1), (1, 1), (2, 1), (1, 2)],
             vec![(0, 0), (1, 0), (0, 1), (1, 1), (2, 1), (1, 2)],
-            vec![(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1), (0, 2), (1, 2), (2, 2)],
+            vec![
+                (0, 0),
+                (1, 0),
+                (2, 0),
+                (0, 1),
+                (1, 1),
+                (2, 1),
+                (0, 2),
+                (1, 2),
+                (2, 2),
+            ],
         ] {
             let p = gridfinity::Params {
-                bins: vec![LogicalBin { cells: cells(&shape), ..Default::default() }],
+                bins: vec![LogicalBin {
+                    cells: cells(&shape),
+                    ..Default::default()
+                }],
                 ..gridfinity::Params::default()
             };
             let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap();
@@ -846,13 +1034,26 @@ mod tests {
     #[test]
     fn a_full_height_island_in_a_banded_cavity_gets_one_top_face_not_two() {
         let p = gridfinity::Params {
-            bins: vec![LogicalBin { cells: cells(&[(0, 0), (0, 1)]), ..Default::default() }],
+            bins: vec![LogicalBin {
+                cells: cells(&[(0, 0), (0, 1)]),
+                ..Default::default()
+            }],
             inner_walls: vec![
                 gridfinity::InnerWall {
-                    x1: 20.0, y1: 2.0, x2: 10.0, y2: 60.0, width: 2.0, height: None,
+                    x1: 20.0,
+                    y1: 2.0,
+                    x2: 10.0,
+                    y2: 60.0,
+                    width: 2.0,
+                    height: None,
                 },
                 gridfinity::InnerWall {
-                    x1: 40.0, y1: 20.0, x2: -40.0, y2: 110.0, width: 2.0, height: Some(10.0),
+                    x1: 40.0,
+                    y1: 20.0,
+                    x2: -40.0,
+                    y2: 110.0,
+                    width: 2.0,
+                    height: Some(10.0),
                 },
             ],
             ..gridfinity::Params::default()
@@ -868,17 +1069,37 @@ mod tests {
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         fn legal(v: &[f32]) -> bool {
-            let l0 = ((v[2]-v[0]).powi(2) + (v[3]-v[1]).powi(2)).sqrt();
-            let l1 = ((v[7]-v[5]).powi(2) + (v[8]-v[6]).powi(2)).sqrt();
-            l0 > 5.0 && l1 > 5.0 && (0.8..=8.0).contains(&v[4]) && (0.8..=8.0).contains(&v[9])
+            let l0 = ((v[2] - v[0]).powi(2) + (v[3] - v[1]).powi(2)).sqrt();
+            let l1 = ((v[7] - v[5]).powi(2) + (v[8] - v[6]).powi(2)).sqrt();
+            l0 > 5.0
+                && l1 > 5.0
+                && (0.8..=8.0).contains(&v[4])
+                && (0.8..=8.0).contains(&v[9])
                 && (2.0..=18.0).contains(&v[10])
         }
         fn outcome(v: &[f32]) -> String {
             let walls = vec![
-                InnerWall { x1: v[0], y1: v[1], x2: v[2], y2: v[3], width: v[4], height: None },
-                InnerWall { x1: v[5], y1: v[6], x2: v[7], y2: v[8], width: v[9], height: Some(v[10]) },
+                InnerWall {
+                    x1: v[0],
+                    y1: v[1],
+                    x2: v[2],
+                    y2: v[3],
+                    width: v[4],
+                    height: None,
+                },
+                InnerWall {
+                    x1: v[5],
+                    y1: v[6],
+                    x2: v[7],
+                    y2: v[8],
+                    width: v[9],
+                    height: Some(v[10]),
+                },
             ];
-            let p = gridfinity::Params { inner_walls: walls, ..gridfinity::Params::default() };
+            let p = gridfinity::Params {
+                inner_walls: walls,
+                ..gridfinity::Params::default()
+            };
             let b = &p.bins[0];
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 gridfinity::build_piece(&p, &b.cells, &b.cells, b.slope)
@@ -886,40 +1107,75 @@ mod tests {
             match r {
                 Ok(Ok(s)) => match s.validate() {
                     Ok(()) => "VALID".into(),
-                    Err(e) => e.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect(),
+                    Err(e) => e
+                        .chars()
+                        .map(|c| if c.is_ascii_digit() { '#' } else { c })
+                        .collect(),
                 },
-                Ok(Err(e)) => e.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect(),
+                Ok(Err(e)) => e
+                    .chars()
+                    .map(|c| if c.is_ascii_digit() { '#' } else { c })
+                    .collect(),
                 Err(_) => "PANIC".into(),
             }
         }
-        let names = ["w0.x1","w0.y1","w0.x2","w0.y2","w0.width","w1.x1","w1.y1","w1.x2","w1.y2","w1.width","w1.height"];
-        let mut v: Vec<f32> = vec![51.0, 20.5, 20.5, 58.5, 3.2, 7.0, 30.5, 41.0, 60.5, 3.4, 12.5];
+        let names = [
+            "w0.x1",
+            "w0.y1",
+            "w0.x2",
+            "w0.y2",
+            "w0.width",
+            "w1.x1",
+            "w1.y1",
+            "w1.x2",
+            "w1.y2",
+            "w1.width",
+            "w1.height",
+        ];
+        let mut v: Vec<f32> = vec![
+            51.0, 20.5, 20.5, 58.5, 3.2, 7.0, 30.5, 41.0, 60.5, 3.4, 12.5,
+        ];
         let target = outcome(&v);
         println!("start: {target}");
         for _ in 0..3 {
             for i in 0..v.len() {
                 let orig = v[i];
                 let mut cands: Vec<f32> = vec![
-                    (orig / 21.0).round() * 21.0, (orig / 10.0).round() * 10.0,
-                    (orig / 5.0).round() * 5.0, orig.round(),
+                    (orig / 21.0).round() * 21.0,
+                    (orig / 10.0).round() * 10.0,
+                    (orig / 5.0).round() * 5.0,
+                    orig.round(),
                 ];
-                if i == 4 || i == 9 { cands.insert(0, 2.0); }
-                if i == 10 { cands.insert(0, 7.0); }
+                if i == 4 || i == 9 {
+                    cands.insert(0, 2.0);
+                }
+                if i == 10 {
+                    cands.insert(0, 7.0);
+                }
                 for c in cands {
-                    if (c - orig).abs() < 1e-6 { continue; }
+                    if (c - orig).abs() < 1e-6 {
+                        continue;
+                    }
                     v[i] = c;
-                    if !legal(&v) { v[i] = orig; continue; }
+                    if !legal(&v) {
+                        v[i] = orig;
+                        continue;
+                    }
                     print!("  try {}={c} .. ", names[i]);
                     std::io::stdout().flush().ok();
                     let got = outcome(&v);
                     println!("{got}");
-                    if got == target { break; }
+                    if got == target {
+                        break;
+                    }
                     v[i] = orig;
                 }
             }
         }
         println!("shrunk: {target}");
-        for (n, x) in names.iter().zip(&v) { println!("   {n} = {x}"); }
+        for (n, x) in names.iter().zip(&v) {
+            println!("   {n} = {x}");
+        }
         std::panic::set_hook(hook);
     }
 
@@ -928,10 +1184,20 @@ mod tests {
         let p = gridfinity::Params {
             inner_walls: vec![
                 gridfinity::InnerWall {
-                    x1: 42.0, y1: 21.0, x2: 21.0, y2: 63.0, width: 2.0, height: None,
+                    x1: 42.0,
+                    y1: 21.0,
+                    x2: 21.0,
+                    y2: 63.0,
+                    width: 2.0,
+                    height: None,
                 },
                 gridfinity::InnerWall {
-                    x1: 10.0, y1: 21.0, x2: 42.0, y2: 63.0, width: 2.0, height: Some(7.0),
+                    x1: 10.0,
+                    y1: 21.0,
+                    x2: 42.0,
+                    y2: 63.0,
+                    width: 2.0,
+                    height: Some(7.0),
                 },
             ],
             ..gridfinity::Params::default()
@@ -942,15 +1208,28 @@ mod tests {
 
     #[test]
     fn sloped_bin_is_watertight_and_outward() {
-        for dir in [SlopeDir::PlusX, SlopeDir::MinusX, SlopeDir::PlusY, SlopeDir::MinusY] {
+        for dir in [
+            SlopeDir::PlusX,
+            SlopeDir::MinusX,
+            SlopeDir::PlusY,
+            SlopeDir::MinusY,
+        ] {
             let mut p = gridfinity::Params::default();
-            p.bins[0].slope = Some(BinSlope { angle_deg: 15.0, dir });
+            p.bins[0].slope = Some(BinSlope {
+                angle_deg: 15.0,
+                dir,
+            });
             let solid = gridfinity::build(&p);
-            solid.validate().unwrap_or_else(|e| panic!("slope {dir:?}: {e}"));
+            solid
+                .validate()
+                .unwrap_or_else(|e| panic!("slope {dir:?}: {e}"));
             let mesh = tessellate(&solid, 6).to_mesh();
             assert_watertight(&mesh);
             let vol = signed_volume(&mesh);
-            assert!(vol > 1.0, "slope {dir:?}: expected positive volume, got {vol}");
+            assert!(
+                vol > 1.0,
+                "slope {dir:?}: expected positive volume, got {vol}"
+            );
         }
     }
 
@@ -958,7 +1237,10 @@ mod tests {
     fn sloped_floor_displaces_volume() {
         let flat = tessellate(&gridfinity::build(&gridfinity::Params::default()), 8).to_mesh();
         let mut sp = gridfinity::Params::default();
-        sp.bins[0].slope = Some(BinSlope { angle_deg: 25.0, dir: SlopeDir::MinusX });
+        sp.bins[0].slope = Some(BinSlope {
+            angle_deg: 25.0,
+            dir: SlopeDir::MinusX,
+        });
         let sloped = tessellate(&gridfinity::build(&sp), 8).to_mesh();
         assert!(
             signed_volume(&sloped) > signed_volume(&flat) + 1.0,
@@ -994,7 +1276,10 @@ mod tests {
     fn sloped_floor_low_side_is_at_floor_z() {
         let floor_z = gridfinity::BASE_TOTAL_HEIGHT + gridfinity::FLOOR_THICKNESS;
         let mut p = gridfinity::Params::default();
-        p.bins[0].slope = Some(BinSlope { angle_deg: 20.0, dir: SlopeDir::MinusX });
+        p.bins[0].slope = Some(BinSlope {
+            angle_deg: 20.0,
+            dir: SlopeDir::MinusX,
+        });
         let mesh = tessellate(&gridfinity::build(&p), 10).to_mesh();
         let low = mesh
             .positions
@@ -1010,8 +1295,14 @@ mod tests {
             .filter(|v| v.x > 80.0)
             .map(|v| v.z)
             .fold(f32::NEG_INFINITY, f32::max);
-        assert!((low - floor_z).abs() < 0.6, "low-side floor z {low} â‰ˆ floor_z {floor_z}");
-        assert!(high > floor_z + 3.0, "high-side floor z {high} should rise above floor_z");
+        assert!(
+            (low - floor_z).abs() < 0.6,
+            "low-side floor z {low} â‰ˆ floor_z {floor_z}"
+        );
+        assert!(
+            high > floor_z + 3.0,
+            "high-side floor z {high} should rise above floor_z"
+        );
     }
     fn blends_near(solid: &crate::Solid, a: (f32, f32), b: (f32, f32), d: f32) -> (usize, f32) {
         use crate::kernel::math::Vec2;
@@ -1027,7 +1318,11 @@ mod tests {
                     }
                     let p = crate::kernel::math::Vec2::new(center.x, center.y);
                     let l2 = ab.dot(ab);
-                    let t = if l2 < 1e-9 { 0.0 } else { ((p - a).dot(ab) / l2).clamp(0.0, 1.0) };
+                    let t = if l2 < 1e-9 {
+                        0.0
+                    } else {
+                        ((p - a).dot(ab) / l2).clamp(0.0, 1.0)
+                    };
                     (p - (a + ab * t)).length() <= d
                 }
                 _ => false,
@@ -1041,7 +1336,12 @@ mod tests {
     #[test]
     fn freeform_floating_divider_is_filleted() {
         let wall = gridfinity::InnerWall {
-            x1: 22.0, y1: 30.0, x2: 62.0, y2: 55.0, width: 2.4, height: None,
+            x1: 22.0,
+            y1: 30.0,
+            x2: 62.0,
+            y2: 55.0,
+            width: 2.4,
+            height: None,
         };
         let p = gridfinity::Params {
             inner_walls: vec![wall.clone()],
@@ -1050,17 +1350,28 @@ mod tests {
         let plain = gridfinity::build(&gridfinity::Params::default());
         let solid = gridfinity::build(&p);
         solid.validate().expect("floating divider topology valid");
-        assert!(crate::audit(&solid).is_ok(), "B-rep must be sound:
-{}", crate::audit(&solid));
+        assert!(
+            crate::audit(&solid).is_ok(),
+            "B-rep must be sound:
+{}",
+            crate::audit(&solid)
+        );
         assert_watertight(&tessellate(&solid, 6).to_mesh());
 
         let (on_wall, r) = blends_near(&solid, (22.0, 30.0), (62.0, 55.0), 6.0);
-        assert_eq!(on_wall, 4, "want 4 blend faces around the island, got {on_wall}");
+        assert_eq!(
+            on_wall, 4,
+            "want 4 blend faces around the island, got {on_wall}"
+        );
         assert!(r > 0.1, "island blend radius collapsed to {r}");
         let (total, _) = blends_near(&solid, (41.75, 41.75), (41.75, 41.75), 1e4);
         let (base, br) = blends_near(&plain, (41.75, 41.75), (41.75, 41.75), 1e4);
         assert_eq!(base, 4, "plain bin should have 4 corner blends, got {base}");
-        assert_eq!(total, base + 4, "island blends must add to the compartment's");
+        assert_eq!(
+            total,
+            base + 4,
+            "island blends must add to the compartment's"
+        );
         assert!(br > 0.1, "compartment blend radius collapsed to {br}");
     }
 
@@ -1068,18 +1379,33 @@ mod tests {
     fn divider_too_close_to_the_wall_stays_sharp_and_sound() {
         let p = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {
-                x1: 6.0, y1: 42.0, x2: 78.0, y2: 42.0, width: 2.0, height: None,
+                x1: 6.0,
+                y1: 42.0,
+                x2: 78.0,
+                y2: 42.0,
+                width: 2.0,
+                height: None,
             }],
             ..gridfinity::Params::default()
         };
         let solid = gridfinity::build(&p);
         solid.validate().expect("tight divider topology valid");
-        assert!(crate::audit(&solid).is_ok(), "B-rep must be sound:
-{}", crate::audit(&solid));
+        assert!(
+            crate::audit(&solid).is_ok(),
+            "B-rep must be sound:
+{}",
+            crate::audit(&solid)
+        );
         let (on_wall, _) = blends_near(&solid, (6.0, 42.0), (78.0, 42.0), 6.0);
-        assert_eq!(on_wall, 0, "a wall this close to the boundary gets no blend");
+        assert_eq!(
+            on_wall, 0,
+            "a wall this close to the boundary gets no blend"
+        );
         let (total, _) = blends_near(&solid, (41.75, 41.75), (41.75, 41.75), 1e4);
-        assert_eq!(total, 4, "the compartment must keep its own four corner blends");
+        assert_eq!(
+            total, 4,
+            "the compartment must keep its own four corner blends"
+        );
     }
 
     #[test]
@@ -1089,7 +1415,12 @@ mod tests {
 
         let p = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {
-                x1: -5.0, y1: 40.0, x2: 90.0, y2: 45.0, width: 2.4, height: None,
+                x1: -5.0,
+                y1: 40.0,
+                x2: 90.0,
+                y2: 45.0,
+                width: 2.4,
+                height: None,
             }],
             ..gridfinity::Params::default()
         };
@@ -1111,7 +1442,11 @@ mod tests {
             Metric::EmitSlabs,
         ] {
             let row = rows.iter().find(|r| r.name == want.name());
-            assert!(row.is_some_and(|r| r.calls > 0), "{} never fired", want.name());
+            assert!(
+                row.is_some_and(|r| r.calls > 0),
+                "{} never fired",
+                want.name()
+            );
         }
     }
 
@@ -1141,7 +1476,10 @@ mod tests {
         }
         let n = cells.len();
         let p = gridfinity::Params {
-            bins: vec![gridfinity::LogicalBin { cells, ..Default::default() }],
+            bins: vec![gridfinity::LogicalBin {
+                cells,
+                ..Default::default()
+            }],
             ..Default::default()
         };
         perf::set_enabled(true);
@@ -1159,7 +1497,10 @@ mod tests {
             tess.tris.len(),
             wall
         );
-        println!("{:<34} {:>10} {:>12} {:>12}", "metric", "calls", "churn kB", "allocs");
+        println!(
+            "{:<34} {:>10} {:>12} {:>12}",
+            "metric", "calls", "churn kB", "allocs"
+        );
         let mut rows = perf::snapshot();
         rows.sort_by_key(|r| std::cmp::Reverse(r.alloc_calls));
         for r in &rows {
@@ -1191,8 +1532,22 @@ mod tests {
         let _g = perf_guard();
         let p = gridfinity::Params {
             inner_walls: vec![
-                gridfinity::InnerWall { x1: 22.0, y1: 30.0, x2: 62.0, y2: 55.0, width: 2.4, height: None },
-                gridfinity::InnerWall { x1: 80.5, y1: 26.0, x2: 3.0, y2: 95.0, width: 5.6, height: Some(6.5) },
+                gridfinity::InnerWall {
+                    x1: 22.0,
+                    y1: 30.0,
+                    x2: 62.0,
+                    y2: 55.0,
+                    width: 2.4,
+                    height: None,
+                },
+                gridfinity::InnerWall {
+                    x1: 80.5,
+                    y1: 26.0,
+                    x2: 3.0,
+                    y2: 95.0,
+                    width: 5.6,
+                    height: Some(6.5),
+                },
             ],
             ..gridfinity::Params::default()
         };
@@ -1205,9 +1560,17 @@ mod tests {
         let wall = t.elapsed();
         perf::set_enabled(false);
 
-        println!("
-rebuild #2 {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().indices.len() / 3);
-        println!("{:<34} {:>10} {:>10} {:>12} {:>10}", "metric", "time", "calls", "churn B", "allocs");
+        println!(
+            "
+rebuild #2 {:?} -> {} faces, {} tris",
+            wall,
+            solid.faces.len(),
+            tess.to_mesh().indices.len() / 3
+        );
+        println!(
+            "{:<34} {:>10} {:>10} {:>12} {:>10}",
+            "metric", "time", "calls", "churn B", "allocs"
+        );
         for r in perf::snapshot() {
             println!(
                 "{:<34} {:>10} {:>10} {:>12} {:>10}",
@@ -1236,15 +1599,29 @@ rebuild #2 {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().i
     #[test]
     fn partial_height_wall_gets_a_top_face() {
         let p = gridfinity::Params {
-            bins: vec![LogicalBin { cells: cells(&[(1, 0)]), ..Default::default() }],
+            bins: vec![LogicalBin {
+                cells: cells(&[(1, 0)]),
+                ..Default::default()
+            }],
             inner_walls: vec![gridfinity::InnerWall {
-                x1: 80.5, y1: 26.0, x2: 3.0, y2: 95.0, width: 5.6, height: Some(6.5),
+                x1: 80.5,
+                y1: 26.0,
+                x2: 3.0,
+                y2: 95.0,
+                width: 5.6,
+                height: Some(6.5),
             }],
             ..gridfinity::Params::default()
         };
         let solid = gridfinity::try_build(&p).expect("partial wall builds");
-        solid.validate().expect("partial-height wall topology valid");
-        assert!(crate::audit(&solid).is_ok(), "B-rep must be sound:\n{}", crate::audit(&solid));
+        solid
+            .validate()
+            .expect("partial-height wall topology valid");
+        assert!(
+            crate::audit(&solid).is_ok(),
+            "B-rep must be sound:\n{}",
+            crate::audit(&solid)
+        );
         assert_watertight(&tessellate(&solid, 6).to_mesh());
 
         let top_z = 8.2 + 6.5;
@@ -1253,7 +1630,9 @@ rebuild #2 {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().i
             .iter()
             .filter(|f| match f.surface {
                 geom::Surface::Plane { origin, normal, .. } => {
-                    normal.x.abs() < 1e-4 && normal.y.abs() < 1e-4 && (origin.z - top_z).abs() < 1e-3
+                    normal.x.abs() < 1e-4
+                        && normal.y.abs() < 1e-4
+                        && (origin.z - top_z).abs() < 1e-3
                 }
                 _ => false,
             })
@@ -1265,17 +1644,29 @@ rebuild #2 {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().i
     fn notching_divider_keeps_its_floor_fillet() {
         let p = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {
-                x1: 90.0, y1: 30.0, x2: 40.0, y2: 50.0, width: 3.0, height: None,
+                x1: 90.0,
+                y1: 30.0,
+                x2: 40.0,
+                y2: 50.0,
+                width: 3.0,
+                height: None,
             }],
             ..gridfinity::Params::default()
         };
         let solid = gridfinity::build(&p);
         solid.validate().expect("notching divider topology valid");
-        assert!(crate::audit(&solid).is_ok(), "B-rep must be sound:
-{}", crate::audit(&solid));
+        assert!(
+            crate::audit(&solid).is_ok(),
+            "B-rep must be sound:
+{}",
+            crate::audit(&solid)
+        );
         assert_watertight(&tessellate(&solid, 6).to_mesh());
         let (n, r) = blends_near(&solid, (41.75, 41.75), (41.75, 41.75), 1e4);
-        assert!(n > 0, "a notching divider must not cost the compartment its fillet");
+        assert!(
+            n > 0,
+            "a notching divider must not cost the compartment its fillet"
+        );
         assert!(r > 0.1, "blend radius collapsed to {r}");
     }
 
@@ -1283,18 +1674,29 @@ rebuild #2 {:?} -> {} faces, {} tris", wall, solid.faces.len(), tess.to_mesh().i
     fn freeform_crossing_divider_is_filleted() {
         let p = gridfinity::Params {
             inner_walls: vec![gridfinity::InnerWall {
-                x1: -5.0, y1: 30.0, x2: 90.0, y2: 55.0, width: 2.4, height: None,
+                x1: -5.0,
+                y1: 30.0,
+                x2: 90.0,
+                y2: 55.0,
+                width: 2.4,
+                height: None,
             }],
             ..gridfinity::Params::default()
         };
         let solid = gridfinity::build(&p);
         solid.validate().expect("crossing divider topology valid");
-        assert!(crate::audit(&solid).is_ok(), "B-rep must be sound:\n{}", crate::audit(&solid));
+        assert!(
+            crate::audit(&solid).is_ok(),
+            "B-rep must be sound:\n{}",
+            crate::audit(&solid)
+        );
         assert_watertight(&tessellate(&solid, 6).to_mesh());
         let (n, _) = blends_near(&solid, (0.0, 0.0), (83.5, 83.5), 1e4);
-        assert!(n > 0, "a crossing divider should still leave the floor filleted");
+        assert!(
+            n > 0,
+            "a crossing divider should still leave the floor filleted"
+        );
     }
-
 }
 
 #[cfg(test)]
@@ -1305,7 +1707,6 @@ mod audit_tests {
     use crate::kernel::math::Vec3;
     use crate::kernel::tess::tessellate;
     use crate::kernel::topo::{Builder, Loop};
-
 
     #[test]
     fn audit_catches_edge_curve_not_landing_on_vertex() {
@@ -1342,11 +1743,13 @@ mod audit_tests {
         let report = audit(&solid);
         assert!(!report.is_ok(), "audit should catch the planted defect");
         assert!(
-            report.defects.iter().any(|d| d.category == crate::Category::EdgeVertexGeometry),
+            report
+                .defects
+                .iter()
+                .any(|d| d.category == crate::Category::EdgeVertexGeometry),
             "expected an EdgeVertexGeometry defect:\n{report}"
         );
     }
-
 
     #[test]
     fn a_partial_wall_leaves_the_rim_hole_segmented_the_way_the_bands_below_it_are() {
@@ -1362,8 +1765,22 @@ mod audit_tests {
                 ..Default::default()
             }],
             inner_walls: vec![
-                InnerWall { x1: 26.5, y1: 62.0, x2: 51.5, y2: 79.0, width: 1.6, height: Some(11.5) },
-                InnerWall { x1: 27.5, y1: 26.5, x2: 33.0, y2: 89.0, width: 5.0, height: None },
+                InnerWall {
+                    x1: 26.5,
+                    y1: 62.0,
+                    x2: 51.5,
+                    y2: 79.0,
+                    width: 1.6,
+                    height: Some(11.5),
+                },
+                InnerWall {
+                    x1: 27.5,
+                    y1: 26.5,
+                    x2: 33.0,
+                    y2: 89.0,
+                    width: 5.0,
+                    height: None,
+                },
             ],
             ..gridfinity::Params::default()
         };
@@ -1384,7 +1801,12 @@ mod audit_tests {
                 ..Default::default()
             }],
             inner_walls: vec![InnerWall {
-                x1: -5.0, y1: 9.5, x2: 66.0, y2: 64.5, width: 1.0, height: Some(11.0),
+                x1: -5.0,
+                y1: 9.5,
+                x2: 66.0,
+                y2: 64.5,
+                width: 1.0,
+                height: Some(11.0),
             }],
             ..gridfinity::Params::default()
         };
@@ -1401,8 +1823,22 @@ mod audit_tests {
                 ..Default::default()
             }],
             inner_walls: vec![
-                InnerWall { x1: 91.5, y1: -1.0, x2: 27.0, y2: 36.0, width: 1.4, height: None },
-                InnerWall { x1: 40.0, y1: 1.5, x2: 92.0, y2: 20.0, width: 3.2, height: None },
+                InnerWall {
+                    x1: 91.5,
+                    y1: -1.0,
+                    x2: 27.0,
+                    y2: 36.0,
+                    width: 1.4,
+                    height: None,
+                },
+                InnerWall {
+                    x1: 40.0,
+                    y1: 1.5,
+                    x2: 92.0,
+                    y2: 20.0,
+                    width: 3.2,
+                    height: None,
+                },
             ],
             ..gridfinity::Params::default()
         };
@@ -1432,10 +1868,15 @@ mod audit_tests {
             ("L", vec![cell(0, 0), cell(0, 1), cell(1, 0)]),
             ("S", vec![cell(0, 0), cell(1, 0), cell(1, 1), cell(2, 1)]),
             ("T", vec![cell(0, 0), cell(1, 0), cell(2, 0), cell(1, 1)]),
-            ("plus", vec![cell(1, 0), cell(0, 1), cell(1, 1), cell(2, 1), cell(1, 2)]),
+            (
+                "plus",
+                vec![cell(1, 0), cell(0, 1), cell(1, 1), cell(2, 1), cell(1, 2)],
+            ),
             (
                 "square3x3",
-                (0..3).flat_map(|x| (0..3).map(move |y| cell(x, y))).collect(),
+                (0..3)
+                    .flat_map(|x| (0..3).map(move |y| cell(x, y)))
+                    .collect(),
             ),
             (
                 "U",

@@ -1,4 +1,3 @@
-
 use crate::kernel::math::Vec2;
 use crate::kernel::sketch::Seg;
 use std::collections::HashMap;
@@ -130,7 +129,10 @@ pub fn trace_rects(pos: &[RectF], neg: &[RectF]) -> Vec<TracedLoop> {
             let mut cur = first;
             while cur != start {
                 pts.push(cur);
-                let din = (cur.0 as isize - prev.0 as isize, cur.1 as isize - prev.1 as isize);
+                let din = (
+                    cur.0 as isize - prev.0 as isize,
+                    cur.1 as isize - prev.1 as isize,
+                );
                 let left = (-din.1, din.0);
                 let straight = din;
                 let right = (din.1, -din.0);
@@ -141,9 +143,7 @@ pub fn trace_rects(pos: &[RectF], neg: &[RectF]) -> Vec<TracedLoop> {
                         continue;
                     }
                     let cand = (cand.0 as usize, cand.1 as usize);
-                    if adj
-                        .get(&cur)
-                        .map_or(false, |ns| ns.contains(&cand))
+                    if adj.get(&cur).map_or(false, |ns| ns.contains(&cand))
                         && !used.contains(&(cur, cand))
                     {
                         next = Some(cand);
@@ -164,7 +164,11 @@ pub fn trace_rects(pos: &[RectF], neg: &[RectF]) -> Vec<TracedLoop> {
         .filter_map(|pts| {
             let mm: Vec<Vec2> = pts.iter().map(|&(i, j)| Vec2::new(xf[i], yf[j])).collect();
             let merged = merge_collinear(&mm);
-            if merged.len() >= 4 { Some(TracedLoop { pts: merged }) } else { None }
+            if merged.len() >= 4 {
+                Some(TracedLoop { pts: merged })
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -268,7 +272,14 @@ pub fn shape_loop(lp: &TracedLoop, style: &LoopStyle) -> Vec<Seg> {
             let a0 = f32::atan2(arc_start.y - center.y, arc_start.x - center.x);
             let a1 = f32::atan2(arc_end.y - center.y, arc_end.x - center.x);
             let (a0, a1) = short_arc(a0, a1);
-            segs.push(Seg::Arc { a: arc_start, b: arc_end, center, radius: radius[j], a0, a1 });
+            segs.push(Seg::Arc {
+                a: arc_start,
+                b: arc_end,
+                center,
+                radius: radius[j],
+                a0,
+                a1,
+            });
         }
     }
     segs
@@ -290,7 +301,14 @@ mod tests {
     use super::*;
     use crate::kernel::sketch::loop_area;
 
-    fn style(inset: f32, rc: f32, rf: f32) -> (Box<dyn Fn(usize, Vec2, Vec2) -> f32>, Box<dyn Fn(usize, bool) -> f32>) {
+    fn style(
+        inset: f32,
+        rc: f32,
+        rf: f32,
+    ) -> (
+        Box<dyn Fn(usize, Vec2, Vec2) -> f32>,
+        Box<dyn Fn(usize, bool) -> f32>,
+    ) {
         (
             Box::new(move |_, _, _| inset),
             Box::new(move |_, cv| if cv { rc } else { rf }),
@@ -299,7 +317,13 @@ mod tests {
 
     fn shape(lp: &TracedLoop, inset: f32, rc: f32, rf: f32) -> Vec<Seg> {
         let (i, r) = style(inset, rc, rf);
-        shape_loop(lp, &LoopStyle { inset: &i, radius: &r })
+        shape_loop(
+            lp,
+            &LoopStyle {
+                inset: &i,
+                radius: &r,
+            },
+        )
     }
 
     #[test]
@@ -313,7 +337,10 @@ mod tests {
     #[test]
     fn union_of_overlapping_rects_is_one_loop() {
         let loops = trace_rects(
-            &[RectF::new(0.0, 0.0, 10.0, 5.0), RectF::new(5.0, 0.0, 10.0, 5.0)],
+            &[
+                RectF::new(0.0, 0.0, 10.0, 5.0),
+                RectF::new(5.0, 0.0, 10.0, 5.0),
+            ],
             &[],
         );
         assert_eq!(loops.len(), 1);
@@ -373,7 +400,10 @@ mod tests {
     #[test]
     fn concave_corner_gets_own_radius() {
         let loops = trace_rects(
-            &[RectF::new(0.0, 0.0, 10.0, 5.0), RectF::new(0.0, 0.0, 5.0, 10.0)],
+            &[
+                RectF::new(0.0, 0.0, 10.0, 5.0),
+                RectF::new(0.0, 0.0, 5.0, 10.0),
+            ],
             &[],
         );
         assert_eq!(loops.len(), 1);
@@ -399,7 +429,10 @@ mod tests {
     #[test]
     fn diagonal_touch_stays_two_loops() {
         let loops = trace_rects(
-            &[RectF::new(0.0, 0.0, 5.0, 5.0), RectF::new(5.0, 5.0, 5.0, 5.0)],
+            &[
+                RectF::new(0.0, 0.0, 5.0, 5.0),
+                RectF::new(5.0, 5.0, 5.0, 5.0),
+            ],
             &[],
         );
         assert_eq!(loops.len(), 2);

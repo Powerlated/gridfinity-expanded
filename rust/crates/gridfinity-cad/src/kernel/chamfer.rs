@@ -1,4 +1,3 @@
-
 use crate::kernel::geom::{Curve, Surface};
 use crate::kernel::math::Vec3;
 use crate::kernel::topo::{Builder, EdgeId, Loop, Solid};
@@ -27,8 +26,11 @@ struct CurvEdge {
 }
 
 pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<Solid, String> {
-    let want: HashMap<EdgeId, (f32, f32)> =
-        chamfers.iter().copied().map(|(e, da, db)| (e, (da, db))).collect();
+    let want: HashMap<EdgeId, (f32, f32)> = chamfers
+        .iter()
+        .copied()
+        .map(|(e, da, db)| (e, (da, db)))
+        .collect();
     let edge_faces = solid.edge_faces();
 
     for &(e, d_a, d_b) in chamfers {
@@ -36,10 +38,15 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
             return Err(format!("chamfer: edge {e} out of range"));
         }
         if edge_faces[e].len() != 2 {
-            return Err(format!("chamfer: edge {e} has {} faces (want 2)", edge_faces[e].len()));
+            return Err(format!(
+                "chamfer: edge {e} has {} faces (want 2)",
+                edge_faces[e].len()
+            ));
         }
         if d_a <= 0.0 || d_b <= 0.0 {
-            return Err(format!("chamfer: edge {e} distances must be positive (got {d_a}, {d_b})"));
+            return Err(format!(
+                "chamfer: edge {e} distances must be positive (got {d_a}, {d_b})"
+            ));
         }
     }
 
@@ -82,7 +89,11 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
 
         let edge_dir = match ed.curve {
             Curve::Line { dir, .. } => dir.normalize_or(Vec3::X),
-            _ => return Err(format!("chamfer: edge {e} not a line (arc/cone chamfer unsupported)")),
+            _ => {
+                return Err(format!(
+                    "chamfer: edge {e} not a line (arc/cone chamfer unsupported)"
+                ));
+            }
         };
 
         let na_mid = face_outward(fa, mid);
@@ -91,11 +102,19 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
         let centroid_a = face_centroid(solid, fa);
         let to_centroid = centroid_a - mid;
         let t_a_plus = edge_dir.cross(na_mid).normalize_or(Vec3::X);
-        let t_a = if to_centroid.dot(t_a_plus) > 0.0 { t_a_plus } else { -t_a_plus };
+        let t_a = if to_centroid.dot(t_a_plus) > 0.0 {
+            t_a_plus
+        } else {
+            -t_a_plus
+        };
         let centroid_b = face_centroid(solid, fb);
         let to_centroid_b = centroid_b - mid;
         let t_b_plus = edge_dir.cross(nb_mid).normalize_or(Vec3::X);
-        let t_b = if to_centroid_b.dot(t_b_plus) > 0.0 { t_b_plus } else { -t_b_plus };
+        let t_b = if to_centroid_b.dot(t_b_plus) > 0.0 {
+            t_b_plus
+        } else {
+            -t_b_plus
+        };
 
         let ta_p0 = p0 + t_a * d_a;
         let ta_p1 = p1 + t_a * d_a;
@@ -106,7 +125,11 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
         let v2 = tb_p0 - ta_p0;
         let normal = v1.cross(v2).normalize_or(Vec3::Z);
         let outward_test = (na_mid + nb_mid).normalize_or(Vec3::Z);
-        let normal = if normal.dot(outward_test) > 0.0 { normal } else { -normal };
+        let normal = if normal.dot(outward_test) > 0.0 {
+            normal
+        } else {
+            -normal
+        };
         let surface = Surface::plane(ta_p0, normal);
 
         let sense = surface.normal(surface.project(ta_p0)).dot(na_mid) > 0.0;
@@ -114,12 +137,18 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
         let fwd_a = loop_edge_dir(solid, fa, e);
 
         let ta = CurvEdge {
-            curve: Curve::Line { p0: ta_p0, dir: edge_dir },
+            curve: Curve::Line {
+                p0: ta_p0,
+                dir: edge_dir,
+            },
             t0: 0.0,
             t1: (ta_p1 - ta_p0).length(),
         };
         let tb = CurvEdge {
-            curve: Curve::Line { p0: tb_p0, dir: edge_dir },
+            curve: Curve::Line {
+                p0: tb_p0,
+                dir: edge_dir,
+            },
             t0: 0.0,
             t1: (tb_p1 - tb_p0).length(),
         };
@@ -128,7 +157,19 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
 
         cm.insert(
             e,
-            Chamfer { ta, tb, ca0, ca1, ta_p0, ta_p1, tb_p0, tb_p1, surface, sense, fwd_a },
+            Chamfer {
+                ta,
+                tb,
+                ca0,
+                ca1,
+                ta_p0,
+                ta_p1,
+                tb_p0,
+                tb_p1,
+                surface,
+                sense,
+                fwd_a,
+            },
         );
     }
 
@@ -137,14 +178,24 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
         let (e1, e2) = (es[0], es[1]);
         let pick_at_v = |e: EdgeId, c: &Chamfer| -> (Vec3, Vec3) {
             let ed = solid.edges[e];
-            if ed.v0 == *v { (c.ta_p0, c.tb_p0) } else { (c.ta_p1, c.tb_p1) }
+            if ed.v0 == *v {
+                (c.ta_p0, c.tb_p0)
+            } else {
+                (c.ta_p1, c.tb_p1)
+            }
         };
         let (off_a1, off_b1) = pick_at_v(e1, &cm[&e1]);
         let (off_a2, off_b2) = pick_at_v(e2, &cm[&e2]);
         let edge_dir_at = |e: EdgeId| -> Vec3 {
             let ed = solid.edges[e];
-            let Curve::Line { dir, .. } = ed.curve else { return Vec3::X };
-            if ed.v0 == *v { dir.normalize_or(Vec3::X) } else { -dir.normalize_or(Vec3::X) }
+            let Curve::Line { dir, .. } = ed.curve else {
+                return Vec3::X;
+            };
+            if ed.v0 == *v {
+                dir.normalize_or(Vec3::X)
+            } else {
+                -dir.normalize_or(Vec3::X)
+            }
         };
         let d1 = edge_dir_at(e1);
         let d2 = edge_dir_at(e2);
@@ -163,14 +214,30 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
                 c.ta_p0 = corner_a;
                 c.tb_p0 = corner_b;
                 c.ca0 = line_curve(corner_a, corner_b);
-                c.ta = CurvEdge { curve: Curve::Line { p0: corner_a, dir }, t0: 0.0, t1: (c.ta_p1 - corner_a).length() };
-                c.tb = CurvEdge { curve: Curve::Line { p0: corner_b, dir }, t0: 0.0, t1: (c.tb_p1 - corner_b).length() };
+                c.ta = CurvEdge {
+                    curve: Curve::Line { p0: corner_a, dir },
+                    t0: 0.0,
+                    t1: (c.ta_p1 - corner_a).length(),
+                };
+                c.tb = CurvEdge {
+                    curve: Curve::Line { p0: corner_b, dir },
+                    t0: 0.0,
+                    t1: (c.tb_p1 - corner_b).length(),
+                };
             } else {
                 c.ta_p1 = corner_a;
                 c.tb_p1 = corner_b;
                 c.ca1 = line_curve(corner_a, corner_b);
-                c.ta = CurvEdge { curve: Curve::Line { p0: c.ta_p0, dir }, t0: 0.0, t1: (corner_a - c.ta_p0).length() };
-                c.tb = CurvEdge { curve: Curve::Line { p0: c.tb_p0, dir }, t0: 0.0, t1: (corner_b - c.tb_p0).length() };
+                c.ta = CurvEdge {
+                    curve: Curve::Line { p0: c.ta_p0, dir },
+                    t0: 0.0,
+                    t1: (corner_a - c.ta_p0).length(),
+                };
+                c.tb = CurvEdge {
+                    curve: Curve::Line { p0: c.tb_p0, dir },
+                    t0: 0.0,
+                    t1: (corner_b - c.tb_p0).length(),
+                };
             }
         }
     }
@@ -188,11 +255,31 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
     for fi in 0..solid.faces.len() {
         loop_scratch.clear();
         inner_ranges.clear();
-        rebuild_loop(solid, &cm, &vinfo, &want, fi, solid.outer_edges(fi), &edge_faces, &mut b, &mut loop_scratch)?;
+        rebuild_loop(
+            solid,
+            &cm,
+            &vinfo,
+            &want,
+            fi,
+            solid.outer_edges(fi),
+            &edge_faces,
+            &mut b,
+            &mut loop_scratch,
+        )?;
         let outer_len = loop_scratch.len();
         for lp in solid.inner_loops(fi) {
             let before = loop_scratch.len();
-            rebuild_loop(solid, &cm, &vinfo, &want, fi, lp, &edge_faces, &mut b, &mut loop_scratch)?;
+            rebuild_loop(
+                solid,
+                &cm,
+                &vinfo,
+                &want,
+                fi,
+                lp,
+                &edge_faces,
+                &mut b,
+                &mut loop_scratch,
+            )?;
             inner_ranges.push(loop_scratch.len() - before);
         }
         let outer = &loop_scratch[..outer_len];
@@ -288,7 +375,11 @@ fn intersect_lines(p0: Vec3, d0: Vec3, p1: Vec3, d1: Vec3) -> Option<Vec3> {
 
 fn line_curve(a: Vec3, b: Vec3) -> CurvEdge {
     let dir = (b - a).normalize_or(Vec3::X);
-    CurvEdge { curve: Curve::Line { p0: a, dir }, t0: 0.0, t1: (b - a).length() }
+    CurvEdge {
+        curve: Curve::Line { p0: a, dir },
+        t0: 0.0,
+        t1: (b - a).length(),
+    }
 }
 
 fn rebuild_loop(
@@ -309,7 +400,11 @@ fn rebuild_loop(
             let c = &cm[&e];
             let side_a = ef[e][0] == fi;
             let ce = if side_a { c.ta } else { c.tb };
-            let (tp0, tp1) = if side_a { (c.ta_p0, c.ta_p1) } else { (c.tb_p0, c.tb_p1) };
+            let (tp0, tp1) = if side_a {
+                (c.ta_p0, c.ta_p1)
+            } else {
+                (c.tb_p0, c.tb_p1)
+            };
             let (start, end) = if fwd { (tp0, tp1) } else { (tp1, tp0) };
             out.push(emit_curv(b, start, end, ce));
         } else {
@@ -322,11 +417,20 @@ fn rebuild_loop(
             let ve = b.vertex(end);
             let eid = match ed.curve {
                 Curve::Line { .. } => b.line(vs, ve),
-                Curve::Circle { center, axis, radius, ref_dir } => {
+                Curve::Circle {
+                    center,
+                    axis,
+                    radius,
+                    ref_dir,
+                } => {
                     let (a0, a1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
                     b.arc(vs, ve, center, axis, radius, ref_dir, a0, a1)
                 }
-                Curve::Ellipse { center, a: ea, b: eb } => {
+                Curve::Ellipse {
+                    center,
+                    a: ea,
+                    b: eb,
+                } => {
                     let (t0, t1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
                     b.ellipse(vs, ve, center, ea, eb, t0, t1)
                 }
@@ -373,16 +477,37 @@ fn emit_curv(b: &mut Builder, start: Vec3, end: Vec3, ce: CurvEdge) -> (EdgeId, 
     };
     match ce.curve {
         Curve::Line { .. } => b.line(vs, ve),
-        Curve::Circle { center, axis, radius, ref_dir } => {
-            let (t0, t1) = if forward() { (ce.t0, ce.t1) } else { (ce.t1, ce.t0) };
+        Curve::Circle {
+            center,
+            axis,
+            radius,
+            ref_dir,
+        } => {
+            let (t0, t1) = if forward() {
+                (ce.t0, ce.t1)
+            } else {
+                (ce.t1, ce.t0)
+            };
             b.arc(vs, ve, center, axis, radius, ref_dir, t0, t1)
         }
-        Curve::Ellipse { center, a: ea, b: eb } => {
-            let (t0, t1) = if forward() { (ce.t0, ce.t1) } else { (ce.t1, ce.t0) };
+        Curve::Ellipse {
+            center,
+            a: ea,
+            b: eb,
+        } => {
+            let (t0, t1) = if forward() {
+                (ce.t0, ce.t1)
+            } else {
+                (ce.t1, ce.t0)
+            };
             b.ellipse(vs, ve, center, ea, eb, t0, t1)
         }
         Curve::TorusSection { .. } => {
-            let (t0, t1) = if forward() { (ce.t0, ce.t1) } else { (ce.t1, ce.t0) };
+            let (t0, t1) = if forward() {
+                (ce.t0, ce.t1)
+            } else {
+                (ce.t1, ce.t0)
+            };
             b.torus_section(vs, ve, ce.curve, t0, t1)
         }
     }
@@ -438,7 +563,10 @@ mod tests {
             top_edges.into_iter().map(|e| (e, 1.0, 1.0)).collect();
         let c = chamfer_edges(&s, &chamfers).expect("chamfer");
         c.validate().expect("chamfered box is manifold");
-        assert!(c.faces.len() >= s.faces.len() + 4, "chamfer added bevel faces");
+        assert!(
+            c.faces.len() >= s.faces.len() + 4,
+            "chamfer added bevel faces"
+        );
     }
 
     #[test]
@@ -456,12 +584,13 @@ mod tests {
         let c = chamfer_edges(&s, &chamfers).expect("chamfer");
         c.validate().expect("asymmetric chamfer box is manifold");
         let has_tilted_plane = c.faces.iter().any(|f| match f.surface {
-            Surface::Plane { normal, .. } => {
-                normal.x.abs() > 0.1 && normal.z.abs() > 0.1
-            }
+            Surface::Plane { normal, .. } => normal.x.abs() > 0.1 && normal.z.abs() > 0.1,
             _ => false,
         });
-        assert!(has_tilted_plane, "asymmetric chamfer should produce a tilted plane");
+        assert!(
+            has_tilted_plane,
+            "asymmetric chamfer should produce a tilted plane"
+        );
     }
 
     #[test]
@@ -478,6 +607,9 @@ mod tests {
         let chamfers: Vec<(EdgeId, f32, f32)> =
             top_edges.into_iter().map(|e| (e, 1.0, 1.0)).collect();
         let err = chamfer_edges(&s, &chamfers).unwrap_err();
-        assert!(err.contains("want 2"), "open chain should error cleanly; got: {err}");
+        assert!(
+            err.contains("want 2"),
+            "open chain should error cleanly; got: {err}"
+        );
     }
 }

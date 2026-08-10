@@ -1,4 +1,3 @@
-
 use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -93,7 +92,10 @@ struct ScopeStack {
 
 impl ScopeStack {
     const fn new() -> ScopeStack {
-        ScopeStack { len: 0, items: [0; STACK_MAX] }
+        ScopeStack {
+            len: 0,
+            items: [0; STACK_MAX],
+        }
     }
 }
 
@@ -167,7 +169,10 @@ pub fn count(m: Metric) {
 pub fn scope(m: Metric) -> Scope {
     if enabled() {
         push_scope(m);
-        Scope { m, start: Some(Instant::now()) }
+        Scope {
+            m,
+            start: Some(Instant::now()),
+        }
     } else {
         Scope { m, start: None }
     }
@@ -293,11 +298,21 @@ mod tests {
         let rows = snapshot();
         set_enabled(false);
 
-        let pis = rows.iter().find(|r| r.name == Metric::PointInSegs.name()).expect("counted");
+        let pis = rows
+            .iter()
+            .find(|r| r.name == Metric::PointInSegs.name())
+            .expect("counted");
         assert!(pis.calls >= 2, "want >=2 calls, got {}", pis.calls);
-        let tess = rows.iter().find(|r| r.name == Metric::Tessellate.name()).expect("timed");
+        let tess = rows
+            .iter()
+            .find(|r| r.name == Metric::Tessellate.name())
+            .expect("timed");
         assert!(tess.calls >= 1);
-        assert!(tess.nanos >= 1_000_000, "expected >=1ms, got {}ns", tess.nanos);
+        assert!(
+            tess.nanos >= 1_000_000,
+            "expected >=1ms, got {}ns",
+            tess.nanos
+        );
         assert!(
             rows.windows(2).all(|w| w[0].nanos >= w[1].nanos),
             "snapshot must be sorted heaviest first"
@@ -322,10 +337,24 @@ mod tests {
         let rows = snapshot();
         set_enabled(false);
 
-        let outer = rows.iter().find(|r| r.name == Metric::SplitRegions.name()).expect("charged");
-        let inner = rows.iter().find(|r| r.name == Metric::SegSegPoints.name()).expect("charged");
-        assert!(outer.alloc_bytes >= 4096, "outer got {} B", outer.alloc_bytes);
-        assert!(inner.alloc_bytes >= 8192, "inner got {} B", inner.alloc_bytes);
+        let outer = rows
+            .iter()
+            .find(|r| r.name == Metric::SplitRegions.name())
+            .expect("charged");
+        let inner = rows
+            .iter()
+            .find(|r| r.name == Metric::SegSegPoints.name())
+            .expect("charged");
+        assert!(
+            outer.alloc_bytes >= 4096,
+            "outer got {} B",
+            outer.alloc_bytes
+        );
+        assert!(
+            inner.alloc_bytes >= 8192,
+            "inner got {} B",
+            inner.alloc_bytes
+        );
         assert!(outer.alloc_calls >= 1 && inner.alloc_calls >= 1);
     }
 }

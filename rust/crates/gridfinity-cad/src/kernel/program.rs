@@ -1,5 +1,6 @@
-
-use crate::kernel::build::{RingEdges, loop_of, ring, ring_into, ring_on_plane, seg_edge, wall_between};
+use crate::kernel::build::{
+    RingEdges, loop_of, ring, ring_into, ring_on_plane, seg_edge, wall_between,
+};
 use crate::kernel::chamfer::chamfer_edges;
 use crate::kernel::fillet;
 use crate::kernel::geom::Surface;
@@ -36,7 +37,9 @@ impl PlaneRef {
         match *self {
             PlaneRef::Z { z, .. } => z,
             PlaneRef::Named(_) | PlaneRef::Tilted { .. } => {
-                panic!("PlaneRef::z() called on non-horizontal plane {self:?}; use resolve() instead")
+                panic!(
+                    "PlaneRef::z() called on non-horizontal plane {self:?}; use resolve() instead"
+                )
             }
         }
     }
@@ -48,9 +51,22 @@ impl PlaneRef {
 
 #[derive(Clone, Debug)]
 pub enum HoleProfile {
-    Plain { radius: f32, depth: f32 },
-    Counterbore { bore_r: f32, bore_d: f32, head_r: f32, head_d: f32 },
-    Countersink { bore_r: f32, bore_d: f32, head_r: f32, head_angle_deg: f32 },
+    Plain {
+        radius: f32,
+        depth: f32,
+    },
+    Counterbore {
+        bore_r: f32,
+        bore_d: f32,
+        head_r: f32,
+        head_d: f32,
+    },
+    Countersink {
+        bore_r: f32,
+        bore_d: f32,
+        head_r: f32,
+        head_angle_deg: f32,
+    },
 }
 
 impl HoleProfile {
@@ -64,16 +80,48 @@ impl HoleProfile {
 }
 
 pub enum Op {
-    Sketch { name: String, profile: Vec<Seg> },
-    Plane { name: String, origin: Vec3, normal: Vec3 },
+    Sketch {
+        name: String,
+        profile: Vec<Seg>,
+    },
+    Plane {
+        name: String,
+        origin: Vec3,
+        normal: Vec3,
+    },
 
-    Extrude { sketch: String, from: PlaneRef, to: PlaneRef },
-    ExtrudeCut { sketch: String, from: PlaneRef, to: PlaneRef },
-    Loft { profiles: Vec<(String, f32)>, outward: bool },
-    Hole { at: crate::kernel::math::Vec2, from_z: f32, profile: HoleProfile },
+    Extrude {
+        sketch: String,
+        from: PlaneRef,
+        to: PlaneRef,
+    },
+    ExtrudeCut {
+        sketch: String,
+        from: PlaneRef,
+        to: PlaneRef,
+    },
+    Loft {
+        profiles: Vec<(String, f32)>,
+        outward: bool,
+    },
+    Hole {
+        at: crate::kernel::math::Vec2,
+        from_z: f32,
+        profile: HoleProfile,
+    },
 
-    PlanarFace { plane: PlaneRef, outer: DirLoop, holes: Vec<DirLoop> },
-    WallFaces { lower: Vec<Seg>, upper: Vec<Seg>, z0: f32, z1: f32, outward: bool },
+    PlanarFace {
+        plane: PlaneRef,
+        outer: DirLoop,
+        holes: Vec<DirLoop>,
+    },
+    WallFaces {
+        lower: Vec<Seg>,
+        upper: Vec<Seg>,
+        z0: f32,
+        z1: f32,
+        outward: bool,
+    },
     SlopedWall {
         lower: Vec<Seg>,
         upper: Vec<Seg>,
@@ -82,11 +130,29 @@ pub enum Op {
         outward: bool,
     },
 
-    Wall { lower: Vec<Seg>, upper: Vec<Seg>, z0: f32, z1: f32, outward: bool },
-    Cap { z: f32, up: bool, outer: DirLoop, holes: Vec<DirLoop> },
-    Slabs { stack: Vec<(slab::Op, Slab)>, opts: SlabOpts },
-    Fillet { edges: Vec<(Seg, f32, f32)> },
-    Chamfer { edges: Vec<(Seg, f32, f32, f32)> },
+    Wall {
+        lower: Vec<Seg>,
+        upper: Vec<Seg>,
+        z0: f32,
+        z1: f32,
+        outward: bool,
+    },
+    Cap {
+        z: f32,
+        up: bool,
+        outer: DirLoop,
+        holes: Vec<DirLoop>,
+    },
+    Slabs {
+        stack: Vec<(slab::Op, Slab)>,
+        opts: SlabOpts,
+    },
+    Fillet {
+        edges: Vec<(Seg, f32, f32)>,
+    },
+    Chamfer {
+        edges: Vec<(Seg, f32, f32, f32)>,
+    },
     Custom(Box<dyn Fn(&mut Builder) -> Result<(), String>>),
 }
 
@@ -130,12 +196,19 @@ impl Program {
             Op::Sketch { name, profile } => {
                 self.sketches.insert(name.clone(), profile.clone());
             }
-            Op::Plane { name, origin, normal } => {
+            Op::Plane {
+                name,
+                origin,
+                normal,
+            } => {
                 self.planes.insert(name.clone(), (*origin, *normal));
             }
             _ => {}
         }
-        self.steps.push(Step { label: label.into(), op });
+        self.steps.push(Step {
+            label: label.into(),
+            op,
+        });
     }
     pub fn len(&self) -> usize {
         self.steps.len()
@@ -188,8 +261,10 @@ fn size_hint(prog: &Program) -> (usize, usize, usize) {
                 faces += 1;
             }
             Op::Slabs { stack, .. } => {
-                let n: usize =
-                    stack.iter().map(|(_, s)| s.region.iter().map(|l| l.len()).sum::<usize>()).sum();
+                let n: usize = stack
+                    .iter()
+                    .map(|(_, s)| s.region.iter().map(|l| l.len()).sum::<usize>())
+                    .sum();
                 segs += n * 4;
                 faces += n * 3;
             }
@@ -212,8 +287,7 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
             continue;
         }
         match &st.op {
-            Op::Sketch { .. } | Op::Plane { .. } => {
-            }
+            Op::Sketch { .. } | Op::Plane { .. } => {}
             Op::Extrude { sketch, from, to } => {
                 if !from.is_horizontal() || !to.is_horizontal() {
                     return Err(
@@ -222,9 +296,9 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                             .into(),
                     );
                 }
-                let profile = prog.sketch(sketch).ok_or_else(|| {
-                    format!("Extrude: sketch {sketch:?} not registered")
-                })?;
+                let profile = prog
+                    .sketch(sketch)
+                    .ok_or_else(|| format!("Extrude: sketch {sketch:?} not registered"))?;
                 let stack = vec![(
                     slab::Op::Union,
                     Slab::new(vec![profile.to_vec()], from.z(), to.z()),
@@ -239,9 +313,9 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                             .into(),
                     );
                 }
-                let profile = prog.sketch(sketch).ok_or_else(|| {
-                    format!("ExtrudeCut: sketch {sketch:?} not registered")
-                })?;
+                let profile = prog
+                    .sketch(sketch)
+                    .ok_or_else(|| format!("ExtrudeCut: sketch {sketch:?} not registered"))?;
                 let stack = vec![(
                     slab::Op::Difference,
                     Slab::new(vec![profile.to_vec()], from.z(), to.z()),
@@ -255,9 +329,9 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                 let resolved: Vec<(&[Seg], f32)> = profiles
                     .iter()
                     .map(|(name, z)| -> Result<(&[Seg], f32), String> {
-                        let p = prog.sketch(name).ok_or_else(|| {
-                            format!("Loft: sketch {name:?} not registered")
-                        })?;
+                        let p = prog
+                            .sketch(name)
+                            .ok_or_else(|| format!("Loft: sketch {name:?} not registered"))?;
                         Ok((p, *z))
                     })
                     .collect::<Result<_, _>>()?;
@@ -270,7 +344,11 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                     std::mem::swap(&mut ra, &mut rb);
                 }
             }
-            Op::PlanarFace { plane, outer, holes } => {
+            Op::PlanarFace {
+                plane,
+                outer,
+                holes,
+            } => {
                 let plane_rt = plane.resolve(prog);
                 let o = ring_on_plane(&mut b, &outer.0, plane_rt);
                 let outer_loop = loop_of(&o, outer.1);
@@ -283,27 +361,56 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
                 let surface = Surface::plane(origin, normal);
                 b.face(surface, true, outer_loop, inner_loops);
             }
-            Op::Hole { at, from_z, profile } => {
+            Op::Hole {
+                at,
+                from_z,
+                profile,
+            } => {
                 emit_hole(&mut b, *at, *from_z, profile)?;
             }
-            Op::WallFaces { lower, upper, z0, z1, outward } => {
+            Op::WallFaces {
+                lower,
+                upper,
+                z0,
+                z1,
+                outward,
+            } => {
                 ring_into(&mut b, lower, *z0, &mut ra);
                 ring_into(&mut b, upper, *z1, &mut rb);
                 wall_between(&mut b, lower, upper, &ra, &rb, *z0, *z1, *outward);
             }
-            Op::SlopedWall { lower, upper, lower_plane, upper_plane, outward } => {
+            Op::SlopedWall {
+                lower,
+                upper,
+                lower_plane,
+                upper_plane,
+                outward,
+            } => {
                 let lo_rt = lower_plane.resolve(prog);
                 let hi_rt = upper_plane.resolve(prog);
                 let lo = ring_on_plane(&mut b, lower, lo_rt);
                 let hi = ring_on_plane(&mut b, upper, hi_rt);
-                wall_between(&mut b, lower, upper, &lo, &hi, lo_rt.0.z, hi_rt.0.z, *outward);
+                wall_between(
+                    &mut b, lower, upper, &lo, &hi, lo_rt.0.z, hi_rt.0.z, *outward,
+                );
             }
-            Op::Wall { lower, upper, z0, z1, outward } => {
+            Op::Wall {
+                lower,
+                upper,
+                z0,
+                z1,
+                outward,
+            } => {
                 ring_into(&mut b, lower, *z0, &mut ra);
                 ring_into(&mut b, upper, *z1, &mut rb);
                 wall_between(&mut b, lower, upper, &ra, &rb, *z0, *z1, *outward);
             }
-            Op::Cap { z, up, outer, holes } => {
+            Op::Cap {
+                z,
+                up,
+                outer,
+                holes,
+            } => {
                 let o = ring(&mut b, &outer.0, *z);
                 let outer_loop = loop_of(&o, outer.1);
                 let mut inner_loops = Vec::with_capacity(holes.len());
@@ -353,7 +460,13 @@ fn find_seg_edge(b: &Builder, seg: &Seg, z: f32) -> Option<EdgeId> {
     let end = vec3_of(seg.end().x, seg.end().y, z);
     let mid = match *seg {
         Seg::Line { .. } => (start + end) * 0.5,
-        Seg::Arc { center, radius, a0, a1, .. } => {
+        Seg::Arc {
+            center,
+            radius,
+            a0,
+            a1,
+            ..
+        } => {
             let t = (a0 + a1) * 0.5;
             vec3_of(center.x + radius * t.cos(), center.y + radius * t.sin(), z)
         }
@@ -370,9 +483,12 @@ fn emit_hole(
     let circle = |r: f32| Sketch::circle(at.x, at.y, r).loops.remove(0);
     let (sections, total_depth): (Vec<(f32, f32)>, f32) = match *profile {
         HoleProfile::Plain { radius, depth } => (vec![(radius, depth)], depth),
-        HoleProfile::Counterbore { bore_r, bore_d, head_r, head_d } => {
-            (vec![(head_r, head_d), (bore_r, bore_d)], bore_d.max(head_d))
-        }
+        HoleProfile::Counterbore {
+            bore_r,
+            bore_d,
+            head_r,
+            head_d,
+        } => (vec![(head_r, head_d), (bore_r, bore_d)], bore_d.max(head_d)),
         HoleProfile::Countersink { .. } => {
             return Err(
                 "Hole: Countersink not yet implemented (cones are not slab-expressible; \
@@ -385,10 +501,16 @@ fn emit_hole(
     let stack: Vec<(slab::Op, Slab)> = sections
         .iter()
         .map(|&(r, d)| {
-            (slab::Op::Union, Slab::new(vec![circle(r)], from_z, from_z + d))
+            (
+                slab::Op::Union,
+                Slab::new(vec![circle(r)], from_z, from_z + d),
+            )
         })
         .collect();
-    let opts = SlabOpts { cavity: true, open_at: vec![from_z] };
+    let opts = SlabOpts {
+        cavity: true,
+        open_at: vec![from_z],
+    };
     slab::emit_slabs(b, &stack, &opts)?;
     let _ = total_depth;
     Ok(())
@@ -400,7 +522,9 @@ mod tests {
     use crate::kernel::sketch::Sketch;
 
     fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<Seg> {
-        Sketch::rectangle((x0 + x1) * 0.5, (y0 + y1) * 0.5, x1 - x0, y1 - y0).loops.remove(0)
+        Sketch::rectangle((x0 + x1) * 0.5, (y0 + y1) * 0.5, x1 - x0, y1 - y0)
+            .loops
+            .remove(0)
     }
 
     fn box_program() -> Program {
@@ -408,10 +532,32 @@ mod tests {
         let mut p = Program::default();
         p.push(
             "side walls",
-            Op::Wall { lower: r.clone(), upper: r.clone(), z0: 0.0, z1: 5.0, outward: true },
+            Op::Wall {
+                lower: r.clone(),
+                upper: r.clone(),
+                z0: 0.0,
+                z1: 5.0,
+                outward: true,
+            },
         );
-        p.push("top", Op::Cap { z: 5.0, up: true, outer: (r.clone(), true), holes: vec![] });
-        p.push("bottom", Op::Cap { z: 0.0, up: false, outer: (r, false), holes: vec![] });
+        p.push(
+            "top",
+            Op::Cap {
+                z: 5.0,
+                up: true,
+                outer: (r.clone(), true),
+                holes: vec![],
+            },
+        );
+        p.push(
+            "bottom",
+            Op::Cap {
+                z: 0.0,
+                up: false,
+                outer: (r, false),
+                holes: vec![],
+            },
+        );
         p
     }
 
@@ -428,7 +574,11 @@ mod tests {
         let counts: Vec<usize> = (0..=prog.len())
             .map(|n| run(&prog, |i| i < n).expect("prefix").faces.len())
             .collect();
-        assert_eq!(counts, vec![0, 4, 5, 6], "faces accumulate one op at a time");
+        assert_eq!(
+            counts,
+            vec![0, 4, 5, 6],
+            "faces accumulate one op at a time"
+        );
     }
 
     #[test]
@@ -441,29 +591,67 @@ mod tests {
 
     #[test]
     fn blend_resolves_edges_by_geometry_not_id() {
-        let r = Sketch::rounded_rect(0.0, 0.0, 20.0, 20.0, 4.0).loops.remove(0);
+        let r = Sketch::rounded_rect(0.0, 0.0, 20.0, 20.0, 4.0)
+            .loops
+            .remove(0);
         let mut p = Program::default();
         p.push(
             "side walls",
-            Op::Wall { lower: r.clone(), upper: r.clone(), z0: 0.0, z1: 5.0, outward: true },
+            Op::Wall {
+                lower: r.clone(),
+                upper: r.clone(),
+                z0: 0.0,
+                z1: 5.0,
+                outward: true,
+            },
         );
-        p.push("top", Op::Cap { z: 5.0, up: true, outer: (r.clone(), true), holes: vec![] });
-        p.push("bottom", Op::Cap { z: 0.0, up: false, outer: (r.clone(), false), holes: vec![] });
+        p.push(
+            "top",
+            Op::Cap {
+                z: 5.0,
+                up: true,
+                outer: (r.clone(), true),
+                holes: vec![],
+            },
+        );
+        p.push(
+            "bottom",
+            Op::Cap {
+                z: 0.0,
+                up: false,
+                outer: (r.clone(), false),
+                holes: vec![],
+            },
+        );
         let plain = run_all(&p).expect("unblended").faces.len();
 
-        p.push("rim fillet", Op::Fillet { edges: r.iter().map(|&s| (s, 5.0, 1.0)).collect() });
+        p.push(
+            "rim fillet",
+            Op::Fillet {
+                edges: r.iter().map(|&s| (s, 5.0, 1.0)).collect(),
+            },
+        );
         let s = run_all(&p).expect("blend run");
         s.validate().expect("blended box is manifold");
         assert!(s.faces.len() > plain, "blend added faces");
     }
 
-
     #[test]
     fn sketch_registers_name_and_is_lookupable() {
         let mut p = Program::default();
         let r = rect(0.0, 0.0, 10.0, 20.0);
-        p.push("outline", Op::Sketch { name: "outline".into(), profile: r.clone() });
-        assert_eq!(p.sketch("outline").unwrap(), r.as_slice(), "sketch lookup must return the profile");
+        p.push(
+            "outline",
+            Op::Sketch {
+                name: "outline".into(),
+                profile: r.clone(),
+            },
+        );
+        assert_eq!(
+            p.sketch("outline").unwrap(),
+            r.as_slice(),
+            "sketch lookup must return the profile"
+        );
         assert!(p.sketch("missing").is_none(), "unknown name returns None");
     }
 
@@ -473,7 +661,11 @@ mod tests {
         let (origin, normal) = (Vec3::new(0.0, 0.0, 8.2), Vec3::new(0.0, 0.0, 1.0));
         p.push(
             "floor datum",
-            Op::Plane { name: "floor".into(), origin, normal },
+            Op::Plane {
+                name: "floor".into(),
+                origin,
+                normal,
+            },
         );
         let got = p.plane("floor").expect("plane lookup");
         assert_eq!(got.0, origin);
@@ -484,8 +676,21 @@ mod tests {
     fn datum_ops_emit_no_geometry() {
         let r = rect(0.0, 0.0, 10.0, 20.0);
         let mut p = Program::default();
-        p.push("s", Op::Sketch { name: "s".into(), profile: r });
-        p.push("p", Op::Plane { name: "p".into(), origin: Vec3::ZERO, normal: Vec3::Z });
+        p.push(
+            "s",
+            Op::Sketch {
+                name: "s".into(),
+                profile: r,
+            },
+        );
+        p.push(
+            "p",
+            Op::Plane {
+                name: "p".into(),
+                origin: Vec3::ZERO,
+                normal: Vec3::Z,
+            },
+        );
         for n in 0..=p.len() {
             let s = run(&p, |i| i < n).expect("prefix");
             assert_eq!(s.faces.len(), 0, "datums emit nothing (prefix {n})");
@@ -496,20 +701,41 @@ mod tests {
     fn datum_lookup_survives_masked_downstream_op() {
         let r = rect(0.0, 0.0, 10.0, 20.0);
         let mut p = Program::default();
-        p.push("outline", Op::Sketch { name: "outline".into(), profile: r.clone() });
+        p.push(
+            "outline",
+            Op::Sketch {
+                name: "outline".into(),
+                profile: r.clone(),
+            },
+        );
         p.push(
             "walls",
-            Op::Wall { lower: r.clone(), upper: r, z0: 0.0, z1: 5.0, outward: true },
+            Op::Wall {
+                lower: r.clone(),
+                upper: r,
+                z0: 0.0,
+                z1: 5.0,
+                outward: true,
+            },
         );
         let _ = run(&p, |i| i != 1).expect("masked run");
-        assert_eq!(p.sketch("outline").unwrap().len(), 4, "sketch symbol survives masked downstream op");
+        assert_eq!(
+            p.sketch("outline").unwrap().len(),
+            4,
+            "sketch symbol survives masked downstream op"
+        );
     }
-
 
     fn sketch_box_program() -> Program {
         let r = rect(0.0, 0.0, 10.0, 20.0);
         let mut p = Program::default();
-        p.push("outline", Op::Sketch { name: "outline".into(), profile: r });
+        p.push(
+            "outline",
+            Op::Sketch {
+                name: "outline".into(),
+                profile: r,
+            },
+        );
         p.push(
             "block",
             Op::Extrude {
@@ -551,8 +777,20 @@ mod tests {
         let outer_clone = outer.clone();
         let pocket_clone = pocket.clone();
         let mut p = Program::default();
-        p.push("outer", Op::Sketch { name: "outer".into(), profile: outer });
-        p.push("pocket", Op::Sketch { name: "pocket".into(), profile: pocket });
+        p.push(
+            "outer",
+            Op::Sketch {
+                name: "outer".into(),
+                profile: outer,
+            },
+        );
+        p.push(
+            "pocket",
+            Op::Sketch {
+                name: "pocket".into(),
+                profile: pocket,
+            },
+        );
         p.push(
             "block + pocket",
             Op::Slabs {
@@ -575,10 +813,17 @@ mod tests {
         use crate::kernel::slab;
         let ground = slab::build_slabs(&[
             (slab::Op::Union, Slab::new(vec![outer_clone], 0.0, 5.0)),
-            (slab::Op::Difference, Slab::new(vec![pocket_clone], 2.0, 5.0)),
+            (
+                slab::Op::Difference,
+                Slab::new(vec![pocket_clone], 2.0, 5.0),
+            ),
         ])
         .expect("ground truth");
-        assert_eq!(s.faces.len(), ground.faces.len(), "program+slabs matches direct slab stack");
+        assert_eq!(
+            s.faces.len(),
+            ground.faces.len(),
+            "program+slabs matches direct slab stack"
+        );
     }
 
     #[test]
@@ -602,9 +847,27 @@ mod tests {
         let mid = rect(1.0, 1.0, 9.0, 19.0);
         let top = rect(0.0, 0.0, 10.0, 20.0);
         let mut p = Program::default();
-        p.push("bot", Op::Sketch { name: "bot".into(), profile: bot });
-        p.push("mid", Op::Sketch { name: "mid".into(), profile: mid });
-        p.push("top", Op::Sketch { name: "top".into(), profile: top });
+        p.push(
+            "bot",
+            Op::Sketch {
+                name: "bot".into(),
+                profile: bot,
+            },
+        );
+        p.push(
+            "mid",
+            Op::Sketch {
+                name: "mid".into(),
+                profile: mid,
+            },
+        );
+        p.push(
+            "top",
+            Op::Sketch {
+                name: "top".into(),
+                profile: top,
+            },
+        );
         p.push(
             "loft",
             Op::Loft {
@@ -626,24 +889,41 @@ mod tests {
         let mut p_old = Program::default();
         p_old.push(
             "walls",
-            Op::Wall { lower: r.clone(), upper: r.clone(), z0: 0.0, z1: 5.0, outward: true },
+            Op::Wall {
+                lower: r.clone(),
+                upper: r.clone(),
+                z0: 0.0,
+                z1: 5.0,
+                outward: true,
+            },
         );
         let mut p_new = Program::default();
         p_new.push(
             "walls",
-            Op::WallFaces { lower: r.clone(), upper: r, z0: 0.0, z1: 5.0, outward: true },
+            Op::WallFaces {
+                lower: r.clone(),
+                upper: r,
+                z0: 0.0,
+                z1: 5.0,
+                outward: true,
+            },
         );
         let (a, b) = (run_all(&p_old).unwrap(), run_all(&p_new).unwrap());
         assert_eq!(a.faces.len(), b.faces.len(), "WallFaces matches Wall");
     }
-
 
     fn box_with_hole_program(profile: HoleProfile) -> Program {
         let outline = rect(0.0, 0.0, 20.0, 20.0);
         let mouth_r = profile.mouth_radius();
         let mouth = Sketch::circle(10.0, 10.0, mouth_r).loops.remove(0);
         let mut p = Program::default();
-        p.push("outline", Op::Sketch { name: "outline".into(), profile: outline.clone() });
+        p.push(
+            "outline",
+            Op::Sketch {
+                name: "outline".into(),
+                profile: outline.clone(),
+            },
+        );
         p.push(
             "walls",
             Op::WallFaces {
@@ -656,7 +936,12 @@ mod tests {
         );
         p.push(
             "top",
-            Op::Cap { z: 5.0, up: true, outer: (outline.clone(), true), holes: vec![] },
+            Op::Cap {
+                z: 5.0,
+                up: true,
+                outer: (outline.clone(), true),
+                holes: vec![],
+            },
         );
         p.push(
             "hole",
@@ -680,7 +965,10 @@ mod tests {
 
     #[test]
     fn plain_hole_in_a_block_is_manifold() {
-        let p = box_with_hole_program(HoleProfile::Plain { radius: 2.0, depth: 3.0 });
+        let p = box_with_hole_program(HoleProfile::Plain {
+            radius: 2.0,
+            depth: 3.0,
+        });
         let s = run_all(&p).expect("run");
         s.validate().expect("block with plain hole is manifold");
     }
@@ -715,13 +1003,22 @@ mod tests {
         .unwrap()
         .faces
         .len();
-        assert!(cbore > plain, "counterbore ({cbore}) should exceed plain ({plain})");
+        assert!(
+            cbore > plain,
+            "counterbore ({cbore}) should exceed plain ({plain})"
+        );
     }
 
     #[test]
     fn countersink_returns_clean_error() {
         let mut p = Program::default();
-        p.push("outline", Op::Sketch { name: "outline".into(), profile: rect(0.0, 0.0, 20.0, 20.0) });
+        p.push(
+            "outline",
+            Op::Sketch {
+                name: "outline".into(),
+                profile: rect(0.0, 0.0, 20.0, 20.0),
+            },
+        );
         p.push(
             "block",
             Op::Extrude {
@@ -744,15 +1041,23 @@ mod tests {
             },
         );
         let err = run_all(&p).unwrap_err();
-        assert!(err.contains("Countersink not yet implemented"), "got: {err}");
+        assert!(
+            err.contains("Countersink not yet implemented"),
+            "got: {err}"
+        );
     }
-
 
     #[test]
     fn chamfer_top_rim_of_box_via_op() {
         let r = Sketch::rectangle(10.0, 10.0, 20.0, 20.0).loops.remove(0);
         let mut p = Program::default();
-        p.push("outline", Op::Sketch { name: "outline".into(), profile: r.clone() });
+        p.push(
+            "outline",
+            Op::Sketch {
+                name: "outline".into(),
+                profile: r.clone(),
+            },
+        );
         p.push(
             "walls",
             Op::WallFaces {
@@ -763,19 +1068,36 @@ mod tests {
                 outward: true,
             },
         );
-        p.push("top", Op::Cap { z: 5.0, up: true, outer: (r.clone(), true), holes: vec![] });
-        p.push("bottom", Op::Cap { z: 0.0, up: false, outer: (r.clone(), false), holes: vec![] });
+        p.push(
+            "top",
+            Op::Cap {
+                z: 5.0,
+                up: true,
+                outer: (r.clone(), true),
+                holes: vec![],
+            },
+        );
+        p.push(
+            "bottom",
+            Op::Cap {
+                z: 0.0,
+                up: false,
+                outer: (r.clone(), false),
+                holes: vec![],
+            },
+        );
         let plain = run_all(&p).expect("unblended").faces.len();
 
         p.push(
             "rim chamfer",
-            Op::Chamfer { edges: r.iter().map(|&s| (s, 5.0, 1.0, 1.0)).collect() },
+            Op::Chamfer {
+                edges: r.iter().map(|&s| (s, 5.0, 1.0, 1.0)).collect(),
+            },
         );
         let s = run_all(&p).expect("chamfer run");
         s.validate().expect("chamfered box is manifold");
         assert!(s.faces.len() > plain, "chamfer added bevel faces");
     }
-
 
     #[test]
     fn planarface_on_tilted_plane_lifts_vertices() {
@@ -797,12 +1119,18 @@ mod tests {
         let f = &s.faces[0];
         match f.surface {
             Surface::Plane { normal, .. } => {
-                assert!(normal.x.abs() > 0.1 && normal.z.abs() > 0.1, "tilted normal {normal}");
+                assert!(
+                    normal.x.abs() > 0.1 && normal.z.abs() > 0.1,
+                    "tilted normal {normal}"
+                );
             }
             _ => panic!("expected a Plane surface"),
         }
         let zs: Vec<f32> = s.verts.iter().map(|v| v.point.z).collect();
-        assert!(zs.iter().cloned().any(|z| (z - 5.0).abs() > 0.5), "vertices lifted off z=5: {zs:?}");
+        assert!(
+            zs.iter().cloned().any(|z| (z - 5.0).abs() > 0.5),
+            "vertices lifted off z=5: {zs:?}"
+        );
     }
 
     #[test]
@@ -832,16 +1160,28 @@ mod tests {
     #[test]
     fn extrude_with_tilted_plane_errors_cleanly() {
         let mut p = Program::default();
-        p.push("outline", Op::Sketch { name: "outline".into(), profile: rect(0.0, 0.0, 10.0, 10.0) });
+        p.push(
+            "outline",
+            Op::Sketch {
+                name: "outline".into(),
+                profile: rect(0.0, 0.0, 10.0, 10.0),
+            },
+        );
         p.push(
             "bad",
             Op::Extrude {
                 sketch: "outline".into(),
-                from: PlaneRef::Tilted { origin: Vec3::ZERO, normal: Vec3::new(1.0, 0.0, 1.0) },
+                from: PlaneRef::Tilted {
+                    origin: Vec3::ZERO,
+                    normal: Vec3::new(1.0, 0.0, 1.0),
+                },
                 to: PlaneRef::Z { z: 5.0, up: true },
             },
         );
         let err = run_all(&p).unwrap_err();
-        assert!(err.contains("tilted planes not yet supported"), "got: {err}");
+        assert!(
+            err.contains("tilted planes not yet supported"),
+            "got: {err}"
+        );
     }
 }

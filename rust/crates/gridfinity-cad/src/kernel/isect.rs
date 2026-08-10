@@ -1,4 +1,3 @@
-
 use crate::kernel::geom::{Curve, Surface, perp_unit};
 use crate::kernel::math::Vec3;
 
@@ -65,12 +64,17 @@ fn plane_plane(a: &Surface, b: &Surface) -> Intersection {
     let c = n1.dot(n2);
     let denom = 1.0 - c * c;
     let p0 = n1 * ((d1 - d2 * c) / denom) + n2 * ((d2 - d1 * c) / denom);
-    Intersection::Curves(vec![Curve::Line { p0, dir: dir.normalize() }])
+    Intersection::Curves(vec![Curve::Line {
+        p0,
+        dir: dir.normalize(),
+    }])
 }
 
 fn plane_sphere(pl: &Surface, sp: &Surface) -> Intersection {
     let (_, n) = plane_parts(pl);
-    let Surface::Sphere { center, radius, .. } = *sp else { unreachable!() };
+    let Surface::Sphere { center, radius, .. } = *sp else {
+        unreachable!()
+    };
     let d = pl.signed_distance(center);
     if d.abs() > radius + TOL {
         return Intersection::Empty;
@@ -89,12 +93,30 @@ fn plane_sphere(pl: &Surface, sp: &Surface) -> Intersection {
 }
 
 fn sphere_sphere(a: &Surface, b: &Surface) -> Intersection {
-    let Surface::Sphere { center: c1, radius: r1, .. } = *a else { unreachable!() };
-    let Surface::Sphere { center: c2, radius: r2, .. } = *b else { unreachable!() };
+    let Surface::Sphere {
+        center: c1,
+        radius: r1,
+        ..
+    } = *a
+    else {
+        unreachable!()
+    };
+    let Surface::Sphere {
+        center: c2,
+        radius: r2,
+        ..
+    } = *b
+    else {
+        unreachable!()
+    };
     let delta = c2 - c1;
     let d = delta.length();
     if d < TOL {
-        return if (r1 - r2).abs() < TOL { Intersection::Coincident } else { Intersection::Empty };
+        return if (r1 - r2).abs() < TOL {
+            Intersection::Coincident
+        } else {
+            Intersection::Empty
+        };
     }
     if d > r1 + r2 + TOL || d < (r1 - r2).abs() - TOL {
         return Intersection::Empty;
@@ -116,7 +138,12 @@ fn sphere_sphere(a: &Surface, b: &Surface) -> Intersection {
 
 fn plane_cylinder(pl: &Surface, cy: &Surface) -> Intersection {
     let (_, n) = plane_parts(pl);
-    let Surface::Cylinder { base, axis, radius, .. } = *cy else { unreachable!() };
+    let Surface::Cylinder {
+        base, axis, radius, ..
+    } = *cy
+    else {
+        unreachable!()
+    };
     let cos_t = axis.dot(n);
 
     if cos_t.abs() < TOL {
@@ -127,12 +154,21 @@ fn plane_cylinder(pl: &Surface, cy: &Surface) -> Intersection {
         let m = axis.cross(n).normalize();
         let foot = base - n * d;
         if (d.abs() - radius).abs() < TOL {
-            return Intersection::Curves(vec![Curve::Line { p0: foot, dir: axis }]);
+            return Intersection::Curves(vec![Curve::Line {
+                p0: foot,
+                dir: axis,
+            }]);
         }
         let h = (radius * radius - d * d).max(0.0).sqrt();
         return Intersection::Curves(vec![
-            Curve::Line { p0: foot + m * h, dir: axis },
-            Curve::Line { p0: foot - m * h, dir: axis },
+            Curve::Line {
+                p0: foot + m * h,
+                dir: axis,
+            },
+            Curve::Line {
+                p0: foot - m * h,
+                dir: axis,
+            },
         ]);
     }
 
@@ -157,7 +193,15 @@ fn plane_cylinder(pl: &Surface, cy: &Surface) -> Intersection {
 
 fn plane_cone(pl: &Surface, co: &Surface) -> Intersection {
     let (_, n) = plane_parts(pl);
-    let Surface::Cone { apex, axis, half_angle, .. } = *co else { unreachable!() };
+    let Surface::Cone {
+        apex,
+        axis,
+        half_angle,
+        ..
+    } = *co
+    else {
+        unreachable!()
+    };
     let cos_t = axis.dot(n).abs();
     let sin_ha = half_angle.sin();
 
@@ -228,15 +272,37 @@ fn cone_generator_hit(
 }
 
 fn cylinder_cylinder(a: &Surface, b: &Surface) -> Intersection {
-    let Surface::Cylinder { base: b1, axis: a1, radius: r1, .. } = *a else { unreachable!() };
-    let Surface::Cylinder { base: b2, axis: a2, radius: r2, .. } = *b else { unreachable!() };
+    let Surface::Cylinder {
+        base: b1,
+        axis: a1,
+        radius: r1,
+        ..
+    } = *a
+    else {
+        unreachable!()
+    };
+    let Surface::Cylinder {
+        base: b2,
+        axis: a2,
+        radius: r2,
+        ..
+    } = *b
+    else {
+        unreachable!()
+    };
     if a1.cross(a2).length() > TOL {
-        return Intersection::Unsupported("non-parallel cylinder/cylinder is a quartic space curve");
+        return Intersection::Unsupported(
+            "non-parallel cylinder/cylinder is a quartic space curve",
+        );
     }
     let d = b2 - b1;
     let off = d - a1 * d.dot(a1);
     if off.length() < TOL {
-        return if (r1 - r2).abs() < TOL { Intersection::Coincident } else { Intersection::Empty };
+        return if (r1 - r2).abs() < TOL {
+            Intersection::Coincident
+        } else {
+            Intersection::Empty
+        };
     }
     let dist = off.length();
     if dist > r1 + r2 + TOL || dist < (r1 - r2).abs() - TOL {
@@ -252,8 +318,14 @@ fn cylinder_cylinder(a: &Surface, b: &Surface) -> Intersection {
     let v = a1.cross(u).normalize();
     let h = h2.sqrt();
     Intersection::Curves(vec![
-        Curve::Line { p0: foot + v * h, dir: a1 },
-        Curve::Line { p0: foot - v * h, dir: a1 },
+        Curve::Line {
+            p0: foot + v * h,
+            dir: a1,
+        },
+        Curve::Line {
+            p0: foot - v * h,
+            dir: a1,
+        },
     ])
 }
 
@@ -263,7 +335,16 @@ fn plane_torus(a: &Surface, b: &Surface) -> Intersection {
         _ => (b, a),
     };
     let (_, n) = plane_parts(pl);
-    let Surface::Torus { center, axis, major_r, minor_r, .. } = *to else { unreachable!() };
+    let Surface::Torus {
+        center,
+        axis,
+        major_r,
+        minor_r,
+        ..
+    } = *to
+    else {
+        unreachable!()
+    };
     let cos_t = axis.dot(n).abs();
     if cos_t < TOL {
         let offset = -pl.signed_distance(center);
@@ -300,8 +381,18 @@ fn plane_torus(a: &Surface, b: &Surface) -> Intersection {
         }]);
     }
     Intersection::Curves(vec![
-        Curve::Circle { center: plane_center, axis, radius: major_r + dr, ref_dir },
-        Curve::Circle { center: plane_center, axis, radius: major_r - dr, ref_dir },
+        Curve::Circle {
+            center: plane_center,
+            axis,
+            radius: major_r + dr,
+            ref_dir,
+        },
+        Curve::Circle {
+            center: plane_center,
+            axis,
+            radius: major_r - dr,
+            ref_dir,
+        },
     ])
 }
 
@@ -344,8 +435,14 @@ mod tests {
     #[test]
     fn parallel_planes_are_empty_or_coincident() {
         let a = Surface::plane_z(2.0);
-        assert!(matches!(intersect_surfaces(&a, &Surface::plane_z(5.0)), Intersection::Empty));
-        assert!(matches!(intersect_surfaces(&a, &Surface::plane_z(2.0)), Intersection::Coincident));
+        assert!(matches!(
+            intersect_surfaces(&a, &Surface::plane_z(5.0)),
+            Intersection::Empty
+        ));
+        assert!(matches!(
+            intersect_surfaces(&a, &Surface::plane_z(2.0)),
+            Intersection::Coincident
+        ));
     }
 
     #[test]
@@ -353,16 +450,29 @@ mod tests {
         let sp = Surface::sphere(Vec3::new(1.0, 2.0, 3.0), 5.0);
         let pl = Surface::plane_z(1.0);
         assert_on_both(&pl, &sp, &intersect_surfaces(&pl, &sp));
-        let Intersection::Curves(c) = intersect_surfaces(&pl, &sp) else { panic!() };
-        let Curve::Circle { radius, .. } = c[0] else { panic!("want a circle") };
-        assert!((radius - (25.0f32 - 4.0).sqrt()).abs() < 1e-4, "radius {radius}");
+        let Intersection::Curves(c) = intersect_surfaces(&pl, &sp) else {
+            panic!()
+        };
+        let Curve::Circle { radius, .. } = c[0] else {
+            panic!("want a circle")
+        };
+        assert!(
+            (radius - (25.0f32 - 4.0).sqrt()).abs() < 1e-4,
+            "radius {radius}"
+        );
     }
 
     #[test]
     fn plane_sphere_misses_and_touches() {
         let sp = Surface::sphere(Vec3::ZERO, 2.0);
-        assert!(matches!(intersect_surfaces(&Surface::plane_z(9.0), &sp), Intersection::Empty));
-        assert!(matches!(intersect_surfaces(&Surface::plane_z(2.0), &sp), Intersection::Tangent(_)));
+        assert!(matches!(
+            intersect_surfaces(&Surface::plane_z(9.0), &sp),
+            Intersection::Empty
+        ));
+        assert!(matches!(
+            intersect_surfaces(&Surface::plane_z(2.0), &sp),
+            Intersection::Tangent(_)
+        ));
     }
 
     #[test]
@@ -387,9 +497,15 @@ mod tests {
         let pl = Surface::plane(Vec3::ZERO, Vec3::new(0.0, 1.0, 1.0).normalize());
         let isect = intersect_surfaces(&pl, &cy);
         assert_on_both(&pl, &cy, &isect);
-        let Curve::Ellipse { a, b, .. } = isect.curves()[0] else { panic!("want an ellipse") };
+        let Curve::Ellipse { a, b, .. } = isect.curves()[0] else {
+            panic!("want an ellipse")
+        };
         assert!((b.length() - 4.0).abs() < 1e-4, "semi-minor {}", b.length());
-        assert!((a.length() - 4.0 * 2.0f32.sqrt()).abs() < 1e-3, "semi-major {}", a.length());
+        assert!(
+            (a.length() - 4.0 * 2.0f32.sqrt()).abs() < 1e-3,
+            "semi-major {}",
+            a.length()
+        );
     }
 
     #[test]
@@ -407,14 +523,22 @@ mod tests {
         let pl = Surface::plane_z(-3.0);
         let isect = intersect_surfaces(&pl, &co);
         assert_on_both(&pl, &co, &isect);
-        let Curve::Circle { radius, .. } = isect.curves()[0] else { panic!("want a circle") };
-        assert!((radius - 3.0 * (PI / 6.0).tan()).abs() < 1e-4, "radius {radius}");
+        let Curve::Circle { radius, .. } = isect.curves()[0] else {
+            panic!("want a circle")
+        };
+        assert!(
+            (radius - 3.0 * (PI / 6.0).tan()).abs() < 1e-4,
+            "radius {radius}"
+        );
     }
 
     #[test]
     fn plane_cone_closed_section_is_an_ellipse() {
         let co = Surface::cone_z(Vec3::ZERO, PI / 8.0);
-        let pl = Surface::plane(Vec3::new(0.0, 0.0, -5.0), Vec3::new(0.0, 0.2, 1.0).normalize());
+        let pl = Surface::plane(
+            Vec3::new(0.0, 0.0, -5.0),
+            Vec3::new(0.0, 0.2, 1.0).normalize(),
+        );
         let isect = intersect_surfaces(&pl, &co);
         assert_on_both(&pl, &co, &isect);
         assert!(matches!(isect.curves()[0], Curve::Ellipse { .. }));
@@ -423,8 +547,14 @@ mod tests {
     #[test]
     fn plane_cone_open_section_is_reported_unsupported() {
         let co = Surface::cone_z(Vec3::ZERO, PI / 3.0);
-        let pl = Surface::plane(Vec3::new(0.0, 0.0, -5.0), Vec3::new(0.0, 1.0, 0.2).normalize());
-        assert!(matches!(intersect_surfaces(&pl, &co), Intersection::Unsupported(_)));
+        let pl = Surface::plane(
+            Vec3::new(0.0, 0.0, -5.0),
+            Vec3::new(0.0, 1.0, 0.2).normalize(),
+        );
+        assert!(matches!(
+            intersect_surfaces(&pl, &co),
+            Intersection::Unsupported(_)
+        ));
     }
 
     #[test]
@@ -453,7 +583,10 @@ mod tests {
     fn crossed_cylinders_are_reported_unsupported() {
         let a = Surface::cylinder_z(Vec3::ZERO, 3.0);
         let b = Surface::cylinder(Vec3::ZERO, Vec3::X, 3.0, Vec3::Y);
-        assert!(matches!(intersect_surfaces(&a, &b), Intersection::Unsupported(_)));
+        assert!(matches!(
+            intersect_surfaces(&a, &b),
+            Intersection::Unsupported(_)
+        ));
     }
 
     #[test]
@@ -470,7 +603,11 @@ mod tests {
         let to = Surface::torus_z(Vec3::ZERO, 10.0, 2.0);
         let pl = Surface::plane(Vec3::new(3.0, 0.0, 0.0), Vec3::X);
         let isect = intersect_surfaces(&pl, &to);
-        assert_eq!(isect.curves().len(), 2, "the two halves either side of the plane normal");
+        assert_eq!(
+            isect.curves().len(),
+            2,
+            "the two halves either side of the plane normal"
+        );
         assert_on_both(&pl, &to, &isect);
     }
 
@@ -485,7 +622,10 @@ mod tests {
     fn plane_torus_oblique_is_reported_unsupported() {
         let to = Surface::torus_z(Vec3::ZERO, 10.0, 2.0);
         let pl = Surface::plane(Vec3::ZERO, Vec3::new(0.0, 1.0, 1.0).normalize());
-        assert!(matches!(intersect_surfaces(&pl, &to), Intersection::Unsupported(_)));
+        assert!(matches!(
+            intersect_surfaces(&pl, &to),
+            Intersection::Unsupported(_)
+        ));
     }
 
     #[test]
@@ -501,7 +641,10 @@ mod tests {
     #[test]
     fn signed_distance_and_gradient_agree() {
         let surfaces = [
-            Surface::plane(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 1.0, 1.0).normalize()),
+            Surface::plane(
+                Vec3::new(1.0, 2.0, 3.0),
+                Vec3::new(1.0, 1.0, 1.0).normalize(),
+            ),
             Surface::cylinder_z(Vec3::new(1.0, 0.0, 0.0), 3.0),
             Surface::sphere(Vec3::new(0.0, 1.0, 0.0), 4.0),
             Surface::cone_z(Vec3::ZERO, PI / 5.0),

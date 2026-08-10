@@ -1,6 +1,5 @@
-
 use crate::kernel::geom::{Curve, Surface};
-use crate::kernel::math::{weld_key, Vec3};
+use crate::kernel::math::{Vec3, weld_key};
 use crate::kernel::topo::{EdgeId, Solid, VertexId};
 use std::collections::HashMap;
 
@@ -17,11 +16,15 @@ impl AuditReport {
     }
 
     pub fn errors(&self) -> impl Iterator<Item = &Defect> {
-        self.defects.iter().filter(|d| d.severity == Severity::Error)
+        self.defects
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
     }
 
     pub fn warnings(&self) -> impl Iterator<Item = &Defect> {
-        self.defects.iter().filter(|d| d.severity == Severity::Warning)
+        self.defects
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
     }
 
     pub fn counts(&self) -> Vec<(Category, usize)> {
@@ -138,11 +141,13 @@ pub struct TessLeak {
 pub fn tessellation_leaks(tess: &crate::kernel::tess::Tessellation) -> Vec<TessLeak> {
     use std::collections::HashMap;
     let tris: Vec<[Vec3; 3]> = tess.tris.iter().map(|t| t.pos).collect();
-    let key = |p: Vec3| (
-        (p.x * 1e3).round() as i64,
-        (p.y * 1e3).round() as i64,
-        (p.z * 1e3).round() as i64,
-    );
+    let key = |p: Vec3| {
+        (
+            (p.x * 1e3).round() as i64,
+            (p.y * 1e3).round() as i64,
+            (p.z * 1e3).round() as i64,
+        )
+    };
     let mut vid_of: HashMap<(i64, i64, i64), usize> = HashMap::new();
     let mut verts: Vec<Vec3> = Vec::new();
     let mut tris_idx: Vec<[usize; 3]> = Vec::with_capacity(tris.len());
@@ -195,14 +200,22 @@ pub fn tessellation_leaks(tess: &crate::kernel::tess::Tessellation) -> Vec<TessL
         }
     }
     leaks.sort_by(|l, r| {
-        l.a.z.partial_cmp(&r.a.z)
+        l.a.z
+            .partial_cmp(&r.a.z)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then(l.a.x.partial_cmp(&r.a.x).unwrap_or(std::cmp::Ordering::Equal))
-            .then(l.a.y.partial_cmp(&r.a.y).unwrap_or(std::cmp::Ordering::Equal))
+            .then(
+                l.a.x
+                    .partial_cmp(&r.a.x)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+            .then(
+                l.a.y
+                    .partial_cmp(&r.a.y)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
     });
     leaks
 }
-
 
 pub fn face_loops_self_intersect(solid: &Solid, fid: usize) -> bool {
     use crate::kernel::math::Vec2;
@@ -291,7 +304,6 @@ pub fn face_loops_self_intersect(solid: &Solid, fid: usize) -> bool {
     }
     false
 }
-
 
 fn audit_manifold(solid: &Solid, defects: &mut Vec<Defect>) {
     let edge_faces = solid.edge_faces();
@@ -549,8 +561,11 @@ fn audit_loop_containment(solid: &Solid, defects: &mut Vec<Defect>) {
         let mut outer_uv: Vec<[f32; 2]> = Vec::new();
         for &(e, fwd) in loops[0] {
             let s = &edge_pts[&e];
-            let chain: Vec<Vec3> = if fwd { s.iter().copied().collect() }
-                                  else { s.iter().rev().copied().collect() };
+            let chain: Vec<Vec3> = if fwd {
+                s.iter().copied().collect()
+            } else {
+                s.iter().rev().copied().collect()
+            };
             for p in &chain[..chain.len() - 1] {
                 outer_uv.push({
                     let uv = to_uv(*p);
@@ -570,8 +585,11 @@ fn audit_loop_containment(solid: &Solid, defects: &mut Vec<Defect>) {
             let mut any_out = false;
             for &(e, fwd) in lp.iter() {
                 let s = &edge_pts[&e];
-                let chain: Vec<Vec3> = if fwd { s.iter().copied().collect() }
-                                      else { s.iter().rev().copied().collect() };
+                let chain: Vec<Vec3> = if fwd {
+                    s.iter().copied().collect()
+                } else {
+                    s.iter().rev().copied().collect()
+                };
                 for p in &chain[..chain.len() - 1] {
                     let uv = to_uv(*p);
                     let mut uv_arr = [uv.0, uv.1];
@@ -596,7 +614,12 @@ fn audit_loop_containment(solid: &Solid, defects: &mut Vec<Defect>) {
                         "hole loop {} of face {fi} pokes {worst_out:.4} mm outside the outer \
                          boundary (at uv ({:.4},{:.4}), world ({:.4},{:.4},{:.4})); the trimmed \
                          surface is a self-intersecting polygon and will tessellate with leaks",
-                        li + 1, worst_uv[0], worst_uv[1], worst_p.x, worst_p.y, worst_p.z
+                        li + 1,
+                        worst_uv[0],
+                        worst_uv[1],
+                        worst_p.x,
+                        worst_p.y,
+                        worst_p.z
                     ),
                     location: Some(Location::LoopAt(fi, li + 1, 0)),
                 });
@@ -620,8 +643,11 @@ fn audit_loop_containment(solid: &Solid, defects: &mut Vec<Defect>) {
             let mut hole: Vec<[f32; 2]> = Vec::new();
             for &(e, fwd) in lp.iter() {
                 let sp = &edge_pts[&e];
-                let chain: Vec<Vec3> =
-                    if fwd { sp.to_vec() } else { sp.iter().rev().copied().collect() };
+                let chain: Vec<Vec3> = if fwd {
+                    sp.to_vec()
+                } else {
+                    sp.iter().rev().copied().collect()
+                };
                 for p in &chain[..chain.len() - 1] {
                     let uv = to_uv(*p);
                     hole.push([uv.0, uv.1]);
@@ -644,7 +670,6 @@ fn audit_loop_containment(solid: &Solid, defects: &mut Vec<Defect>) {
         }
     }
 }
-
 
 fn unwrap_angular(uv: &mut Vec<[f32; 2]>, surface: crate::kernel::geom::Surface) {
     use crate::kernel::geom::Surface;
@@ -706,7 +731,11 @@ fn dist2_point_to_seg(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f
     let dx = bx - ax;
     let dy = by - ay;
     let l2 = dx * dx + dy * dy;
-    let t = if l2 > 0.0 { (((px - ax) * dx + (py - ay) * dy) / l2).clamp(0.0, 1.0) } else { 0.0 };
+    let t = if l2 > 0.0 {
+        (((px - ax) * dx + (py - ay) * dy) / l2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let cx = ax + t * dx;
     let cy = ay + t * dy;
     (px - cx) * (px - cx) + (py - cy) * (py - cy)
@@ -715,22 +744,25 @@ fn dist2_point_to_seg(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f
 fn face_outward_normal(solid: &Solid, fi: usize, p: Vec3) -> Vec3 {
     let f = &solid.faces[fi];
     let n = f.surface.normal(f.surface.project(p));
-    if f.sense {
-        n
-    } else {
-        -n
-    }
+    if f.sense { n } else { -n }
 }
 
 fn dist_to_surface(p: Vec3, s: Surface) -> f32 {
     match s {
         Surface::Plane { origin, normal, .. } => (p - origin).dot(normal).abs(),
-        Surface::Cylinder { base, axis, radius, .. } => {
+        Surface::Cylinder {
+            base, axis, radius, ..
+        } => {
             let rel = p - base;
             let radial = rel - axis * rel.dot(axis);
             (radial.length() - radius).abs()
         }
-        Surface::Cone { apex, axis, half_angle, .. } => {
+        Surface::Cone {
+            apex,
+            axis,
+            half_angle,
+            ..
+        } => {
             let rel = p - apex;
             let along = rel.dot(axis);
             let perp = (rel - axis * along).length();
@@ -743,9 +775,7 @@ fn dist_to_surface(p: Vec3, s: Surface) -> f32 {
             }
         }
         Surface::Sphere { center, radius, .. } => ((p - center).length() - radius).abs(),
-        Surface::Torus { .. } => {
-            s.signed_distance(p).abs()
-        }
+        Surface::Torus { .. } => s.signed_distance(p).abs(),
     }
     .abs()
 }

@@ -28,3 +28,4 @@ required-features = ["badapple"]
 # this one.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 mimalloc = "0.1"
+rayon = "1"

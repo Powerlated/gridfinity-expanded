@@ -1,4 +1,3 @@
-
 use crate::kernel::geom::{Curve, Surface};
 use crate::kernel::math::Vec3;
 use crate::kernel::topo::{Builder, EdgeId, Solid};
@@ -41,7 +40,10 @@ pub fn fillet_best_effort(
             return Err(format!("blend: edge {e} out of range"));
         }
         if edge_faces[e].len() != 2 {
-            return Err(format!("blend: edge {e} has {} faces (want 2)", edge_faces[e].len()));
+            return Err(format!(
+                "blend: edge {e} has {} faces (want 2)",
+                edge_faces[e].len()
+            ));
         }
     }
     if let Ok(s) = fillet_edges_with(solid, blends, &edge_faces) {
@@ -151,7 +153,10 @@ fn fillet_edges_with(
             return Err(format!("blend: edge {e} out of range"));
         }
         if edge_faces[e].len() != 2 {
-            return Err(format!("blend: edge {e} has {} faces (want 2)", edge_faces[e].len()));
+            return Err(format!(
+                "blend: edge {e} has {} faces (want 2)",
+                edge_faces[e].len()
+            ));
         }
     }
 
@@ -197,7 +202,9 @@ fn fillet_edges_with(
         let nb_mid = face_outward(fb, mid);
         let sin_mid = na_mid.cross(nb_mid).length();
         if sin_mid < 1e-6 || r <= 0.0 {
-            return Err(format!("blend: edge {e} degenerate (parallel faces or r≤0)"));
+            return Err(format!(
+                "blend: edge {e} degenerate (parallel faces or r≤0)"
+            ));
         }
         let centroid_a = face_centroid(solid, fa);
         let to_centroid = centroid_a - mid;
@@ -232,7 +239,19 @@ fn fillet_edges_with(
         let mut blend = if plane_a.is_some() && plane_b.is_some() {
             build_cyl_blend(ed, cv0, cv1, ma, na0, ta_p0, ta_p1, tb_p0, tb_p1, r, fwd_a)?
         } else if cyl.is_some() && is_circle && (plane_a.is_some() || plane_b.is_some()) {
-            build_torus_blend(ed, cv0, cv1, na0, ta_p0, ta_p1, tb_p0, tb_p1, r, cyl.unwrap(), fwd_a)?
+            build_torus_blend(
+                ed,
+                cv0,
+                cv1,
+                na0,
+                ta_p0,
+                ta_p1,
+                tb_p0,
+                tb_p1,
+                r,
+                cyl.unwrap(),
+                fwd_a,
+            )?
         } else {
             return Err(format!(
                 "blend: edge {e} pair not supported (only plane/plane or plane/coaxial-cylinder)"
@@ -249,15 +268,17 @@ fn fillet_edges_with(
                 ));
             }
             let ft = find_runout_face(solid, v, fa, fb)?;
-            let plane = as_plane(&solid.faces[ft].surface).ok_or_else(|| {
-                format!("blend: runout face {ft} at vertex {v} is not planar")
-            })?;
+            let plane = as_plane(&solid.faces[ft].surface)
+                .ok_or_else(|| format!("blend: runout face {ft} at vertex {v} is not planar"))?;
             let dir = match ed.curve {
                 Curve::Line { dir, .. } => dir,
                 _ => return Err(format!("blend: runout at vertex {v} needs a straight edge")),
             };
-            let (cv, tap, tbp) =
-                if at_v0 { (cv0, ta_p0, tb_p0) } else { (cv1, ta_p1, tb_p1) };
+            let (cv, tap, tbp) = if at_v0 {
+                (cv0, ta_p0, tb_p0)
+            } else {
+                (cv1, ta_p1, tb_p1)
+            };
             let (ta_new, tb_new, arc) = runout_cyl(cv, dir, r, tap, tbp, plane)?;
             if at_v0 {
                 blend.ta_p0 = ta_new;
@@ -270,15 +291,25 @@ fn fillet_edges_with(
             }
             runouts.insert(
                 v,
-                Runout { face: ft, arc, ta_p: ta_new, tb_p: tb_new, fa, fb },
+                Runout {
+                    face: ft,
+                    arc,
+                    ta_p: ta_new,
+                    tb_p: tb_new,
+                    fa,
+                    fb,
+                },
             );
         }
         bm.insert(e, blend);
     }
 
     let mut vinfo: HashMap<usize, (Vec3, Vec3)> = HashMap::with_capacity(bm.len() * 2);
-    for (e, bld) in &bm {
-        let ed = solid.edges[*e];
+    let mut vinfo_order: Vec<EdgeId> = bm.keys().copied().collect();
+    vinfo_order.sort_unstable();
+    for e in vinfo_order {
+        let bld = &bm[&e];
+        let ed = solid.edges[e];
         vinfo.insert(ed.v0, (bld.ta_p0, bld.tb_p0));
         vinfo.insert(ed.v1, (bld.ta_p1, bld.tb_p1));
     }
@@ -286,9 +317,7 @@ fn fillet_edges_with(
     let mut edge_moved = vec![false; solid.edges.len()];
     for (e, moved) in edge_moved.iter_mut().enumerate() {
         let ed = solid.edges[e];
-        *moved = want.contains_key(&e)
-            || vinfo.contains_key(&ed.v0)
-            || vinfo.contains_key(&ed.v1);
+        *moved = want.contains_key(&e) || vinfo.contains_key(&ed.v0) || vinfo.contains_key(&ed.v1);
     }
     let mut touched = vec![false; solid.faces.len()];
     for (fi, t) in touched.iter_mut().enumerate() {
@@ -310,11 +339,35 @@ fn fillet_edges_with(
         }
         loop_scratch.clear();
         inner_ranges.clear();
-        rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, solid.outer_edges(fi), edge_faces, &mut b, &mut items_scratch, &mut loop_scratch)?;
+        rebuild_loop(
+            solid,
+            &bm,
+            &vinfo,
+            &runouts,
+            &want,
+            fi,
+            solid.outer_edges(fi),
+            edge_faces,
+            &mut b,
+            &mut items_scratch,
+            &mut loop_scratch,
+        )?;
         let outer_len = loop_scratch.len();
         for lp in solid.inner_loops(fi) {
             let before = loop_scratch.len();
-            rebuild_loop(solid, &bm, &vinfo, &runouts, &want, fi, lp, edge_faces, &mut b, &mut items_scratch, &mut loop_scratch)?;
+            rebuild_loop(
+                solid,
+                &bm,
+                &vinfo,
+                &runouts,
+                &want,
+                fi,
+                lp,
+                edge_faces,
+                &mut b,
+                &mut items_scratch,
+                &mut loop_scratch,
+            )?;
             inner_ranges.push(loop_scratch.len() - before);
         }
         let outer = &loop_scratch[..outer_len];
@@ -381,7 +434,8 @@ fn face_centroid(solid: &Solid, fid: usize) -> Vec3 {
     if n > 0 { sum / n as f32 } else { Vec3::ZERO }
 }
 
-fn as_plane(s: &Surface) -> Option<(Vec3, Vec3)> {    if let Surface::Plane { origin, normal, .. } = s {
+fn as_plane(s: &Surface) -> Option<(Vec3, Vec3)> {
+    if let Surface::Plane { origin, normal, .. } = s {
         Some((*origin, *normal))
     } else {
         None
@@ -389,7 +443,10 @@ fn as_plane(s: &Surface) -> Option<(Vec3, Vec3)> {    if let Surface::Plane { or
 }
 
 fn as_cyl(s: &Surface) -> Option<(Vec3, Vec3, f32)> {
-    if let Surface::Cylinder { base, axis, radius, .. } = s {
+    if let Surface::Cylinder {
+        base, axis, radius, ..
+    } = s
+    {
         Some((*base, *axis, *radius))
     } else {
         None
@@ -450,7 +507,9 @@ fn find_runout_face(solid: &Solid, v: usize, fa: usize, fb: usize) -> Result<usi
     match cands.len() {
         1 => Ok(cands[0]),
         0 => Err(format!("blend runout: no terminating face at vertex {v}")),
-        n => Err(format!("blend runout: {n} candidate terminating faces at vertex {v}")),
+        n => Err(format!(
+            "blend runout: {n} candidate terminating faces at vertex {v}"
+        )),
     }
 }
 
@@ -477,7 +536,11 @@ fn runout_cyl(
     let u = (tb_p - cv).normalize_or_zero();
     let t1 = u.dot(e2).atan2(u.dot(e1));
     let arc = CurvEdge {
-        curve: Curve::Ellipse { center: onto(cv), a: a_vec, b: b_vec },
+        curve: Curve::Ellipse {
+            center: onto(cv),
+            a: a_vec,
+            b: b_vec,
+        },
         t0: 0.0,
         t1,
     };
@@ -504,16 +567,41 @@ fn build_cyl_blend(
     };
     let ref_dir = (-ma).normalize_or(Vec3::X);
 
-    let ta = CurvEdge { curve: Curve::Line { p0: ta_p0, dir }, t0: 0.0, t1: (ta_p1 - ta_p0).length() };
-    let tb = CurvEdge { curve: Curve::Line { p0: tb_p0, dir }, t0: 0.0, t1: (tb_p1 - tb_p0).length() };
+    let ta = CurvEdge {
+        curve: Curve::Line { p0: ta_p0, dir },
+        t0: 0.0,
+        t1: (ta_p1 - ta_p0).length(),
+    };
+    let tb = CurvEdge {
+        curve: Curve::Line { p0: tb_p0, dir },
+        t0: 0.0,
+        t1: (tb_p1 - tb_p0).length(),
+    };
 
     let ca0 = connect_arc(cv0, dir, ta_p0, tb_p0)?;
     let ca1 = connect_arc(cv1, dir, ta_p1, tb_p1)?;
 
-    let surface = Surface::Cylinder { base: cv0, axis: dir, radius: r, ref_dir };
+    let surface = Surface::Cylinder {
+        base: cv0,
+        axis: dir,
+        radius: r,
+        ref_dir,
+    };
     let sense = surface.normal(surface.project(ta_p0)).dot(na0) > 0.0;
 
-    Ok(Fillet { ta, tb, ca0, ca1, ta_p0, ta_p1, tb_p0, tb_p1, surface, sense, fwd_a })
+    Ok(Fillet {
+        ta,
+        tb,
+        ca0,
+        ca1,
+        ta_p0,
+        ta_p1,
+        tb_p0,
+        tb_p1,
+        surface,
+        sense,
+        fwd_a,
+    })
 }
 
 fn circle_span(
@@ -545,7 +633,11 @@ fn circle_span(
     };
     let want = angle(p1);
     let miss = |s: f32| wrapped(t0 + s - want).abs();
-    let sweep = if miss(span.abs()) <= miss(-span.abs()) { span.abs() } else { -span.abs() };
+    let sweep = if miss(span.abs()) <= miss(-span.abs()) {
+        span.abs()
+    } else {
+        -span.abs()
+    };
     (t0, t0 + sweep)
 }
 
@@ -565,7 +657,12 @@ fn build_torus_blend(
 ) -> Result<Fillet, String> {
     let (cyl_base, cyl_axis, _cyl_radius) = cyl;
     let (edge_center, edge_axis, edge_radius, edge_ref_dir) = match ed.curve {
-        Curve::Circle { center, axis, radius, ref_dir } => (center, axis, radius, ref_dir),
+        Curve::Circle {
+            center,
+            axis,
+            radius,
+            ref_dir,
+        } => (center, axis, radius, ref_dir),
         _ => return Err("torus blend: edge not a circle".into()),
     };
     let (a0, a1) = (ed.t0, ed.t1);
@@ -594,12 +691,22 @@ fn build_torus_blend(
     let (ta_t0, ta_t1) = circle_span(ta_center, torus_axis, ref_dir, ta_p0, ta_p1, (a0, a1));
     let (tb_t0, tb_t1) = circle_span(tb_center, torus_axis, ref_dir, tb_p0, tb_p1, (a0, a1));
     let ta = CurvEdge {
-        curve: Curve::Circle { center: ta_center, axis: torus_axis, radius: ta_r, ref_dir },
+        curve: Curve::Circle {
+            center: ta_center,
+            axis: torus_axis,
+            radius: ta_r,
+            ref_dir,
+        },
         t0: ta_t0,
         t1: ta_t1,
     };
     let tb = CurvEdge {
-        curve: Curve::Circle { center: tb_center, axis: torus_axis, radius: tb_r, ref_dir },
+        curve: Curve::Circle {
+            center: tb_center,
+            axis: torus_axis,
+            radius: tb_r,
+            ref_dir,
+        },
         t0: tb_t0,
         t1: tb_t1,
     };
@@ -616,7 +723,19 @@ fn build_torus_blend(
 
     let sense = surface.normal(surface.project(ta_p0)).dot(na0) > 0.0;
 
-    Ok(Fillet { ta, tb, ca0, ca1, ta_p0, ta_p1, tb_p0, tb_p1, surface, sense, fwd_a })
+    Ok(Fillet {
+        ta,
+        tb,
+        ca0,
+        ca1,
+        ta_p0,
+        ta_p1,
+        tb_p0,
+        tb_p1,
+        surface,
+        sense,
+        fwd_a,
+    })
 }
 
 fn connect_arc(center: Vec3, axis: Vec3, from_pt: Vec3, to_pt: Vec3) -> Result<CurvEdge, String> {
@@ -690,26 +809,44 @@ fn rebuild_loop(
             let bld = &bm[&e];
             let side_a = ef[e][0] == fi;
             let ce = if side_a { bld.ta } else { bld.tb };
-            let (tp0, tp1) = if side_a { (bld.ta_p0, bld.ta_p1) } else { (bld.tb_p0, bld.tb_p1) };
+            let (tp0, tp1) = if side_a {
+                (bld.ta_p0, bld.ta_p1)
+            } else {
+                (bld.tb_p0, bld.tb_p1)
+            };
             let (start, end) = if fwd { (tp0, tp1) } else { (tp1, tp0) };
-            items.push(Emitted { edge: emit_curv(b, start, end, ce), start, end_v, end });
+            items.push(Emitted {
+                edge: emit_curv(b, start, end, ce),
+                start,
+                end_v,
+                end,
+            });
         } else {
             let pos0 = solid.verts[ed.v0].point;
             let pos1 = solid.verts[ed.v1].point;
-            let new0 = split_at(ed.v0, e)
-                .unwrap_or_else(|| move_vertex(vinfo, ed.v0, pos0, face_surface));
-            let new1 = split_at(ed.v1, e)
-                .unwrap_or_else(|| move_vertex(vinfo, ed.v1, pos1, face_surface));
+            let new0 =
+                split_at(ed.v0, e).unwrap_or_else(|| move_vertex(vinfo, ed.v0, pos0, face_surface));
+            let new1 =
+                split_at(ed.v1, e).unwrap_or_else(|| move_vertex(vinfo, ed.v1, pos1, face_surface));
             let (start, end) = if fwd { (new0, new1) } else { (new1, new0) };
             let vs = b.vertex(start);
             let ve = b.vertex(end);
             let eid = match ed.curve {
                 Curve::Line { .. } => b.line(vs, ve),
-                Curve::Circle { center, axis, radius, ref_dir } => {
+                Curve::Circle {
+                    center,
+                    axis,
+                    radius,
+                    ref_dir,
+                } => {
                     let (a0, a1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
                     b.arc(vs, ve, center, axis, radius, ref_dir, a0, a1)
                 }
-                Curve::Ellipse { center, a: ea, b: eb } => {
+                Curve::Ellipse {
+                    center,
+                    a: ea,
+                    b: eb,
+                } => {
                     let (t0, t1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
                     b.ellipse(vs, ve, center, ea, eb, t0, t1)
                 }
@@ -718,7 +855,12 @@ fn rebuild_loop(
                     b.torus_section(vs, ve, ed.curve, t0, t1)
                 }
             };
-            items.push(Emitted { edge: eid, start, end_v, end });
+            items.push(Emitted {
+                edge: eid,
+                start,
+                end_v,
+                end,
+            });
         }
     }
 
@@ -736,9 +878,18 @@ fn rebuild_loop(
     Ok(())
 }
 
-fn move_vertex(vinfo: &HashMap<usize, (Vec3, Vec3)>, v: usize, fallback: Vec3, surface: Surface) -> Vec3 {
+fn move_vertex(
+    vinfo: &HashMap<usize, (Vec3, Vec3)>,
+    v: usize,
+    fallback: Vec3,
+    surface: Surface,
+) -> Vec3 {
     if let Some((pa, pb)) = vinfo.get(&v) {
-        if dist_to_surface(*pa, surface) < dist_to_surface(*pb, surface) { *pa } else { *pb }
+        if dist_to_surface(*pa, surface) < dist_to_surface(*pb, surface) {
+            *pa
+        } else {
+            *pb
+        }
     } else {
         fallback
     }
@@ -747,7 +898,9 @@ fn move_vertex(vinfo: &HashMap<usize, (Vec3, Vec3)>, v: usize, fallback: Vec3, s
 fn dist_to_surface(p: Vec3, s: Surface) -> f32 {
     match s {
         Surface::Plane { origin, normal, .. } => (p - origin).dot(normal).abs(),
-        Surface::Cylinder { base, axis, radius, .. } => {
+        Surface::Cylinder {
+            base, axis, radius, ..
+        } => {
             let rel = p - base;
             (rel - axis * rel.dot(axis)).length() - radius
         }
@@ -766,16 +919,37 @@ fn emit_curv(b: &mut Builder, start: Vec3, end: Vec3, ce: CurvEdge) -> (EdgeId, 
     };
     match ce.curve {
         Curve::Line { .. } => b.line(vs, ve),
-        Curve::Circle { center, axis, radius, ref_dir } => {
-            let (t0, t1) = if forward() { (ce.t0, ce.t1) } else { (ce.t1, ce.t0) };
+        Curve::Circle {
+            center,
+            axis,
+            radius,
+            ref_dir,
+        } => {
+            let (t0, t1) = if forward() {
+                (ce.t0, ce.t1)
+            } else {
+                (ce.t1, ce.t0)
+            };
             b.arc(vs, ve, center, axis, radius, ref_dir, t0, t1)
         }
-        Curve::Ellipse { center, a: ea, b: eb } => {
-            let (t0, t1) = if forward() { (ce.t0, ce.t1) } else { (ce.t1, ce.t0) };
+        Curve::Ellipse {
+            center,
+            a: ea,
+            b: eb,
+        } => {
+            let (t0, t1) = if forward() {
+                (ce.t0, ce.t1)
+            } else {
+                (ce.t1, ce.t0)
+            };
             b.ellipse(vs, ve, center, ea, eb, t0, t1)
         }
         Curve::TorusSection { .. } => {
-            let (t0, t1) = if forward() { (ce.t0, ce.t1) } else { (ce.t1, ce.t0) };
+            let (t0, t1) = if forward() {
+                (ce.t0, ce.t1)
+            } else {
+                (ce.t1, ce.t0)
+            };
             b.torus_section(vs, ve, ce.curve, t0, t1)
         }
     }
@@ -809,7 +983,10 @@ mod tests {
 
         let direct = fillet_edges(&solid, &top).expect("rim blends");
         let (best, dropped) = fillet_best_effort(&solid, &top).expect("sound input");
-        assert!(dropped.is_empty(), "nothing should be dropped, got {dropped:?}");
+        assert!(
+            dropped.is_empty(),
+            "nothing should be dropped, got {dropped:?}"
+        );
         assert_eq!(best.faces.len(), direct.faces.len());
         best.validate().expect("best-effort result is manifold");
     }
@@ -861,7 +1038,12 @@ mod tests {
         let p1 = Vec3::new(78.55, 4.0, 23.7);
         let src = (0.0, -std::f32::consts::FRAC_PI_2);
         let (t0, t1) = circle_span(center, axis, ref_dir, p0, p1, src);
-        let c = Curve::Circle { center, axis, radius: 1.45, ref_dir };
+        let c = Curve::Circle {
+            center,
+            axis,
+            radius: 1.45,
+            ref_dir,
+        };
         assert!(approx(c.point(t0), p0), "span start {:?}", c.point(t0));
         assert!(approx(c.point(t1), p1), "span end {:?}", c.point(t1));
     }
@@ -872,6 +1054,10 @@ mod tests {
         let p = Vec3::new(3.0, 0.0, 0.0);
         let src = (0.0, std::f32::consts::TAU);
         let (t0, t1) = circle_span(center, Vec3::Z, Vec3::X, p, p, src);
-        assert!((t1 - t0 - std::f32::consts::TAU).abs() < 1e-4, "sweep {}", t1 - t0);
+        assert!(
+            (t1 - t0 - std::f32::consts::TAU).abs() < 1e-4,
+            "sweep {}",
+            t1 - t0
+        );
     }
 }
