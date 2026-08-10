@@ -194,7 +194,43 @@ and `fuzz_split_pieces` are clean of *unexpected* findings at all six, meeting o
 `TRIM_SECTION_CURVE` at 1-3/120. `fuzz_inner_walls` is green at the default seed and finds 1-5/150
 of the freeform defects below at others. `fuzz_params_broad` is at 9/400 / 6 defects.
 
-Three defects this rewrite found, all pre-existing and none diagnosed:
+### The long campaign, and what it fixed
+
+`FUZZ_CASES=6000 fuzz_params_broad` plus 3000-4000 on every other profile is the census these
+counts come from. It started at **243/6000 across 15 distinct defects**; three fixes took it to
+**170/6000 across 11**, and every one of them was a real model defect that only a long run reaches:
+
+- **A partial-height wall's ramp asked for a blend the size of the arc it rolls along.**
+  `plan_cavity_banded` took `r = min(total_h - top, TRANSITION_R)` with no reference to the cavity
+  corner it lands on, so `cavity_corner_radius: 4.0` against `TRANSITION_R` 4.0 put the blend's
+  centre on the arc's own axis and `build_torus_blend` asserted `major 0`. Exactly `rc == 4.0`
+  failed while 3.9 and 4.1 built. `blend_radius_along` now pulls any requested radius clear of the
+  segment's own by `MIN_TORUS_MAJOR`, per contact segment rather than per notch, since one run can
+  mix straight pieces with arcs and only the arcs constrain it.
+- **A sloped bin with a thin wall escaped its own rounded corner.** A sloped floor builds its cavity
+  square, and a sharp corner sits `sqrt(2)*(OUTER_R - wt)` from the outer arc's centre while the arc
+  reaches only `OUTER_R`, so below ~1.1 mm the cavity left the rim face it is a hole of and
+  `plan_piece` panicked with `total_h hole without a containing face`. The flat path solves this by
+  rounding the cavity concentric with the outer arc; the sloped path **cannot**, because
+  `ring_on_plane` names an arc on a tilted plane with a Z-axis circle when the true section is an
+  ellipse — rounding it there swaps the panic for eight `EdgeOn` audit errors. So the wall is
+  clamped to `SLOPED_MIN_WALL` instead, the same kind of clamp the model already applies at 0.4 mm
+  and `PEG_TANGENT - 0.6`. Tangency is not enough: 1.0983 (the exact algebraic threshold) still
+  fails and 1.10 builds, hence the 0.05 of clearance.
+- **A sloped bin took no inner wall at all** — not a rare one, *any* of them, a plain straight
+  spanning divider included. The wall is carved as a z-prism island whose bottom ring sits at a flat
+  `floor_z`, and a tilted floor is not at `floor_z`, so `audit` reported `EdgeOnSurface` and
+  `EdgeVertexGeometry` in equal numbers. The partial-height branch already skipped walls on a slope;
+  the full-height branch now does too, so a sloped bin builds without its dividers rather than
+  emitting unsound geometry. **This is the one fix that drops a feature the user asked for**, and it
+  is worth revisiting whenever the sloped cavity stops being a special case.
+
+What remains at 170/6000, biggest first. **124 of them (73%) are one family: openings meeting
+geometry that is not a straight perimeter run** — the four panics below plus a non-tiling face and
+the enclosed-hole `total_h` case. The rest are 14 of the `wt = 2.700` manifold coincidence, 17
+free-form-wall tessellation leaks, and 15 sloped audit failures.
+
+Defects this rewrite found, all pre-existing and none diagnosed:
 
 - **An opening whose run abuts a reentrant fillet panics the open-run planner** — `open-run
   neighbour must be straight (got an arc before/after the run)`, 7/150 on L-shaped bins, plus a
@@ -203,6 +239,19 @@ Three defects this rewrite found, all pre-existing and none diagnosed:
   segment to the hit. At a reentrant corner the adjacent cavity segment is the concave fillet arc,
   and there is no line to cast along or to truncate. This is why the two asserting opening profiles
   use `Shape::Rect`; `Shape::SmallRect` in `fuzz_params_broad` is what produces the corner.
+
+  The dump that explains it, for cells `(0,0) (0,1) (1,1)` with `GridEdge { 1, 1, H }` open: the
+  cavity loop reaches the run through `Arc { (40.55, 39.52) -> (43.03, 42.0), r 2.48 }`, the
+  reentrant fillet, and the run itself is `Line { (43.03, 42.0) -> (82.55, 42.0) }` lying on the
+  **pitch line** y=42 rather than on a wall — that is what an open span does, it extends the cavity
+  out past the outer boundary so the pinch can pull it back. On a rectangle the neighbour is the
+  side wall running out to the same pitch line and `d_prev` points straight back up it at the outer
+  boundary; at a reentrant corner the run instead starts *west of the notch's outer corner*
+  (43.03 against 41.75), out over the empty cell, so there is no outer line to pull back to. Simply
+  refusing to round the corner does not help: the neighbour becomes a straight wall at x=40.55 and
+  the cast still finds nothing, which is the `no pinch for run start` panic. **The fix is a design
+  question, not a repair** — the cavity has to follow the outer boundary around the notch instead of
+  running to the pitch line, which decides what such a bin looks like. Do not guess it.
 - **Two inner walls crossing at a cell centre hand the triangulator a face whose loops do not
   tile** (`CROSSING_WALL_TILING`), ~1-2% of tidy configurations. Characterised: **independent of
   tessellation density** (fails identically at segs 2 through 24, so it is a bad loop and not a

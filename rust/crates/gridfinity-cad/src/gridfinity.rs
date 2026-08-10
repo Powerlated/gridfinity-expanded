@@ -331,6 +331,35 @@ pub fn build_bin_solid_reporting(
 
 const REENTRANT_FILLET_OVERHANG: f32 = 8.0;
 
+/// The thinnest wall a *square* cavity corner can carry inside the outer arc.
+/// A sharp corner of a cavity inset `wt` sits `sqrt(2) * (OUTER_R - wt)` from
+/// the outer arc's centre, so `OUTER_R * (1 - 1/sqrt(2))` is where it reaches
+/// exactly as far as the arc itself -- tangency, which leaves *zero* wall at
+/// that point and still fails containment. The 0.05 is the clearance that
+/// makes it a wall rather than a touch; measured, 1.0983 fails and 1.10 builds.
+/// Only sloped bins need this: every other bin rounds its cavity corner
+/// concentric with the outer arc instead.
+const SLOPED_MIN_WALL: f32 = OUTER_R * (1.0 - std::f32::consts::FRAC_1_SQRT_2) + 0.05;
+
+/// A rolling-ball blend along an arc builds a torus whose major radius is the
+/// gap between the arc and the ball, so equal radii put the blend's centre on
+/// the arc's own axis and the torus degenerates to a ring -- which
+/// `build_torus_blend` asserts against. Every radius handed to `fillet_edges`
+/// keeps at least this much clearance from the arcs it rolls along.
+const MIN_TORUS_MAJOR: f32 = 0.1;
+
+/// `want`, pulled clear of `seg`'s own radius if a blend that size would
+/// degenerate on it. Returns something below 0.05 when no usable blend is left,
+/// which every caller reads as "leave this edge sharp".
+fn blend_radius_along(seg: &Seg, want: f32) -> f32 {
+    match *seg {
+        Seg::Arc { radius, .. } if (radius - want).abs() < MIN_TORUS_MAJOR => {
+            radius - MIN_TORUS_MAJOR
+        }
+        _ => want,
+    }
+}
+
 /// Cut one printable piece out of the finished bin: keep the material inside the
 /// vertical prism over the piece's cells. A piece is any connected polyomino, not
 /// necessarily a grid slab, so this must follow the cell set itself -- trimming to
@@ -1403,6 +1432,22 @@ fn plan_piece(
     } else {
         p.wall_thickness.max(0.4)
     };
+    // A sloped floor builds its cavity square (see the `convex_r` choice
+    // below), and a sharp convex corner sits `sqrt(2) * (OUTER_R - wt)` from
+    // the outer arc's centre while the arc itself reaches only `OUTER_R`. Below
+    // `SLOPED_MIN_WALL` the cavity escapes the rounded corner entirely, is no
+    // longer inside the rim face it is a hole of, and panicked `plan_piece`
+    // with `total_h hole without a containing face`. The flat path keeps its
+    // wall by rounding the cavity concentric with the outer arc; the sloped
+    // path cannot, because `ring_on_plane` names an arc on a tilted plane with
+    // a Z-axis circle and the true section is an ellipse. So the wall is held
+    // to what a square corner can carry -- the same kind of clamp the model
+    // already applies at 0.4 mm and at `PEG_TANGENT - 0.6`.
+    let wt = if slope.is_some() {
+        wt.max(SLOPED_MIN_WALL)
+    } else {
+        wt
+    };
     drop(_g);
     let mut _g = crate::kernel::perf::scope(crate::kernel::perf::Metric::PlanCavity);
     let (pos, neg) = plan_cavity(cells, &walls, wt);
@@ -1453,12 +1498,24 @@ fn plan_piece(
                 fr: 0.0,
             })
             .collect();
-        let full_walls: Vec<Vec<Seg>> = p
-            .inner_walls
-            .iter()
-            .filter(|w| w.height.is_none_or(|h| h >= cavity_depth))
-            .filter_map(|w| inner_wall_quad_in(w, fr, &cl.segs))
-            .collect();
+        // A sloped bin takes no free-form inner wall at all. The wall is carved
+        // out of the cavity as a z-prism island whose bottom ring sits at a
+        // flat `floor_z`, but a sloped floor is a tilted plane, so the island's
+        // bottom edges do not lie on the floor they meet -- `audit` reports
+        // `EdgeOnSurface` and `EdgeVertexGeometry` in equal numbers, and a
+        // plain straight divider is as broken as a diagonal one. Dropping the
+        // wall is what the partial-height branch below already does on a slope;
+        // doing it here too means a sloped bin builds without its dividers
+        // rather than failing outright.
+        let full_walls: Vec<Vec<Seg>> = if slope.is_some() {
+            Vec::new()
+        } else {
+            p.inner_walls
+                .iter()
+                .filter(|w| w.height.is_none_or(|h| h >= cavity_depth))
+                .filter_map(|w| inner_wall_quad_in(w, fr, &cl.segs))
+                .collect()
+        };
         let mut entries: Vec<(CavityLoop, Vec<Island>, Option<Banded>)> = Vec::new();
         if cl.touched() || full_walls.is_empty() {
             entries.push((cl, islands, None));
@@ -1581,7 +1638,6 @@ fn plan_piece(
                 continue 'walls;
             }
         }
-        const MIN_TORUS_MAJOR: f32 = 0.1;
         let clamp = |segs: &[Seg], ball_inside_convex: bool, loop_fr: &mut f32| {
             for s in segs {
                 if let Seg::Arc { radius, .. } = s {
@@ -2401,11 +2457,17 @@ fn plan_cavity_banded(
 
     let mut blends: Vec<(Seg, f32, f32)> = Vec::new();
     for n in &bd.notches {
-        let r = (total_h - n.top).min(TRANSITION_R);
-        if r < 0.05 {
-            continue;
+        let want = (total_h - n.top).min(TRANSITION_R);
+        // Per contact segment, not per notch: the run a ramp blends along can
+        // mix straight pieces with the cavity's corner arcs, and only the arcs
+        // constrain the radius.
+        for s in &n.contact {
+            let r = blend_radius_along(s, want);
+            if r < 0.05 {
+                continue;
+            }
+            blends.push((*s, n.top, r));
         }
-        blends.extend(n.contact.iter().map(|s| (*s, n.top, r)));
     }
 
     (stack, opts, tops, rim, blends)
