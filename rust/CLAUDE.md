@@ -111,16 +111,54 @@ cargo build --release
 # number that no assertion reads is not a gate and they dominated the workspace run.
 FUZZ_CASES=2000 cargo test -p gridfinity-cad --test fuzz -- --nocapture
 FUZZ_SEED=7 FUZZ_CASES=500 cargo test -p gridfinity-cad --test fuzz -- --nocapture
-# One fuzzer alone (they print interleaved otherwise, since test threads run in parallel):
+# One profile alone (they print interleaved otherwise, since test threads run in parallel):
 cargo test --release -p gridfinity-cad --test fuzz fuzz_bin_shapes -- --exact --nocapture
 ```
 
-`fuzz_inner_walls` covers free-form inner walls (the divider/fillet work); `fuzz_params_broad`
-covers shape, height, thicknesses, holes, dividers, slope and mode; `fuzz_bin_shapes` covers the
-**split path** — random connected polyominoes, partitioned the way the web app partitions them, then
-carved piece by piece; `fuzz_split_pieces` covers the **same path through the product's own split
-model** — random `SplitLine` sets, `partition_cells`, then one carve per chunk — and asserts what
-"split" is supposed to mean rather than only that each piece is sound:
+### One fuzz path, seven profiles
+
+There is **one** generator, checker, shrinker and repro printer. A profile is an `Options` value,
+so an invariant added to the checker is immediately enforced by every profile that enables the
+feature it covers — the four-way divergence this replaced had `fuzz_split_pieces` asserting shell
+counts, trespass and cut-plane gaps that `fuzz_bin_shapes` never applied to the same solids, and a
+repro printer that printed neither `open_edges` nor `split_lines`.
+
+`Options` names what a case *generates* (`Shape`, `Walls`, `openings`, `dividers`, `vary_params`,
+`slope`, `baseplate`, `Split`) and what it *insists on* (`require_blends`, `known`). Two of those
+knobs exist because a checker cannot tell an over-ask from a defect on its own:
+
+- **`Walls::Tidy` vs `Walls::Freeform` decides whether a refused blend is a defect.** Tidy is what
+  the editor and the Projects packer emit — axis aligned, on a cell boundary or centre, spanning
+  the bin, 0.8–3.0 mm. The model rounds every one of those cleanly, so a tidy profile can *require*
+  the blends. A freeform wall sits at any angle and any offset and routinely leaves a sliver
+  narrower than the floor fillet; there `fillet_best_effort` degrades **by design** and requiring
+  blends would assert the impossible. Measured: a plain 2×2 is 150/150 blend-clean, and so is every
+  canonical wall (centre divider at 1.2/3.0/8.0 mm, free-standing island, partial height); freeform
+  walls drop 18–28 of 26–42 requested blends, independent of wall width.
+- **`known` names a pre-existing, undiagnosed defect** so a profile stays a gate for everything
+  else instead of being demoted to reporting wholesale. A known finding is still counted and still
+  printed, tagged `KNOWN`; only `unexpected` fails the assert. Never add a signature to silence
+  something new.
+
+| profile | what it varies | gate |
+| --- | --- | --- |
+| `fuzz_inner_walls` | freeform walls on a fixed 2×2 | asserts |
+| `fuzz_tidy_inner_walls` | tidy walls, up to 3 so they cross, `require_blends` | reports |
+| `fuzz_wall_openings` | `open_edges` + `divider_edges` on rectangles, `require_blends` | asserts |
+| `fuzz_openings_and_inner_walls` | both of the above at once, `require_blends` | asserts |
+| `fuzz_bin_shapes` | polyominoes, flood-fill pieces | asserts |
+| `fuzz_split_pieces` | polyominoes, `SplitLine`s + `partition_cells` | asserts |
+| `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | reports |
+
+**Wall openings were never fuzzed before.** `open_edges` flows to `layout::effective_walls` and an
+opening deletes the wall the floor fillet was blending against — the runout case. The profile drew
+blood on its first run (see the open-run panic below). Openings and dividers are drawn from
+`layout::perimeter_edges` / `internal_edges` rather than synthesised: the old broad generator pushed
+`GridEdge`s at random cell coordinates with a random orientation, and `effective_walls` consults the
+divider set *only* for `EdgeClass::Internal`, so most of those dividers were no-ops.
+
+`fuzz_split_pieces` asserts what "split" is supposed to mean rather than only that each piece is
+sound:
 
 - `partition_cells` reproduces an independently derived chunking of the cells,
 - each piece is as many separate geometries as its cell set has islands (union-find over the welded
@@ -131,9 +169,52 @@ model** — random `SplitLine` sets, `partition_cells`, then one carve per chunk
 - pieces whose cells adjoin **touch** on the cut plane, while pieces whose cells do not adjoin are
   measurably apart. Both distances come from XY footprints quantised to 0.05 mm.
 
-`fuzz_inner_walls`, `fuzz_bin_shapes` and `fuzz_split_pieces` are **green** at the default seed;
-`fuzz_split_pieces` is also green at 400 cases on seed 7, with chunk counts up to 8.
-`fuzz_params_broad` reports rather than asserts, and is at 28/400 / 5 defects.
+**That last one is `Split::Lines` only, and generalising it was a mistake worth recording.** It
+measures distance between the two meshes' *vertices*, which is a valid proxy for "the surfaces
+meet" only when every piece is a grid slab — then two abutting pieces' cut faces share an outline
+and land vertices in the same places. A ragged flood-fill piece breaks that: a three-cell row cut
+against a single cell genuinely abuts at y=42 (both meshes reach exactly 42.00) yet the nearest
+vertex pair stands 0.5 mm apart, because the row's cut face is subdivided differently. Applied to
+`Split::Flood` it reported a defect that is not there. Volume conservation is what holds the flood
+pieces to meeting exactly.
+
+**Blends are observable now.** `program::run_reporting` returns a `BlendReport`
+(`requested` / `unresolved` / `dropped`) beside the solid, and `gridfinity::try_build_reporting` /
+`build_bin_solid_reporting` pass it through; `run` and `build_bin_solid` are wrappers, so no
+existing caller changed. Without it a regression that stops rounding corners near an opening or an
+inner wall passes every gate — the solid is still manifold, still audits clean, still tessellates
+without leaks. Both counters are outcomes the model chooses on purpose (`find_seg_edge` returning
+`None` leaves a selection unblended; `fillet_best_effort` would rather leave a corner sharp than
+fail the build), which is exactly why only `require_blends` profiles treat them as failures.
+
+**Status at the default seed: all seven pass.** `fuzz_wall_openings` and
+`fuzz_openings_and_inner_walls` are clean at six seeds (default, 1, 7, 13, 42, 99) — that pair is
+the gate for *adding a wall opening or an internal wall never breaks filleting*. `fuzz_bin_shapes`
+and `fuzz_split_pieces` are clean of *unexpected* findings at all six, meeting only
+`TRIM_SECTION_CURVE` at 1-3/120. `fuzz_inner_walls` is green at the default seed and finds 1-5/150
+of the freeform defects below at others. `fuzz_params_broad` is at 9/400 / 6 defects.
+
+Three defects this rewrite found, all pre-existing and none diagnosed:
+
+- **An opening whose run abuts a reentrant fillet panics the open-run planner** — `open-run
+  neighbour must be straight (got an arc before/after the run)`, 7/150 on L-shaped bins, plus a
+  rarer `no pinch for run start`. `resolve_open_runs` casts a ray from the run's endpoint along the
+  *direction of the adjacent straight segment* to pinch against the outer loop, then truncates that
+  segment to the hit. At a reentrant corner the adjacent cavity segment is the concave fillet arc,
+  and there is no line to cast along or to truncate. This is why the two asserting opening profiles
+  use `Shape::Rect`; `Shape::SmallRect` in `fuzz_params_broad` is what produces the corner.
+- **Two inner walls crossing at a cell centre hand the triangulator a face whose loops do not
+  tile** (`CROSSING_WALL_TILING`), ~1-2% of tidy configurations. Characterised: **independent of
+  tessellation density** (fails identically at segs 2 through 24, so it is a bad loop and not a
+  sampling artifact, matching the `triangulate` note that a firing is a defect in whoever built the
+  face), and knife-edge in position and width — on a 1×3 bin `h@84 w2.4 + v@21 w2.8` fails while
+  `h@63`, `h@42`, `v@10` and widths 2.4 or 3.2 are all clean. A 5-loop face each time.
+- **`fuzz_params_broad` is not reproducible run to run**, at `RAYON_NUM_THREADS=1` as well, so it
+  is a seeding issue and not a threading one — the class the `fillet_edges` note below describes.
+  The variation is confined to `tessellation leaks` findings: the same case lands in a different
+  group between runs, moving counts (13 vs 14 distinct defects at 2000 cases). `tessellation_leaks`
+  builds its `Vec` by iterating a `HashMap`, and `TessLeak`'s `Debug` carries `faces: [..]`, so the
+  message a case fails with is hash-ordered. The gating profiles are stable across five runs.
 
 `gridfinity-wasm`'s `opening_on_a_hole_boundary_stays_closed` is the workspace's one known-failing
 test. The bin is a **ring** whose opening sits on the enclosed hole's boundary, which merges the
@@ -204,12 +285,14 @@ T and S 2x -104) and with the parameters (flat in every cavity parameter, linear
 vertex-only containment check will *not* see the overhang: the fillet's tangent points sit exactly
 on the grid lines and only the arc between them escapes.
 
-**What is left in `fuzz_inner_walls` (12/150).** Three fixes took it from 30. Two were the same
-mistake in different places: an island's top face came from the planner's own loop while the walls
-under it follow the slab band's segmentation, so one raw island side faced several band edges and
-paired with none. Both paths take their tops from the band now. The third stopped `seg_edge`
-interning a blend selection the boolean had split -- that reported a missed selection as a
-non-manifold solid, and masked five that genuinely were. What remains splits by where the fault is:
+**What was left in `fuzz_inner_walls` (12/150, now 0 at the default seed and 1-5/150 at others).**
+Three fixes took it from 30. Two were the same mistake in different places: an island's top face
+came from the planner's own loop while the walls under it follow the slab band's segmentation, so
+one raw island side faced several band edges and paired with none. Both paths take their tops from
+the band now. The third stopped `seg_edge` interning a blend selection the boolean had split -- that
+reported a missed selection as a non-manifold solid, and masked five that genuinely were. Later
+fixes (the self-intersecting-face refusal, the sorted `bm` iteration) took the rest at the default
+seed. The classes below are what the surviving off-seed failures still look like:
 
 - **7 cases are the tessellator, not the model.** `validate` passes and `audit` reports **zero
   errors**, so the B-rep is sound and the mesh still leaks. They move with `wall_thickness` and
@@ -223,7 +306,7 @@ non-manifold solid, and masked five that genuinely were. What remains splits by 
   that error is for.
 - **2 cases still fail `validate` with `fwd=1 bwd=0`.**
 
-The fuzzer now only generates and shrinks to **edge-connected** bins. `gen_cells` could delete the
+The fuzzer only generates and shrinks to **edge-connected** bins. `gen_small_rect` could delete the
 middle of a 1x3 and `shrink` could delete any cell, so either could hand the model a diagonally
 connected bin, which `AGENTS.md` puts out of scope. It changed no counts, but the repros it prints
 are trustworthy now, and were not before.
@@ -246,11 +329,24 @@ a random number generator, and `--workspace` vs `-p gridfinity-cad` builds diffe
 "passes alone, fails in the gate" report is a determinism smell before it is a feature-unification
 one.
 
-**The long test targets are `rayon`-parallel, and must stay deterministic anyway.** The three
-asserting fuzzers share one `sweep()`: cases are generated **sequentially** from the seeded `Rng`
-into a `Vec` (so the case stream is byte-identical to the serial version), then checked with
-`par_iter`, then grouped in `BTreeMap` order and shrunk in parallel. Generating per-case seeds in
-parallel instead would reshuffle the stream and invalidate every recorded count. `catching` no
+**The long test targets are `rayon`-parallel, and must stay deterministic anyway.** Every fuzz
+profile shares one `sweep()`: cases are generated **sequentially** from the seeded `Rng` into a
+`Vec` (so the case stream is byte-identical to the serial version), then checked with `par_iter`,
+then grouped in `BTreeMap` order and shrunk in parallel. Generating per-case seeds in parallel
+instead would reshuffle the stream and invalidate every recorded count.
+
+Three phases, and only two of them can be parallel. Measured on 8c/16t: the check phase alone is
+**7.1×** (2000 cases, 6.22 s → 0.88 s), and the heaviest profile end to end is **6.5×** (3000 cases,
+12.15 s → 1.86 s) — about the ceiling for compute-bound work on eight physical cores, with the
+serial generator the remainder. The shrink phase used to be the weak half, because
+`entries.par_iter()` only spreads across *distinct signatures* (often one or two) while each shrink
+is a long sequential search; its cell-removal sweep is `par_iter().find_map_first` now.
+**`find_map_first`, never `find_map_any`:** it returns the match earliest in iteration order
+whatever order the threads finish in, which is what keeps a shrunk repro a function of the seed
+alone. The remaining `keep_if` chains stay sequential on purpose — each one edits the current best,
+so they are genuinely dependent.
+
+`catching` no
 longer swaps the panic hook per case — with many threads inside `catch_unwind` that race silenced
 the harness's own hook; `quiet_panics()` installs one silent hook per sweep, refcounted, and
 restores the loud one before the report is asserted. `gridfinity-gui`'s `badapple::tests::

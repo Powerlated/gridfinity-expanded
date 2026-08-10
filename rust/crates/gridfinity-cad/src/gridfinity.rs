@@ -2,8 +2,8 @@ use crate::kernel::build::{loop_of, ring, wall_between};
 use crate::kernel::geom::Surface;
 use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::program::{
-    DirLoop as POpDirLoop, HoleProfile as PHoleProfile, Op as POp, PlaneRef as PPlaneRef, Program,
-    run_all,
+    self, BlendReport, DirLoop as POpDirLoop, HoleProfile as PHoleProfile, Op as POp,
+    PlaneRef as PPlaneRef, Program,
 };
 use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
 use crate::kernel::region2d::{chain_loops, loops_within, region_difference, split_regions};
@@ -233,20 +233,26 @@ pub fn build(p: &Params) -> Solid {
 }
 
 pub fn try_build(p: &Params) -> Result<Solid, String> {
-    let solid = match p.mode {
-        Mode::Baseplate => build_baseplate(p),
-        Mode::Bin => run_all(&program(p))?,
+    try_build_reporting(p).map(|(s, _)| s)
+}
+
+/// `try_build` plus what became of the model's blends. A baseplate asks for
+/// none, so its report is empty rather than absent.
+pub fn try_build_reporting(p: &Params) -> Result<(Solid, BlendReport), String> {
+    let (solid, report) = match p.mode {
+        Mode::Baseplate => (build_baseplate(p), BlendReport::default()),
+        Mode::Bin => program::run_reporting(&program(p), |_| true)?,
     };
     if let Err(e) = solid.validate() {
         panic!("{:?} is not a closed manifold: {e}", p.mode);
     }
-    let report = crate::audit(&solid);
+    let audited = crate::audit(&solid);
     assert!(
-        report.is_ok(),
-        "{:?} is not geometrically sound:\n{report}",
+        audited.is_ok(),
+        "{:?} is not geometrically sound:\n{audited}",
         p.mode
     );
-    Ok(solid)
+    Ok((solid, report))
 }
 
 pub fn program(p: &Params) -> Program {
@@ -298,20 +304,29 @@ pub fn build_bin_solid(
     bin_cells: &[GridCell],
     slope: Option<BinSlope>,
 ) -> Result<Solid, String> {
+    build_bin_solid_reporting(p, bin_cells, slope).map(|(s, _)| s)
+}
+
+/// `build_bin_solid` plus what became of the bin's blends.
+pub fn build_bin_solid_reporting(
+    p: &Params,
+    bin_cells: &[GridCell],
+    slope: Option<BinSlope>,
+) -> Result<(Solid, BlendReport), String> {
     let walls = effective_walls(bin_cells, bin_cells, &p.open_edges, &p.divider_edges);
     let mut prog = Program::default();
     plan_piece(p, bin_cells, bin_cells, walls, slope, "piece", &mut prog);
-    let solid = run_all(&prog)?;
+    let (solid, report) = program::run_reporting(&prog, |_| true)?;
     if let Err(e) = solid.validate() {
         panic!("a bin solid is not a closed manifold: {e}");
     }
-    let report = crate::audit(&solid);
+    let audited = crate::audit(&solid);
     assert!(
-        report.is_ok(),
+        audited.is_ok(),
         "a bin solid is not geometrically sound:
-{report}"
+{audited}"
     );
-    Ok(solid)
+    Ok((solid, report))
 }
 
 const REENTRANT_FILLET_OVERHANG: f32 = 8.0;

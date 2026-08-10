@@ -226,6 +226,25 @@ impl Program {
     }
 }
 
+/// What became of the blends a `Program` asked for. Both fields count a blend
+/// the run declined to make: `unresolved` is a selection `find_seg_edge` could
+/// not tie to one edge of the built solid, `dropped` is a chain
+/// `fillet_best_effort` refused. Neither is an error -- an unfilleted corner is
+/// ordinary geometry -- but a caller that expects every corner rounded (the
+/// fuzzer does) has no other way to see it happen.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlendReport {
+    pub requested: usize,
+    pub unresolved: usize,
+    pub dropped: Vec<EdgeId>,
+}
+
+impl BlendReport {
+    pub fn is_clean(&self) -> bool {
+        self.unresolved == 0 && self.dropped.is_empty()
+    }
+}
+
 pub fn run_all(prog: &Program) -> Result<Solid, String> {
     run(prog, |_| true)
 }
@@ -275,11 +294,19 @@ fn size_hint(prog: &Program) -> (usize, usize, usize) {
 }
 
 pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, String> {
+    run_reporting(prog, enabled).map(|(s, _)| s)
+}
+
+pub fn run_reporting(
+    prog: &Program,
+    enabled: impl Fn(usize) -> bool,
+) -> Result<(Solid, BlendReport), String> {
     let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::ProgramRun);
     let (nv, ne, nf) = size_hint(prog);
     let mut b = Builder::with_capacity(nv, ne, nf, nf * 4, nf);
     let mut blends: Vec<(EdgeId, f32)> = Vec::new();
     let mut chamfers: Vec<(EdgeId, f32, f32)> = Vec::new();
+    let mut report = BlendReport::default();
     let (mut ra, mut rb) = (RingEdges::default(), RingEdges::default());
 
     for (i, st) in prog.steps.iter().enumerate() {
@@ -428,8 +455,10 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
             Op::Custom(f) => f(&mut b)?,
             Op::Fillet { edges } => {
                 for &(ref s, z, r) in edges {
-                    if let Some(e) = find_seg_edge(&b, s, z) {
-                        blends.push((e, r));
+                    report.requested += 1;
+                    match find_seg_edge(&b, s, z) {
+                        Some(e) => blends.push((e, r)),
+                        None => report.unresolved += 1,
                     }
                 }
             }
@@ -443,12 +472,14 @@ pub fn run(prog: &Program, enabled: impl Fn(usize) -> bool) -> Result<Solid, Str
 
     let mut solid = b.build_unvalidated();
     if !blends.is_empty() {
-        solid = fillet::fillet_best_effort(&solid, &blends)?.0;
+        let (blended, dropped) = fillet::fillet_best_effort(&solid, &blends)?;
+        solid = blended;
+        report.dropped = dropped;
     }
     if !chamfers.is_empty() {
         solid = chamfer_edges(&solid, &chamfers)?;
     }
-    Ok(solid)
+    Ok((solid, report))
 }
 
 /// A blend selection resolved against the edges the build actually produced.
