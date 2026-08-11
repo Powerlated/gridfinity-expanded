@@ -10,9 +10,11 @@ use gridfinity_cad::gridfinity::{
     self, BinSlope, GRID_PITCH, InnerWall, LogicalBin, Mode, Params, SlopeDir, rect_cells,
 };
 use gridfinity_cad::kernel::mesh::Mesh;
+use gridfinity_cad::kernel::program::BlendReport;
 use gridfinity_cad::kernel::tess::tessellate;
 use gridfinity_cad::layout::{
-    Axis, GridCell, GridEdge, SplitLine, internal_edges, partition_cells, perimeter_edges,
+    Axis, GridCell, GridEdge, SplitLine, effective_walls, internal_edges, partition_cells,
+    perimeter_edges,
 };
 use gridfinity_cad::{Solid, audit, tessellation_leaks};
 use rayon::prelude::*;
@@ -633,6 +635,48 @@ fn pieces_of(c: &Case) -> Vec<Vec<GridCell>> {
     }
 }
 
+/// An opening must not cost the compartment the floor fillet it would have had
+/// without it.
+///
+/// `require_blends` alone cannot see this. It holds the model to the blends it
+/// *asked for*, and the loss happens one step earlier: the pinch that pulls an
+/// open run back to the outer boundary leaves the cavity loop with sharp
+/// corners, `plan_piece` zeroes that loop's fillet radius outright, and a
+/// report of 0 requested / 0 refused is perfectly clean. So the same bin is
+/// built again with `open_edges` cleared, and the opened build has to keep a
+/// blend if the closed one had any.
+///
+/// A bin with no wall left standing is exempt: there is nothing for a floor
+/// fillet to roll against.
+fn opening_keeps_the_fillet(c: &Case, opened: &BlendReport) -> Result<(), String> {
+    if c.params.open_edges.is_empty() || opened.made() > 0 {
+        return Ok(());
+    }
+    let walls = effective_walls(
+        &c.params.bins[0].cells,
+        &c.params.bins[0].cells,
+        &c.params.open_edges,
+        &c.params.divider_edges,
+    );
+    if walls.walled.is_empty() {
+        return Ok(());
+    }
+    let mut closed = c.params.clone();
+    closed.open_edges.clear();
+    let Ok((_, before)) = gridfinity::try_build_reporting(&closed) else {
+        return Ok(());
+    };
+    if before.made() == 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "{OPENING_LOSES_FILLET}: {} opening(s) took the bin from {} blend(s) to none, though {} wall(s) still stand",
+        c.params.open_edges.len(),
+        before.made(),
+        walls.walled.len()
+    ))
+}
+
 fn check(c: &Case) -> Result<(), String> {
     catching(|| {
         let bin = &c.params.bins[0];
@@ -675,6 +719,10 @@ fn check(c: &Case) -> Result<(), String> {
                 blends.unresolved,
                 blends.dropped.len()
             ));
+        }
+
+        if c.opts.require_blends {
+            opening_keeps_the_fillet(c, &blends)?;
         }
 
         if pieces.is_empty() {
@@ -1162,6 +1210,11 @@ const TRIM_SECTION_CURVE: &str = "no closed-form section curve for a face the cu
 /// something else; `fuzz_tidy_inner_walls` itself keeps reporting it.
 const CROSSING_WALL_TILING: &str = "is not a tiling";
 
+/// An opening zeroes its compartment's floor fillet outright. Diagnosed, and
+/// blocked on `fillet.rs`'s runout rather than on the model -- see
+/// `rust/CLAUDE.md`.
+const OPENING_LOSES_FILLET: &str = "opening cost the floor fillet";
+
 /// Free-form inner walls on a fixed 2x2 -- the manifoldness gate. Blends are
 /// *not* required here: a wall at an arbitrary angle routinely leaves a sliver
 /// narrower than the floor fillet, and the model declining that blend is the
@@ -1209,6 +1262,7 @@ fn fuzz_wall_openings() {
             openings: true,
             dividers: true,
             require_blends: true,
+            known: &[OPENING_LOSES_FILLET],
             ..Options::default()
         },
         150,
@@ -1228,7 +1282,7 @@ fn fuzz_openings_and_inner_walls() {
             openings: true,
             dividers: true,
             require_blends: true,
-            known: &[CROSSING_WALL_TILING],
+            known: &[CROSSING_WALL_TILING, OPENING_LOSES_FILLET],
             ..Options::default()
         },
         150,

@@ -10,6 +10,8 @@ This is an index, not a manual. It says where things live and which rules are no
 
 React 19 + Vite 6 + TypeScript app generating printable Gridfinity STLs. "GUI" in user requests means this web app, not the egui debugger in `rust/crates/gridfinity-gui`. Pick local implementation details freely; ask before changing architecture, user-visible semantics, compatibility policy, or scope. Keep changes narrow, preserve unrelated working-tree changes, inspect call sites first — trace store, worker boundary, preview, and export paths.
 
+**The kernel is in scope, not off limits.** When a model defect traces back to a missing capability in `rust/crates/gridfinity-cad/src/kernel/`, extend the kernel rather than degrading the model around it or filing the case under `Options::known`. Missing analytic primitives and missing B-rep operators are the expected answer to a hard case (see `rust/CLAUDE.md`'s "no mesh operations" rule, which says the same thing) — do not treat "that would need a kernel change" as a reason to stop.
+
 ## Structure
 
 - `src/main.tsx` mounts; `src/App.tsx` = Mantine AppShell; `src/store.ts` = Zustand state + design commands; `src/theme.ts` = Mantine defaults.

@@ -157,6 +157,36 @@ blood on its first run (see the open-run panic below). Openings and dividers are
 `GridEdge`s at random cell coordinates with a random orientation, and `effective_walls` consults the
 divider set *only* for `EdgeClass::Internal`, so most of those dividers were no-ops.
 
+**An opening deletes its compartment's floor fillet outright, and `require_blends` could not see
+it.** That gate holds the model to the blends it *asked for*, and the loss happens one step earlier:
+`plan_piece` zeroes `loop_fr` for any cavity loop `resolve_open_runs` touched, so the report reads
+0 requested / 0 refused and audits perfectly clean. `opening_keeps_the_fillet` in `tests/fuzz.rs`
+closes that hole by building the same bin twice — once as generated and once with `open_edges`
+cleared — and failing when the opened build makes no blend though the closed one did and walls are
+still standing. It fires on 80/150 of `fuzz_wall_openings`, is signed `OPENING_LOSES_FILLET`, and is
+in `known` on both opening profiles until the kernel can carry it. `BlendReport::made()` is what the
+comparison counts: `is_clean` cannot tell a bin that wanted no blend from one that got none.
+
+The diagnosis is complete and the blocker is in `fillet.rs`, not the model. Blending the whole
+non-coincident run works right up to the chain's ends, and *every* way of ending it is unsupported:
+
+- **End it at the pinch** (the two sharp corners where the open run is pulled back to the outer
+  boundary) and `find_runout_face` reports 3 candidates. They are all the same plane — the bin's
+  outer wall at y=0.25, cut into bands by the peg profile — so the plane is not in doubt, only which
+  band's loop takes the trim curve. None of them is the answer: on a 2×2 opened at `(0,0,H)` the
+  runout lands at `(40.775, 0.25, 9.425)`, which is *above* the lip at `z=8.2` and inside the open
+  span, so it sits on no face at all.
+- **End it one segment earlier** and the terminating face is the cavity's rounded corner, a
+  cylinder — `runout face N is not planar`. Supporting that means a blend-cylinder ∩ corner-cylinder
+  section curve, which for perpendicular axes is a quartic and outside the analytic curve set.
+- **End it on the arc itself** and the blend is a torus, which the runout does not do at all.
+
+So the missing operator is a **cap runout**: where the chain dies on an opening's mouth there is no
+face to absorb the trim curve, and one has to be emitted — a planar cap bounded by the end ellipse
+plus the trimmed lip and wall edges, which also means splitting the two edges the ellipse's
+endpoints land on and rewriting the neighbouring bands' loops. That is a new face in the
+manifold-critical rebuild path, not a repair of the existing splice.
+
 `fuzz_split_pieces` asserts what "split" is supposed to mean rather than only that each piece is
 sound:
 

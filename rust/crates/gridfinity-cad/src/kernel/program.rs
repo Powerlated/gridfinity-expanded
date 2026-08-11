@@ -243,6 +243,15 @@ impl BlendReport {
     pub fn is_clean(&self) -> bool {
         self.unresolved == 0 && self.dropped.is_empty()
     }
+
+    /// Blends that actually reached the solid. `is_clean` measures the model
+    /// against what it asked for and so cannot tell a bin that wanted no blend
+    /// from one that got none; this counts the rounding a user would see.
+    pub fn made(&self) -> usize {
+        self.requested
+            .saturating_sub(self.unresolved)
+            .saturating_sub(self.dropped.len())
+    }
 }
 
 pub fn run_all(prog: &Program) -> Result<Solid, String> {
