@@ -281,7 +281,7 @@ fn fillet_edges_with(
                 tb_p0,
                 tb_p1,
                 r,
-                cyl.unwrap(),
+                cyl.expect("this arm is guarded by cyl.is_some()"),
                 fwd_a,
             )?
         } else {

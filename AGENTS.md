@@ -41,6 +41,7 @@ Prefer Mantine controls/layout over custom UI. Cross-app control styling → `th
 - The alpha generator assumes every bin is edge-connected and valid. Add no geometry-side component normalization, repair, rejection, or fallback. Enclosed holes stay supported.
 - Render quality is a **pinned user setting, never adaptive**. A frame-time controller would make the preview change appearance while the user is judging a part.
 - The Rust kernel asserts to high hell: every relied-on invariant gets a real `assert!` at the point it is relied on, and spending most of the runtime inside asserts is acceptable. Never `debug_assert!` — `--release` compiles it out. See `rust/CLAUDE.md`.
+- **State every invariant, and state it mathematically.** Whenever a step relies on something being true — a normal is unit, a loop is simple, two half-edges leaving a vertex have distinct directions, a parameter lands inside its range, a boolean's output has the area its inputs imply — assert exactly that, at the point it is relied on, in the form a proof would state it. An assert that only checks a proxy (non-empty, non-NaN, "looks plausible") is worse than none: it passes while the property it stands for is violated. Prefer an exact predicate to a tolerance; where a tolerance is unavoidable, name the quantity it bounds and why that bound is the right one. A new operator is not finished until the properties it promises are asserted where it promises them.
 - `ModelViewer.tsx` publishes `data-render-quality`, `data-badapple-frame` and `data-explode` imperatively via `dataset` inside the render loop. Routing per-frame reads through React state makes the camera stutter. For the same reason, never route `#badapple` clip frames through React state or `add_piece`.
 
 ## Projects
@@ -88,6 +89,10 @@ Changing the geometry pipeline (`src/lib/geometry/`, `src/lib/project/`, `src/wo
   the check when you want the UI without the Rust toolchain. `npm run build` does **not** check —
   `ci.yml` and `deploy.yml` each run `npm run build:wasm` as their own step beforehand.
 - `cd rust && cargo test --release -p gridfinity-cad --lib` — geometry kernel suite, the printability gate
+- `cd rust && cargo test --release -p gridfinity-cad --test asserts` — assertion coverage, read off the
+  crate's own AST with `syn`: no `debug_assert!`, no bare `.unwrap()` outside tests, every production
+  assertion carries a message, and a per-file ratchet on functions that assert nothing. The ratchet
+  fails in both directions — add assertions and you must lower the budget. See `rust/CLAUDE.md`.
 - `cd rust && cargo test --release --workspace` — full gate incl. fuzzers (slow; pre-PR only)
 - `cd rust && cargo test --release --workspace -- --ignored --nocapture` — the benchmarks and perf reports, which are `#[ignore]`d so no ordinary run pays for them
 - `npm run test:e2e` — Chromium Playwright smoke

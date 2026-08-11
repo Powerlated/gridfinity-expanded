@@ -208,7 +208,9 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
         for e in [e1, e2] {
             let ed_e = solid.edges[e];
             let at_v0 = ed_e.v0 == *v;
-            let c = cm.get_mut(&e).unwrap();
+            let c = cm
+                .get_mut(&e)
+                .expect("every chain edge was given a corner record before this pass");
             let dir = edge_dir_of(solid, e);
             if at_v0 {
                 c.ta_p0 = corner_a;

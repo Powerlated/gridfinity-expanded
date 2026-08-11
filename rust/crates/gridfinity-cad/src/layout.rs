@@ -201,12 +201,32 @@ pub fn enclosed_holes(cells: &[GridCell]) -> CellSet {
         return CellSet::default();
     }
     let lo = GridCell {
-        x: cells.iter().map(|c| c.x).min().unwrap() - 1,
-        y: cells.iter().map(|c| c.y).min().unwrap() - 1,
+        x: cells
+            .iter()
+            .map(|c| c.x)
+            .min()
+            .expect("a non-empty cell set has a least x")
+            - 1,
+        y: cells
+            .iter()
+            .map(|c| c.y)
+            .min()
+            .expect("a non-empty cell set has a least y")
+            - 1,
     };
     let hi = GridCell {
-        x: cells.iter().map(|c| c.x).max().unwrap() + 1,
-        y: cells.iter().map(|c| c.y).max().unwrap() + 1,
+        x: cells
+            .iter()
+            .map(|c| c.x)
+            .max()
+            .expect("a non-empty cell set has a greatest x")
+            + 1,
+        y: cells
+            .iter()
+            .map(|c| c.y)
+            .max()
+            .expect("a non-empty cell set has a greatest y")
+            + 1,
     };
     let mut outside = CellSet::default();
     let mut stack = vec![lo];

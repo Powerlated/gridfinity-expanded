@@ -2132,9 +2132,29 @@ fn plan_piece(
         prog.push(format!("{tag}: {label}"), op);
     }
 
+    // `wall_between` takes the material side from the loop's own direction --
+    // the surface normal it builds points to the right of travel -- so a region
+    // wound material-on-the-left needs `outward: true` for every loop it has,
+    // outer and hole alike. `region_difference` returns exactly that region, and
+    // this is what says so: the signed areas sum to the material's own area, so
+    // every hole is wound against its outer loop and no loop is wound twice.
+    //
+    // The rule this replaced, `outward: loop_area(sl) > 0.0`, flipped the normal
+    // on every hole. It agreed with the base's outer wall below `floor_z` only
+    // while the two never shared a ring -- an enclosed hole is where they do,
+    // and there the wall and the base met at `floor_z` with opposing normals.
+    let sector_area: f32 = sector_segs.iter().map(|l| loop_area(l)).sum();
+    assert!(
+        sector_segs.is_empty() || sector_area > 0.0,
+        "{tag}: the standing wall's {} loop(s) enclose {sector_area} mm^2, so they are not one \
+         region wound material-on-the-left",
+        sector_segs.len()
+    );
     for (si, sl) in sector_segs.iter().enumerate() {
-        // `region_difference` winds a hole the other way, and a hole is a
-        // compartment the wall encloses rather than material it bounds.
+        assert!(
+            loop_area(sl) != 0.0,
+            "{tag}: wall sector {si} encloses no area"
+        );
         prog.push(
             format!("{tag}: wall sector {si}"),
             POp::Wall {
@@ -2142,7 +2162,7 @@ fn plan_piece(
                 upper: sl.clone(),
                 z0: floor_z,
                 z1: total_h,
-                outward: loop_area(sl) > 0.0,
+                outward: true,
             },
         );
     }

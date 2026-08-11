@@ -439,7 +439,51 @@ fn seg_mid(seg: &Seg) -> Vec2 {
     }
 }
 
+/// Cut `seg` at `cuts` and return the pieces, in order.
+///
+/// Two properties everything downstream leans on, so both are checked on the
+/// way out. The pieces **partition** the segment: the first starts where `seg`
+/// starts, the last ends where it ends, and each one begins exactly where the
+/// last left off -- a gap or an overlap here is a hole in the region. And no
+/// piece is shorter than `SLIVER`, unless `seg` was already shorter than that
+/// itself, because `chain_loops` welds endpoints within `EPS` and would join a
+/// shorter piece's two ends to each other.
 fn split_seg(seg: &Seg, cuts: &mut Vec<(f32, Vec2)>) -> Vec<Seg> {
+    let out = split_seg_inner(seg, cuts);
+    assert!(!out.is_empty(), "a split left no pieces of {seg:?}");
+    assert!(
+        (out[0].start() - seg.start()).length() < EPS,
+        "the first piece {:?} does not start where {seg:?} does",
+        out[0]
+    );
+    assert!(
+        (out[out.len() - 1].end() - seg.end()).length() < EPS,
+        "the last piece {:?} does not end where {seg:?} does",
+        out[out.len() - 1]
+    );
+    let whole = (seg.end() - seg.start()).length();
+    for (i, w) in out.windows(2).enumerate() {
+        assert!(
+            (w[0].end() - w[1].start()).length() < EPS,
+            "pieces {i} and {} of {seg:?} do not meet: {:?} then {:?}",
+            i + 1,
+            w[0],
+            w[1]
+        );
+    }
+    if out.len() > 1 {
+        for (i, p) in out.iter().enumerate() {
+            let len = (p.end() - p.start()).length();
+            assert!(
+                len >= SLIVER || whole < SLIVER,
+                "piece {i} of {seg:?} is {len} long, under the {SLIVER} a split may leave"
+            );
+        }
+    }
+    out
+}
+
+fn split_seg_inner(seg: &Seg, cuts: &mut Vec<(f32, Vec2)>) -> Vec<Seg> {
     match *seg {
         Seg::Line { a, b } => {
             // The margin is a distance, not a fraction. A parametric epsilon is
@@ -471,9 +515,13 @@ fn split_seg(seg: &Seg, cuts: &mut Vec<(f32, Vec2)>) -> Vec<Seg> {
         } => {
             let fwd = a1 >= a0;
             let (lo, hi) = (a0.min(a1), a0.max(a1));
-            let span = (hi - lo).max(1e-9);
+            // `SLIVER` millimetres of arc, as an angle. It is not scaled by the
+            // arc's own span: a margin proportional to the span vanishes on a
+            // short arc, which is the same mistake the line branch above used to
+            // make with a parametric epsilon, and it lets a cut a fraction of a
+            // micron from the end through.
             let aeps = EPS.max(SLIVER / radius.max(1e-3));
-            cuts.retain(|&(t, _)| t > lo + aeps * span.min(1.0) && t < hi - aeps * span.min(1.0));
+            cuts.retain(|&(t, _)| t > lo + aeps && t < hi - aeps);
             if fwd {
                 cuts.sort_by(|x, y| x.0.total_cmp(&y.0));
             } else {
@@ -531,7 +579,11 @@ pub fn chain_loops<T: Copy>(segs: Vec<(Seg, T)>) -> Vec<Vec<(Seg, T)>> {
         let start = segs[seed].0.start();
         let mut lp = vec![segs[seed]];
         loop {
-            let cur = lp.last().unwrap().0.end();
+            let cur = lp
+                .last()
+                .expect("the chain was seeded with one piece")
+                .0
+                .end();
             if (cur - start).length() < EPS && lp.len() >= 2 {
                 break;
             }
@@ -558,12 +610,35 @@ pub fn chain_loops<T: Copy>(segs: Vec<(Seg, T)>) -> Vec<Vec<(Seg, T)>> {
             used[idx] = true;
             lp.push(segs[idx]);
         }
-        if (lp.last().unwrap().0.end() - start).length() < EPS && lp.len() >= 2 {
+        if (lp
+            .last()
+            .expect("the chain was seeded with one piece")
+            .0
+            .end()
+            - start)
+            .length()
+            < EPS
+            && lp.len() >= 2
+        {
             bare.clear();
             bare.extend(lp.iter().map(|&(s, _)| s));
             if loop_area(&bare).abs() > EPS {
                 out.push(lp);
             }
+        }
+    }
+    // Every loop returned is closed and every consecutive pair meets, because a
+    // caller turns each one straight into a face and an open chain would leave
+    // that face's boundary hanging. A piece is used at most once by
+    // construction (`used`), so the loops are also disjoint.
+    for (li, lp) in out.iter().enumerate() {
+        assert!(lp.len() >= 2, "chained loop {li} has {} piece(s)", lp.len());
+        for k in 0..lp.len() {
+            let (a, b) = (lp[k].0, lp[(k + 1) % lp.len()].0);
+            assert!(
+                (a.end() - b.start()).length() < EPS,
+                "chained loop {li} breaks between piece {k} and the next: {a:?} then {b:?}"
+            );
         }
     }
     out

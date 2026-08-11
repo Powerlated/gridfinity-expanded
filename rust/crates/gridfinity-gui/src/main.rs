@@ -101,6 +101,21 @@ fn try_whole(p: &Params) -> Result<Solid, String> {
 }
 
 fn build_scene(p: &Params) -> (Vec<f32>, Vec<BinError>) {
+    build_scene_with(p, build_bin)
+}
+
+/// `build_scene` with the per-bin builder supplied.
+///
+/// The tests below drive the failure path through this, rather than through a
+/// bin the kernel happens to choke on. A fixture of the second kind is only a
+/// fixture until the kernel is fixed -- the "broken" bin these tests used to
+/// pass in builds cleanly now -- and what they are actually about is that one
+/// bin's failure is reported, is confined to that bin, and leaves a placeholder
+/// behind. None of that is a statement about geometry.
+fn build_scene_with(
+    p: &Params,
+    build: impl Fn(&Params, &LogicalBin) -> Result<Solid, String>,
+) -> (Vec<f32>, Vec<BinError>) {
     let mut verts = Vec::new();
     let mut errors = Vec::new();
     if p.mode != Mode::Bin {
@@ -119,7 +134,7 @@ fn build_scene(p: &Params) -> (Vec<f32>, Vec<BinError>) {
         if bin.cells.is_empty() {
             continue;
         }
-        match build_bin(p, bin) {
+        match build(p, bin) {
             Ok(solid) => verts.extend(flagged(&tessellate(&solid, PREVIEW_RES), false)),
             Err(msg) => {
                 errors.push(BinError { bin: i, msg });
@@ -740,36 +755,21 @@ mod tests {
     use super::*;
     use gridfinity_cad::layout::GridCell;
 
-    fn broken_walls_at(cell: GridCell) -> Vec<gridfinity_cad::gridfinity::InnerWall> {
-        use gridfinity_cad::gridfinity::InnerWall;
-        let pitch = gridfinity::GRID_PITCH;
-        let (ox, oy) = (cell.x as f32 * pitch, cell.y as f32 * pitch);
-        vec![
-            InnerWall {
-                x1: 11.0 + ox, y1: 41.0 + oy, x2: 50.5 + ox, y2: -6.0 + oy,
-                width: 5.5, height: Some(3.0),
-            },
-            InnerWall {
-                x1: 34.5 + ox, y1: 9.0 + oy, x2: 21.5 + ox, y2: -6.5 + oy,
-                width: 6.0, height: None,
-            },
-        ]
+    /// A builder that refuses everything, so the failure path is exercised
+    /// without asking the kernel for a bin it cannot make.
+    fn always_fails(_: &Params, _: &LogicalBin) -> Result<Solid, String> {
+        Err("refused by the test builder".to_string())
     }
 
-    fn broken_bins(cells: &[GridCell]) -> Params {
+    fn bins_at(cells: &[GridCell]) -> Params {
         Params {
             bins: cells
                 .iter()
                 .map(|&c| LogicalBin { cells: vec![c], ..Default::default() })
                 .collect(),
-            inner_walls: cells.iter().copied().flat_map(broken_walls_at).collect(),
             height_units: 1,
             ..Params::default()
         }
-    }
-
-    fn broken() -> Params {
-        broken_bins(&[GridCell { x: 0, y: 0 }])
     }
 
     fn flags(verts: &[f32]) -> (usize, usize) {
@@ -783,7 +783,8 @@ mod tests {
 
     #[test]
     fn a_bin_that_cannot_be_built_is_reported_not_fatal() {
-        let (verts, errors) = build_scene(&broken());
+        let p = bins_at(&[GridCell { x: 0, y: 0 }]);
+        let (verts, errors) = build_scene_with(&p, always_fails);
         assert_eq!(errors.len(), 1, "the one bad bin should be reported once");
         assert_eq!(errors[0].bin, 0);
         assert!(!errors[0].msg.is_empty(), "the failure needs a message to show");
@@ -803,22 +804,20 @@ mod tests {
 
     #[test]
     fn a_failed_bin_does_not_take_its_neighbours_with_it() {
-        let p = broken_bins(&[GridCell { x: 0, y: 0 }, GridCell { x: 4, y: 0 }]);
-        let (verts, errors) = build_scene(&p);
-        assert_eq!(errors.len(), 2, "both bins share the bad parameters");
+        let p = bins_at(&[GridCell { x: 0, y: 0 }, GridCell { x: 4, y: 0 }]);
+        let (verts, errors) = build_scene_with(&p, always_fails);
+        assert_eq!(errors.len(), 2, "both bins were refused");
         assert_eq!(errors.iter().map(|e| e.bin).collect::<Vec<_>>(), vec![0, 1]);
 
-        let mut ok = Params::default();
-        ok.bins = p.bins.clone();
-        let (ok_verts, ok_errors) = build_scene(&ok);
+        let (ok_verts, ok_errors) = build_scene(&p);
         assert!(ok_errors.is_empty());
         assert!(ok_verts.len() > verts.len(), "real geometry beats placeholders");
     }
 
     #[test]
     fn the_placeholder_sits_on_the_failed_bin_footprint() {
-        let p = broken_bins(&[GridCell { x: 2, y: 1 }]);
-        let (verts, _) = build_scene(&p);
+        let p = bins_at(&[GridCell { x: 2, y: 1 }]);
+        let (verts, _) = build_scene_with(&p, always_fails);
         let (min, max) = vert_bounds(&verts);
         let pitch = gridfinity::GRID_PITCH;
         assert!(min.x > 2.0 * pitch - 1.0 && max.x < 3.0 * pitch + 1.0, "x {min:?}..{max:?}");

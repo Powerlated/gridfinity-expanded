@@ -24,11 +24,15 @@ impl Hasher for FxHasher {
     fn write(&mut self, bytes: &[u8]) {
         let mut rest = bytes;
         while rest.len() >= 8 {
-            self.add(u64::from_ne_bytes(rest[..8].try_into().unwrap()));
+            self.add(u64::from_ne_bytes(
+                rest[..8].try_into().expect("an 8-byte slice is 8 bytes"),
+            ));
             rest = &rest[8..];
         }
         if rest.len() >= 4 {
-            self.add(u32::from_ne_bytes(rest[..4].try_into().unwrap()) as u64);
+            self.add(
+                u32::from_ne_bytes(rest[..4].try_into().expect("a 4-byte slice is 4 bytes")) as u64,
+            );
             rest = &rest[4..];
         }
         for &b in rest {

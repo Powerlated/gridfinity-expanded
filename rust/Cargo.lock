@@ -1288,8 +1288,10 @@ dependencies = [
  "flate2",
  "glam",
  "mimalloc",
+ "proc-macro2",
  "rayon",
  "serde",
+ "syn",
 ]
 
 [[package]]

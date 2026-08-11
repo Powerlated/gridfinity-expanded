@@ -1260,7 +1260,7 @@ fn fuzz_tidy_inner_walls() {
         },
         150,
     )
-    .note();
+    .gate();
 }
 
 /// Wall openings and grid dividers, with every blend required to land -- an
@@ -1384,5 +1384,5 @@ fn fuzz_params_broad() {
         },
         400,
     )
-    .note();
+    .gate();
 }

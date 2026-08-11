@@ -126,6 +126,40 @@ pub fn wall_between(
     outward: bool,
 ) {
     let n = segs_lo.len();
+    // The band is a quad per seg, so the two rings have to agree segment for
+    // segment: a mismatch here does not fail, it silently pairs seg k of one
+    // ring with seg k of a different subdivision and the wall comes out
+    // twisted. The rings must also be the same length as their seg lists, since
+    // `lo.edges[k]` is the edge under `segs_lo[k]`.
+    assert_eq!(
+        n,
+        segs_hi.len(),
+        "a wall's two rings have different segment counts"
+    );
+    assert!(n >= 1, "a wall needs a ring, got no segments");
+    // Closed, not merely long enough: a cylinder's ring is two semicircles and a
+    // circle's is one segment, so a minimum count says nothing. The band's quads
+    // only tile if each seg ends where the next begins.
+    for (ring, which) in [(segs_lo, "lower"), (segs_hi, "upper")] {
+        for k in 0..n {
+            let (a, b) = (ring[k], ring[(k + 1) % n]);
+            assert!(
+                (a.end() - b.start()).length() < 1e-3,
+                "a wall's {which} ring is open between segment {k} and {}: {a:?} then {b:?}",
+                (k + 1) % n
+            );
+        }
+    }
+    assert_eq!(
+        (lo.edges.len(), hi.edges.len()),
+        (n, n),
+        "a wall's ring edges do not match its {n} segment(s)"
+    );
+    assert_eq!(
+        (lo.verts.len(), hi.verts.len()),
+        (n, n),
+        "a wall's ring vertices do not match its {n} segment(s)"
+    );
     // Each vertical is shared by two side faces, so carry it forward rather
     // than re-interning it: a peg loft's bands are half the kernel's edge
     // lookups.

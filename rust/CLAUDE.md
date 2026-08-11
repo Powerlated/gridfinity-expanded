@@ -73,6 +73,27 @@ entirely — a check nobody runs is not a check. Where a check is genuinely quad
 only some callers want it, make it a runtime flag checked once per sweep (see `set_verify_prune`
 in `isect.rs`), never a `debug_assert!`.
 
+**State the invariant, not a proxy for it.** An assert that checks "non-empty" where the property is
+"partitions the segment", or "non-NaN" where it is "unit length", passes while the thing it stands
+for is violated — it is worse than none, because it reads as coverage. Write the predicate a proof
+would write. `split_seg` is the pattern to copy: it is a thin wrapper whose whole body is the
+postconditions, over a `split_seg_inner` that does the work. Writing them down found a live bug in
+the arc branch on the first run.
+
+`tests/asserts.rs` holds the crate to that with `syn`, over the real syntax tree rather than a grep —
+`assert` in a string, a comment or a doc example is not an assertion, and `#[cfg(test)]` bodies are
+not production code. Four rules:
+
+- **No `debug_assert*!` anywhere.** The rule above, mechanised.
+- **No bare `.unwrap()` outside tests.** `unwrap` reports the variant it found, not the property that
+  was supposed to hold; `expect` with the invariant written out does.
+- **Every production assertion carries a message.** Decided by the macro's *arity* — more arguments
+  than the comparison needs — which is why this has to be an AST pass.
+- **A ratchet on functions that assert nothing.** `BUDGET` records, per file, how many functions of
+  `BIG_FN_STATEMENTS`+ statements have no assertion at all. Going over fails; coming in *under*
+  without lowering the number fails too, so the table cannot drift. There is deliberately no density
+  floor — `assert!(true)` would satisfy one.
+
 **An assert replaces the checking, never the exercising.** A test whose body only restates an
 invariant now asserted in production loses its body, not its fixture: the assert only fires on
 inputs something actually feeds it, so deleting the fixture removes coverage while the suite stays
@@ -149,13 +170,13 @@ knobs exist because a checker cannot tell an over-ask from a defect on its own:
 | profile | what it varies | gate |
 | --- | --- | --- |
 | `fuzz_inner_walls` | freeform walls on a fixed 2×2 | asserts |
-| `fuzz_tidy_inner_walls` | tidy walls, up to 3 so they cross, `require_blends` | reports |
+| `fuzz_tidy_inner_walls` | tidy walls, up to 3 so they cross, `require_blends` | asserts |
 | `fuzz_wall_openings` | `open_edges` + `divider_edges` on rectangles, `require_blends` | asserts |
 | `fuzz_openings_and_inner_walls` | both of the above at once, `require_blends` | asserts |
 | `fuzz_bin_shapes` | polyominoes, flood-fill pieces | asserts |
 | `fuzz_split_pieces` | polyominoes, `SplitLine`s + `partition_cells` | asserts |
 | `fuzz_stripped_polyominoes` | polyominoes with **half** the perimeter wall opened | asserts |
-| `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | reports |
+| `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | asserts |
 
 **Wall openings were never fuzzed before.** `open_edges` flows to `layout::effective_walls` and an
 opening deletes the wall the floor fillet was blending against — the runout case. The profile drew
@@ -163,6 +184,34 @@ blood on its first run (see the open-run panic below). Openings and dividers are
 `layout::perimeter_edges` / `internal_edges` rather than synthesised: the old broad generator pushed
 `GridEdge`s at random cell coordinates with a random orientation, and `effective_walls` consults the
 divider set *only* for `EdgeClass::Internal`, so most of those dividers were no-ops.
+
+**Every profile asserts.** The last two to be promoted were `fuzz_tidy_inner_walls` and
+`fuzz_params_broad`, and the defects holding them back were one apiece.
+
+**The angular sort at a vertex cannot go through `atan2`.** `planar::build_half_edges` orders the
+half-edges leaving each vertex so `next_in_face` can step "one clockwise" to continue a face. It
+sorted on `(b.y - a.y).atan2(b.x - a.x)` in f32. A diagonal that runs the length of a face, a hair
+off a boundary edge it passes over, differs from that edge by about 10^-8 radians — under one ulp of
+f32 at π — so the two compared **equal**, `sort_unstable_by` put them in an arbitrary order, and the
+face walk left the face it was tracing. The triangulation then covered part of the region twice:
+2307 mm² returned for a region of 837. `angular_cmp` replaces it with a sector test and one cross
+product, which is exact to the last bit the coordinates justify.
+
+The shape that found it is `four_compartments_either_side_of_the_centre_line` — a 1×3 bin's rim, cut
+into four compartments by two tidy walls, the vertical one on the bin's exact centre line so the two
+holes of a column share their whole extent along the sweep. It is verbatim `tess.rs` output and the
+loops are simple, disjoint and properly nested: nothing about the input is degenerate, which is why
+this was the triangulator's defect and not the model's.
+
+**A wall's material side comes from its loop's winding, not from a flag.** `wall_between` builds the
+surface normal to the right of travel, so a region wound material-on-the-left needs `outward: true`
+for every loop it has, hole loops included — the winding already carries the orientation.
+`plan_piece` had `outward: loop_area(sl) > 0.0`, which flipped the normal on every hole of the
+standing wall. It agreed with the base's outer wall below `floor_z` for as long as the two never
+shared a ring; **an enclosed hole is where they do**, and there the base and the standing wall met at
+`floor_z` with opposing normals and the tessellation leaked 56 edges on a ring bin with one opening.
+The sector loop now asserts what it relies on instead: the signed areas sum to the material's own
+area, so every hole is wound against its outer loop.
 
 **An opening used to delete its compartment's floor fillet outright, and `require_blends` could not
 see it.** That gate holds the model to the blends it *asked for*, and the loss happened one step
@@ -405,7 +454,14 @@ it there. The resulting 1.8e-4 mm sliver is longer than `EPS` (so `chain_loops` 
 it) but the two regions now disagreed about where that vertex is, the chain ran off the end, and an
 unclosed chain is silently dropped. `split_seg`'s line branch measured its margin as a *fraction* of
 the segment — generous on a long one, vanishing on a short one — and now measures it in millimetres
-against `SLIVER`, the way the arc branch always has. `SLIVER > EPS` is a `const` assert.
+against `SLIVER`. `SLIVER > EPS` is a `const` assert.
+
+`split_seg` now states its two postconditions rather than leaving them to the reader: the pieces
+**partition** the segment (first starts where it starts, last ends where it ends, each begins where
+the last left off) and none is shorter than `SLIVER` unless the whole segment already was. Writing
+the second one down immediately caught the arc branch making the same mistake the line branch had —
+its angular margin was scaled by the arc's own span, so a short arc got a vanishing margin. The
+margin is now `SLIVER` millimetres of arc, full stop.
 
 **An opening onto an enclosed hole's boundary is ignored, not honoured.** `layout::enclosed_holes`
 flood-fills the empty cells a bin's cell set surrounds, and `effective_walls` drops any `open_edge`

@@ -36,6 +36,51 @@ fn cross(o: Vec2, a: Vec2, b: Vec2) -> f32 {
     (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
 }
 
+/// Which of `atan2`'s four pieces a direction falls in, so that comparing
+/// sectors first and then a single cross product reproduces `atan2` order
+/// exactly. `atan2` returns 0 along +x, rises to π along -x through +y, and
+/// runs -π to 0 through -y.
+#[inline]
+fn sector(d: Vec2) -> u8 {
+    if d.y < 0.0 {
+        0
+    } else if d.y > 0.0 {
+        2
+    } else if d.x > 0.0 {
+        1
+    } else {
+        3
+    }
+}
+
+/// Order two directions by the angle `atan2` would give them, without going
+/// through `atan2`.
+///
+/// The angle itself cannot be trusted here. Two directions that differ by a
+/// part in 10^8 -- a diagonal running the length of a face, a hair off a
+/// boundary edge it passes over -- round to the *same* f32 angle, and the sort
+/// then orders them arbitrarily, which sends `next_in_face` into a neighbouring
+/// face and the triangulation covers parts of the region twice. Within one
+/// half-plane the cross product answers the same question and is exact to the
+/// last bit the inputs justify: the terms it subtracts are the products that
+/// went into them, not the output of a transcendental function.
+#[inline]
+fn angular_cmp(a: Vec2, b: Vec2) -> std::cmp::Ordering {
+    let (sa, sb) = (sector(a), sector(b));
+    if sa != sb {
+        return sa.cmp(&sb);
+    }
+    // Same sector, so the two span less than half a turn and the sign of the
+    // cross product is the order: positive means `b` is counter-clockwise of
+    // `a`, which is the larger angle.
+    (a.x * b.y - a.y * b.x).total_cmp(&0.0).reverse()
+}
+
+/// What the stack in `monotone` holds. It is seeded with two vertices and every
+/// pop is guarded by a length test, so a miss means the walk left the chain it
+/// was following, not that the polygon was too small.
+const STACK: &str = "the monotone stack keeps the chain walked so far";
+
 /// Signed area of `p[s..e]` traversed in order; positive is counter-clockwise.
 pub fn span_ccw(p: &[Vec2], s: usize, e: usize) -> bool {
     let mut a = 0.0f32;
@@ -307,16 +352,26 @@ impl Planar {
             cursor[f] += 1;
         }
         let (pt, he_from, he_to) = (&self.pt, &self.he_from, &self.he_to);
-        let angle = |h: u32| -> f32 {
-            let (a, b) = (
-                pt[he_from[h as usize] as usize],
-                pt[he_to[h as usize] as usize],
-            );
-            (b.y - a.y).atan2(b.x - a.x)
-        };
+        let dir =
+            |h: u32| -> Vec2 { pt[he_to[h as usize] as usize] - pt[he_from[h as usize] as usize] };
         for v in 0..n {
             let (s, e) = (self.out_off[v] as usize, self.out_off[v + 1] as usize);
-            self.out_he[s..e].sort_unstable_by(|&a, &b| angle(a).total_cmp(&angle(b)));
+            self.out_he[s..e].sort_unstable_by(|&a, &b| angular_cmp(dir(a), dir(b)));
+            // Two half-edges leaving one vertex in exactly the same direction
+            // have no angular order, so `next_in_face` would pick between them
+            // arbitrarily and the walk could leave the face it is tracing. It
+            // means a diagonal was laid along a boundary edge -- geometry the
+            // sweep must not produce, not a case to break the tie on.
+            for w in self.out_he[s..e].windows(2) {
+                let (d0, d1) = (dir(w[0]), dir(w[1]));
+                assert!(
+                    d0.x * d1.y - d0.y * d1.x != 0.0 || d0.dot(d1) <= 0.0,
+                    "half-edges {} and {} leave vertex {v} ({:?}) in the same direction: {d0:?}, {d1:?}",
+                    w[0],
+                    w[1],
+                    pt[v]
+                );
+            }
         }
         self.he_pos.clear();
         self.he_pos.resize(m, 0);
@@ -435,11 +490,11 @@ impl Planar {
         st.push(0);
         st.push(1);
         for k in 2..n - 1 {
-            let top_of = *st.last().unwrap();
+            let top_of = *st.last().expect(STACK);
             if left[k] != left[top_of] {
                 while st.len() > 1 {
-                    let a = st.pop().unwrap();
-                    let b = *st.last().unwrap();
+                    let a = st.pop().expect(STACK);
+                    let b = *st.last().expect(STACK);
                     let t = if left[a] {
                         [seq[k], seq[b], seq[a]]
                     } else {
@@ -451,7 +506,7 @@ impl Planar {
                 st.push(k - 1);
                 st.push(k);
             } else {
-                let mut last = st.pop().unwrap();
+                let mut last = st.pop().expect(STACK);
                 while let Some(&t) = st.last() {
                     let c = cross(
                         pt[seq[k] as usize],
@@ -468,7 +523,7 @@ impl Planar {
                         [seq[k], seq[last], seq[t]]
                     };
                     out.push([o(tri[0]), o(tri[1]), o(tri[2])]);
-                    last = st.pop().unwrap();
+                    last = st.pop().expect(STACK);
                 }
                 st.push(last);
                 st.push(k);
@@ -476,8 +531,8 @@ impl Planar {
         }
         let k = n - 1;
         while st.len() > 1 {
-            let a = st.pop().unwrap();
-            let b = *st.last().unwrap();
+            let a = st.pop().expect(STACK);
+            let b = *st.last().expect(STACK);
             let t = if left[a] {
                 [seq[k], seq[b], seq[a]]
             } else {
@@ -622,6 +677,183 @@ mod tests {
             }
         }
         check(&uv, &spans);
+    }
+
+    /// The rim of a 1x3 bin cut into four compartments by two tidy inner
+    /// walls, the vertical one on the bin's exact centre line. Verbatim
+    /// `tess.rs` output -- one outer loop and four rounded-rectangle holes,
+    /// all simple, disjoint and properly nested. In this face's uv frame the
+    /// sweep runs across the bin's 42 mm width, so the two holes of a column
+    /// begin and end at exactly the same sweep height.
+    const FOUR_COMPARTMENT_RIM: [&[(f32, f32)]; 5] = [
+        &[
+            (-0.25, 4.0),
+            (-0.25, 38.0),
+            (-0.3777783, 38.970573),
+            (-0.7524047, 39.875),
+            (-1.3483496, 40.65165),
+            (-2.125, 41.247597),
+            (-3.0294285, 41.622223),
+            (-4.0, 41.75),
+            (-38.0, 41.75),
+            (-46.0, 41.75),
+            (-80.0, 41.75),
+            (-88.0, 41.75),
+            (-122.0, 41.75),
+            (-122.97057, 41.622223),
+            (-123.875, 41.247597),
+            (-124.65165, 40.65165),
+            (-125.2476, 39.875),
+            (-125.62222, 38.970573),
+            (-125.75, 38.0),
+            (-125.75, 4.0),
+            (-125.62222, 3.029428),
+            (-125.2476, 2.1249998),
+            (-124.65165, 1.3483496),
+            (-123.875, 0.7524047),
+            (-122.97057, 0.3777783),
+            (-122.0, 0.25),
+            (-88.0, 0.25),
+            (-80.0, 0.25),
+            (-46.0, 0.25),
+            (-38.0, 0.25),
+            (-4.0, 0.25),
+            (-3.0294285, 0.3777783),
+            (-2.1249993, 0.75240517),
+            (-1.3483491, 1.34835),
+            (-0.7524047, 2.1250005),
+            (-0.37777805, 3.029429),
+        ],
+        &[
+            (-1.45, 17.100002),
+            (-1.45, 4.0),
+            (-1.5368888, 3.3400116),
+            (-1.7916348, 2.7250004),
+            (-2.1968772, 2.196878),
+            (-2.7249994, 1.7916355),
+            (-3.3400111, 1.5368893),
+            (-3.9999998, 1.45),
+            (-80.3, 1.45),
+            (-80.94705, 1.5351856),
+            (-81.55, 1.7849367),
+            (-82.06777, 2.182233),
+            (-82.465065, 2.6999998),
+            (-82.71482, 3.3029523),
+            (-82.8, 3.95),
+            (-82.8, 17.1),
+            (-82.71482, 17.747047),
+            (-82.465065, 18.35),
+            (-82.06777, 18.867767),
+            (-81.55, 19.265064),
+            (-80.94705, 19.514814),
+            (-80.3, 19.6),
+            (-3.95, 19.600002),
+            (-3.3029523, 19.514816),
+            (-2.7, 19.265066),
+            (-2.182233, 18.86777),
+            (-1.7849364, 18.350002),
+            (-1.5351856, 17.74705),
+        ],
+        &[
+            (-85.2, 17.1),
+            (-85.2, 3.95),
+            (-85.28518, 3.3029525),
+            (-85.534935, 2.7000003),
+            (-85.93223, 2.1822333),
+            (-86.45, 1.7849369),
+            (-87.05295, 1.5351856),
+            (-87.7, 1.45),
+            (-122.0, 1.45),
+            (-122.65999, 1.5368893),
+            (-123.275, 1.7916353),
+            (-123.80312, 2.1968777),
+            (-124.20837, 2.725),
+            (-124.46311, 3.3400111),
+            (-124.55, 4.0),
+            (-124.55, 17.1),
+            (-124.46482, 17.747047),
+            (-124.215065, 18.35),
+            (-123.81777, 18.867767),
+            (-123.3, 19.265064),
+            (-122.69705, 19.514814),
+            (-122.05, 19.6),
+            (-87.7, 19.6),
+            (-87.05295, 19.514814),
+            (-86.45, 19.265064),
+            (-85.93223, 18.867767),
+            (-85.534935, 18.35),
+            (-85.28518, 17.747047),
+        ],
+        &[
+            (-124.55, 24.899998),
+            (-124.55, 38.0),
+            (-124.46311, 38.65999),
+            (-124.20837, 39.275),
+            (-123.80312, 39.803123),
+            (-123.275, 40.208366),
+            (-122.65999, 40.46311),
+            (-122.0, 40.55),
+            (-87.7, 40.55),
+            (-87.05295, 40.464813),
+            (-86.45, 40.21506),
+            (-85.93223, 39.817764),
+            (-85.534935, 39.3),
+            (-85.28518, 38.69705),
+            (-85.2, 38.05),
+            (-85.2, 24.9),
+            (-85.28518, 24.252953),
+            (-85.534935, 23.65),
+            (-85.93223, 23.132233),
+            (-86.45, 22.734936),
+            (-87.05295, 22.485186),
+            (-87.7, 22.4),
+            (-122.05, 22.399998),
+            (-122.69705, 22.485184),
+            (-123.3, 22.734934),
+            (-123.81777, 23.13223),
+            (-124.215065, 23.649998),
+            (-124.46482, 24.25295),
+        ],
+        &[
+            (-82.8, 24.9),
+            (-82.8, 38.05),
+            (-82.71482, 38.69705),
+            (-82.465065, 39.3),
+            (-82.06777, 39.817764),
+            (-81.55, 40.21506),
+            (-80.94705, 40.464813),
+            (-80.3, 40.55),
+            (-3.9999998, 40.55),
+            (-3.3400111, 40.46311),
+            (-2.725, 40.208366),
+            (-2.1968775, 39.803123),
+            (-1.7916348, 39.275),
+            (-1.5368891, 38.65999),
+            (-1.45, 38.0),
+            (-1.45, 24.9),
+            (-1.5351853, 24.252953),
+            (-1.7849364, 23.65),
+            (-2.1822329, 23.132233),
+            (-2.6999996, 22.734936),
+            (-3.3029523, 22.485186),
+            (-3.95, 22.4),
+            (-80.3, 22.4),
+            (-80.94705, 22.485186),
+            (-81.55, 22.734936),
+            (-82.06777, 23.132233),
+            (-82.465065, 23.65),
+            (-82.71482, 24.252953),
+        ],
+    ];
+
+    #[test]
+    fn four_compartments_either_side_of_the_centre_line() {
+        let mut p = Vec::new();
+        let spans: Vec<_> = FOUR_COMPARTMENT_RIM
+            .iter()
+            .map(|l| ring(&mut p, l))
+            .collect();
+        check(&p, &spans);
     }
 
     /// Reentrant corners of a staircase cavity are exactly collinear, which is

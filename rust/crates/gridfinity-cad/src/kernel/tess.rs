@@ -508,7 +508,7 @@ fn assert_tiles_the_loops(sc: &Scratch) {
             for &(a, b) in &sc.spans {
                 eprintln!("TILE loop:");
                 for i in a..b {
-                    eprintln!("   {i:2} {:?}", sc.pts3[i]);
+                    eprintln!("   {i:2} {:?} uv {:?}", sc.pts3[i], sc.uv[i]);
                 }
             }
         }
