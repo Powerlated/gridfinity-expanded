@@ -291,9 +291,10 @@ free-form-wall tessellation leaks, and 15 sloped audit failures.
 
 Defects this rewrite found, all pre-existing and none diagnosed:
 
-- **An opening whose run abuts a reentrant fillet panics the open-run planner** — *fixed*, see the
-  pinch note below. It was `open-run neighbour must be straight (got an arc before/after the run)`,
-  7/150 on L-shaped bins, plus a rarer `no pinch for run start`. `resolve_open_runs` casts a ray from the run's endpoint along the
+- **An opening whose run abuts a reentrant fillet panics the open-run planner** — *fixed*, along
+  with the whole open-run planner; see "an opening is a boolean". It was `open-run neighbour must be
+  straight (got an arc before/after the run)`, 7/150 on L-shaped bins, plus a rarer `no pinch for
+  run start`. `resolve_open_runs` casts a ray from the run's endpoint along the
   *direction of the adjacent straight segment* to pinch against the outer loop, then truncates that
   segment to the hit. At a reentrant corner the adjacent cavity segment is the concave fillet arc,
   and there is no line to cast along or to truncate. This is why the two asserting opening profiles
@@ -324,31 +325,51 @@ Defects this rewrite found, all pre-existing and none diagnosed:
   builds its `Vec` by iterating a `HashMap`, and `TessLeak`'s `Debug` carries `faces: [..]`, so the
   message a case fails with is hash-ordered. The gating profiles are stable across five runs.
 
-**The pinch follows the cavity wall itself, not a ray along it.** `resolve_open_runs` used to cast
-from the run's endpoint along the *direction* of the adjacent segment, which only exists if that
-segment is straight; at a reentrant corner it is the concave fillet arc and there was nothing to
-cast along. `pinch_seg` intersects the neighbouring segment with the outline instead
-(`region2d::seg_seg_points`, now public), which finds the crossing an arc genuinely has — on a 3-cell
-L the fillet arc meets the outline at (125.75, 42.6) — and agrees exactly with the ray on a straight
-neighbour, since there the ray and the segment are the same line. Three pieces make it general:
-`reach_seg` continues the segment `PINCH_REACH` past its own end, because a wall can fall either
-side of the boundary (an open span runs out *past* it to the pitch line, while a wall meeting a
-rounded notch corner stops *short*); `truncate_seg` moves an arc's parameter range with its
-endpoint, or the two disagree about where the arc stops; and `split_at` splits an outer **arc**
-piece, since a notch's outer fillet is exactly where a short wall meets the outline. Only a line's
-split records a `peg_splits` station — a peg's top ring welds along a straight shared run, so an arc
-has none. This took `fuzz_stripped_polyominoes` 66/150 → 57/150 and retired both `arc before/after
-the run` classes.
+**An opening is a boolean, not a walk.** `plan_cavity` subtracts a wall strip for every *walled*
+edge and none for an open one, so an opened cavity already runs out past the outline to the pitch
+line. Intersecting it with the outline is therefore the whole of what an opening means, and the
+standing wall is the same pair of regions the other way round:
+
+```
+cavity = shape ∩ outline          wall = outline − opened_cavities
+```
+
+`clip_cavity_to_outline` marks a resulting run `coincident` when its midpoint lies on the outline —
+that is a span with no wall — and `region_difference` returns the wall already wound
+material-on-the-left, so `outward` follows the loop's area sign and nothing has to be chained.
+
+This replaced a ray-cast pinch: cast from the run's endpoint along the *direction* of the adjacent
+cavity segment, truncate it to the hit, walk the outline between the two hits, then rebuild the wall
+from whatever the walk left and chain the fragments into loops. It needed the neighbour to be
+straight (a reentrant corner offers the concave fillet arc instead), it needed the hit to be within
+reach in the right direction, and two openings meeting at a notch produced walks that did not
+compose. `resolve_open_runs`, `pinch`, `consume_walk`, `consume_all_near`, `plan_wall_sectors`,
+`chain_fragments` and `seg_on_open` are all gone: −216 lines net, and `fuzz_stripped_polyominoes`
+went 57/150 → **40/150** with both the `no pinch for run` and `wall-sector chain stuck` classes
+retired outright.
+
+Two things it does not get for free, and both were manifold errors first:
+
+- **One presplit for both booleans.** They share the wall between them and their results have to
+  weld, so `presplit_regions` gives the cavity shapes and the outline a single segmentation before
+  either sweep runs. Without it each sweep cuts the shared boundary at its own f32 points and the
+  solid opens at an edge nothing pairs with — the failure `region2d`'s own note warns about.
+- **The lip carries the wall's vertices.** The standing wall above the floor and the base's outer
+  wall below it meet along the lip, so `split_outline_at` cuts the outline at every vertex of the
+  wall. Without it the base emits one long edge across a span the floor and the wall above have
+  already divided (`edge 240 used fwd=0 bwd=1`). That split is also where `peg_splits` stations come
+  from, so the peg profile still welds to the wall's bottom ring.
 
 **`fuzz_stripped_polyominoes` reports rather than gates, and it found four undiagnosed classes on
 its first run.** Half a complex polyomino's perimeter is the first thing to reach openings meeting a
-reentrant corner in quantity: 66/150 cases fail, 42 of them the two documented open-run panics
-(`open-run neighbour must be straight`, `no pinch for run`). It does not `require_blends` -- a
+reentrant corner in quantity. It started at 66/150, 42 of them open-run panics that the boolean
+reformulation has since retired; it is at **40/150**, and 36 of those are one class. It does not `require_blends` -- a
 reentrant corner is where the floor fillet legitimately degrades -- so what it holds is that the bin
 builds, stays manifold, audits clean and tessellates without leaks. The rest:
 
-- **28 cases hand the triangulator a face whose loops do not tile** (21 before the pinch fix, which
-  carried nine previously-panicking cases far enough to reach this instead). The same assert as
+- **36 cases hand the triangulator a face whose loops do not tile** (21 at first; each open-run fix
+  carries more previously-panicking cases far enough to reach this instead, so the count rises as
+  the others fall). The same assert as
   `CROSSING_WALL_TILING`, reached through openings rather than crossing walls. Characterised on a
   **one-cell** bin at `height_units: 1`, `cavity_corner_radius: 4.0` with one open edge: the face is
   the outer wall band at the opening, between the peg top and the floor, and its loop is

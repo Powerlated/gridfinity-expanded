@@ -6,7 +6,10 @@ use crate::kernel::program::{
     PlaneRef as PPlaneRef, Program,
 };
 use crate::kernel::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
-use crate::kernel::region2d::{chain_loops, loops_within, region_difference, split_regions};
+use crate::kernel::region2d::{
+    chain_loops, loops_within, point_seg_distance, presplit_regions, region_difference,
+    region_intersection, split_regions,
+};
 use crate::kernel::sketch::{
     Aabb, Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop, segs_bbox,
 };
@@ -796,38 +799,6 @@ fn point_on_spans(spans: &[OpenSpan], pt: Vec2) -> bool {
     })
 }
 
-fn seg_on_open(spans: &[OpenSpan], seg: &Seg) -> bool {
-    let Seg::Line { a, b } = *seg else {
-        return false;
-    };
-    let horiz = (a.y - b.y).abs() < W_EPS;
-    let vert = (a.x - b.x).abs() < W_EPS;
-    if horiz == vert {
-        return false;
-    }
-    let coord = if horiz { a.y } else { a.x };
-    let (mut lo, mut hi) = if horiz { (a.x, b.x) } else { (a.y, b.y) };
-    if lo > hi {
-        std::mem::swap(&mut lo, &mut hi);
-    }
-    let mut covers: Vec<(f32, f32)> = spans
-        .iter()
-        .filter(|s| s.horiz == horiz && (s.coord - coord).abs() < W_EPS)
-        .map(|s| (s.lo, s.hi))
-        .collect();
-    if covers.is_empty() {
-        return false;
-    }
-    covers.sort_by(|x, y| x.0.total_cmp(&y.0));
-    let mut cur = lo;
-    for (l, h) in covers {
-        if l <= cur + W_EPS && h > cur {
-            cur = h;
-        }
-    }
-    cur >= hi - W_EPS
-}
-
 struct OuterLoops {
     loops: Vec<Vec<OuterPiece>>,
     consumed: Vec<Vec<bool>>,
@@ -839,31 +810,23 @@ impl OuterLoops {
         OuterLoops { loops, consumed }
     }
 
-    /// Where the cavity wall `seg` leaves the bin's outline, nearest the end of
-    /// it that meets the open run.
+    /// Cut whichever outer loop passes through `p`, if any.
     ///
-    /// This used to cast a ray from the run's endpoint along the *direction* of
-    /// the adjacent segment, which only exists if that segment is straight. At
-    /// a reentrant corner it is the concave fillet arc, and there was nothing
-    /// to cast along -- yet the arc does cross the outline, so intersecting the
-    /// segment itself finds the pinch where casting could not. On a straight
-    /// neighbour the two agree exactly: the ray and the segment are the same
-    /// line, and the hit is the same point.
-    fn pinch_seg(&self, seg: &Seg, at_end: bool) -> Option<(usize, Vec2)> {
-        let from = if at_end { seg.end() } else { seg.start() };
-        let reach = reach_seg(seg, at_end, PINCH_REACH);
-        let mut best: Option<(usize, Vec2, f32)> = None;
-        for (li, pieces) in self.loops.iter().enumerate() {
-            for pc in pieces {
-                for p in crate::kernel::region2d::seg_seg_points(&reach, &pc.seg) {
-                    let d = (p - from).length();
-                    if d <= PINCH_REACH && best.is_none_or(|(_, _, bd)| d < bd) {
-                        best = Some((li, p, d));
-                    }
-                }
+    /// The standing wall above the floor and the base's outer wall below it
+    /// share the lip between them, so the lip has to carry a vertex wherever
+    /// the wall above starts or stops. Without it the base emits one long edge
+    /// across a span the floor and the wall above have already divided, and
+    /// nothing pairs with it.
+    fn split_outline_at(&mut self, p: Vec2, peg_splits: &mut HashMap<GridEdge, Vec<f32>>) {
+        for li in 0..self.loops.len() {
+            if self.loops[li]
+                .iter()
+                .any(|pc| point_seg_distance(p, &pc.seg) < W_EPS)
+            {
+                self.split_at(li, p, peg_splits);
+                return;
             }
         }
-        best.map(|(li, p, _)| (li, p))
     }
 
     /// Cut the outer loop at `p` so a walk can start or stop there.
@@ -931,43 +894,6 @@ impl OuterLoops {
         panic!("open-face pinch point {p:?} is not on the outer loop");
     }
 
-    fn consume_walk(&mut self, li: usize, from: Vec2, to: Vec2) -> Vec<Seg> {
-        let pieces = &self.loops[li];
-        let n = pieces.len();
-        let start = (0..n)
-            .find(|&i| v2_eq(pieces[i].seg.start(), from))
-            .unwrap_or_else(|| panic!("no outer piece starts at {from:?}"));
-        let mut out = Vec::new();
-        for k in 0..n {
-            let i = (start + k) % n;
-            out.push(self.loops[li][i].seg);
-            self.consumed[li][i] = true;
-            if v2_eq(self.loops[li][i].seg.end(), to) {
-                return out;
-            }
-        }
-        panic!("outer walk from {from:?} never reached {to:?}");
-    }
-
-    fn consume_all_near(&mut self, probe: Vec2) -> Vec<Seg> {
-        for (li, pieces) in self.loops.iter().enumerate() {
-            let hit = pieces.iter().any(|pc| match pc.seg {
-                Seg::Line { a, b } => {
-                    let d = b - a;
-                    let t = ((probe - a).dot(d) / d.length_squared()).clamp(0.0, 1.0);
-                    (a + d * t - probe).length() < W_EPS
-                }
-                _ => false,
-            });
-            if hit {
-                for c in &mut self.consumed[li] {
-                    *c = true;
-                }
-                return self.loops[li].iter().map(|pc| pc.seg).collect();
-            }
-        }
-        panic!("no outer loop passes near {probe:?}");
-    }
 }
 
 struct CavityLoop {
@@ -988,191 +914,61 @@ impl CavityLoop {
     }
 }
 
-fn resolve_open_runs(
-    shaped: Vec<Seg>,
-    spans: &[OpenSpan],
-    o: &mut OuterLoops,
-    peg_splits: &mut HashMap<GridEdge, Vec<f32>>,
-) -> CavityLoop {
-    let on: Vec<bool> = shaped.iter().map(|s| seg_on_open(spans, s)).collect();
-    if !on.iter().any(|&b| b) {
-        return CavityLoop::untouched(shaped);
-    }
-    if on.iter().all(|&b| b) {
-        let s0 = shaped[0].start();
-        let s1 = shaped[0].end();
-        let d = s1 - s0;
-        let nrm = Vec2::new(-d.y, d.x).normalize();
-        let mid = (s0 + s1) * 0.5;
-        let probe = [mid, mid + nrm * HALF_TOL, mid - nrm * HALF_TOL]
-            .into_iter()
-            .find(|&q| {
-                o.loops.iter().any(|pieces| {
-                    pieces.iter().any(|pc| match pc.seg {
-                        Seg::Line { a, b } => {
-                            let e = b - a;
-                            let t = ((q - a).dot(e) / e.length_squared()).clamp(0.0, 1.0);
-                            (a + e * t - q).length() < W_EPS
-                        }
-                        _ => false,
-                    })
-                })
-            })
-            .expect("fully-open cavity: no outer loop found near its boundary");
-        let segs = o.consume_all_near(probe);
-        let n = segs.len();
-        return CavityLoop {
-            segs,
-            coincident: vec![true; n],
-        };
-    }
-
-    let start = on.iter().position(|&b| !b).unwrap();
-    let n = shaped.len();
-    let mut segs: Vec<Seg> = (0..n).map(|k| shaped[(start + k) % n]).collect();
-    let on: Vec<bool> = (0..n).map(|k| on[(start + k) % n]).collect();
-
-    let mut out: Vec<(Seg, bool)> = Vec::new();
-    let mut i = 0;
-    while i < n {
-        if !on[i] {
-            out.push((segs[i], false));
-            i += 1;
-            continue;
-        }
-        let mut j = i;
-        while j < n && on[j] {
-            j += 1;
-        }
-        let (prev_seg, _) = *out.last().expect("run preceded by a segment");
-        let (li_s, p_s) = o
-            .pinch_seg(&prev_seg, true)
-            .unwrap_or_else(|| panic!("no pinch for run start at {:?}", prev_seg.end()));
-        o.split_at(li_s, p_s, peg_splits);
-
-        let next_seg = if j < n { segs[j] } else { out[0].0 };
-        let (li_e, p_e) = o
-            .pinch_seg(&next_seg, false)
-            .unwrap_or_else(|| panic!("no pinch for run end at {:?}", next_seg.start()));
-        assert_eq!(li_s, li_e, "open run spans two outer loops");
-        o.split_at(li_e, p_e, peg_splits);
-
-        if let Some((sg, _)) = out.last_mut() {
-            truncate_seg(sg, true, p_s);
-        }
-        if j < n {
-            truncate_seg(&mut segs[j], false, p_e);
-        } else {
-            truncate_seg(&mut out[0].0, false, p_e);
-        }
-        for pc in o.consume_walk(li_s, p_s, p_e) {
-            out.push((pc, true));
-        }
-        i = j;
-    }
-    let (segs, coincident) = out.into_iter().unzip();
-    CavityLoop { segs, coincident }
-}
-
-/// How far past its own end a cavity wall may be followed to find the outline.
-/// The wall can fall either side of it: an open span runs the cavity out to the
-/// pitch line, *past* the boundary, while a wall meeting a rounded notch corner
-/// stops short of it.
-const PINCH_REACH: f32 = PEG_TANGENT + 0.6;
-
-/// `seg` continued by `reach` beyond one end, so an intersection sweep can find
-/// the outline whether the wall overshoots it or falls short.
-fn reach_seg(seg: &Seg, at_end: bool, reach: f32) -> Seg {
+/// The mid-point of a segment, for asking which side of a boundary it is on.
+fn seg_mid(seg: &Seg) -> Vec2 {
     match *seg {
-        Seg::Line { a, b } => {
-            let d = (b - a).normalize_or_zero() * reach;
-            if at_end {
-                Seg::Line { a, b: b + d }
-            } else {
-                Seg::Line { a: a - d, b }
-            }
-        }
+        Seg::Line { a, b } => (a + b) * 0.5,
         Seg::Arc {
-            a,
-            b,
             center,
             radius,
             a0,
             a1,
-        } => {
-            let step = (reach / radius.max(1e-6)) * if a1 >= a0 { 1.0 } else { -1.0 };
-            let at = |t: f32| center + Vec2::new(t.cos(), t.sin()) * radius;
-            if at_end {
-                let t = a1 + step;
-                Seg::Arc { a, b: at(t), center, radius, a0, a1: t }
-            } else {
-                let t = a0 - step;
-                Seg::Arc { a: at(t), b, center, radius, a0: t, a1 }
-            }
-        }
-    }
-}
-
-/// Pull one end of a segment back to `p`, which must lie on it. An arc carries
-/// its parameter range beside its endpoints, so moving the point without moving
-/// the angle would leave the two disagreeing about where the arc stops.
-fn truncate_seg(seg: &mut Seg, at_end: bool, p: Vec2) {
-    match seg {
-        Seg::Line { a, b } => {
-            if at_end {
-                *b = p;
-            } else {
-                *a = p;
-            }
-        }
-        Seg::Arc {
-            a,
-            b,
-            center,
-            a0,
-            a1,
             ..
         } => {
-            // The point may sit beyond the stored range -- `reach_seg` looks
-            // past the end -- so the angle is unwrapped to the nearer side of
-            // it rather than clamped into it.
-            let raw = (p.y - center.y).atan2(p.x - center.x);
-            let near = if at_end { *a1 } else { *a0 };
-            let mut t = raw;
-            while t - near > std::f32::consts::PI {
-                t -= std::f32::consts::TAU;
-            }
-            while near - t > std::f32::consts::PI {
-                t += std::f32::consts::TAU;
-            }
-            if at_end {
-                *b = p;
-                *a1 = t;
-            } else {
-                *a = p;
-                *a0 = t;
-            }
+            let t = (a0 + a1) * 0.5;
+            center + Vec2::new(t.cos(), t.sin()) * radius
         }
     }
 }
 
-fn chain_fragments(mut frags: Vec<Vec<Seg>>) -> Vec<Vec<Seg>> {
-    let mut out = Vec::new();
-    while let Some(mut cur) = frags.pop() {
-        loop {
-            let end = cur.last().unwrap().end();
-            if v2_eq(end, cur[0].start()) {
-                break;
-            }
-            let next = frags
-                .iter()
-                .position(|f| v2_eq(f[0].start(), end))
-                .unwrap_or_else(|| panic!("wall-sector chain stuck at {end:?}"));
-            cur.extend(frags.swap_remove(next));
-        }
-        out.push(cur);
-    }
-    out
+fn outline_region(o: &OuterLoops) -> Vec<Vec<Seg>> {
+    o.loops
+        .iter()
+        .map(|l| l.iter().map(|p| p.seg).collect())
+        .collect()
+}
+
+fn on_outline(outline: &[Vec<Seg>], p: Vec2) -> bool {
+    outline
+        .iter()
+        .flatten()
+        .any(|sg| point_seg_distance(p, sg) < W_EPS)
+}
+
+/// Clip a cavity loop to the bin's outline, marking the runs that end up lying
+/// *on* it -- those are the spans where no wall stands.
+///
+/// `plan_cavity` subtracts a wall strip for every walled edge and none for an
+/// open one, so an opened cavity already runs out past the outline to the pitch
+/// line. Intersecting it with the outline is therefore the whole of what an
+/// opening means: the cavity keeps its own wall where one stands and follows the
+/// outer profile where one does not, rounded corners and all.
+///
+/// This replaces a ray-cast pinch that walked the outline piece by piece. That
+/// needed the cavity wall either side of a run to be straight and to meet the
+/// outline within reach; at a reentrant corner it is the concave fillet arc and
+/// there is nothing to cast along, and two openings meeting at a notch produced
+/// outline walks that did not compose. The boolean has no such cases -- it is
+/// the same computation the cavity is traced by.
+fn clip_cavity_to_outline(shape: &[Seg], outline: &[Vec<Seg>]) -> Vec<CavityLoop> {
+    region_intersection(&[shape.to_vec()], outline)
+        .into_iter()
+        .filter(|l| loop_area(l) > 0.0)
+        .map(|segs| {
+            let coincident = segs.iter().map(|sg| on_outline(outline, seg_mid(sg))).collect();
+            CavityLoop { segs, coincident }
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -1565,22 +1361,50 @@ fn plan_piece(
 
     let mut planned: Vec<(CavityLoop, Vec<Island>, f32, Option<Banded>)> = Vec::new();
     let corner_r = (OUTER_R - wt).max(0.0);
-    for ol in &outers_traced {
-        let (convex_r, concave_r) = if slope.is_some() {
-            (0.0, 0.0)
+    let (convex_r, concave_r) = if slope.is_some() {
+        (0.0, 0.0)
+    } else {
+        (rc.max(corner_r), fr)
+    };
+    let shapes: Vec<Vec<Seg>> = outers_traced
+        .iter()
+        .map(|ol| {
+            if openish {
+                shape_cavity_loop_open(ol, convex_r, concave_r, &spans)
+            } else {
+                shape_cavity_loop(ol, convex_r, concave_r)
+            }
+        })
+        .collect();
+    // The cavity and the wall are two booleans over the same pair of regions,
+    // and their results have to weld to each other along the wall they share.
+    // One presplit gives both a common segmentation; running each sweep on raw
+    // inputs instead leaves the shared boundary cut at f32-different points and
+    // the solid open at an edge nothing pairs with.
+    let (shapes, outline) = if openish {
+        let mut pre = presplit_regions(&[shapes, outline_region(&o)]);
+        let outline = pre.pop().expect("two regions in, two out");
+        (pre.pop().expect("two regions in, two out"), outline)
+    } else {
+        (shapes, Vec::new())
+    };
+    let mut opened: Vec<Vec<Seg>> = Vec::new();
+    for (oi, ol) in outers_traced.iter().enumerate() {
+        let shape = shapes[oi].clone();
+        let cls = if openish {
+            let cls = clip_cavity_to_outline(&shape, &outline);
+            if cls.iter().any(|c| c.touched()) {
+                opened.push(shape);
+            }
+            cls
         } else {
-            (rc.max(corner_r), fr)
+            vec![CavityLoop::untouched(shape)]
         };
-        let shape = if openish {
-            shape_cavity_loop_open(ol, convex_r, concave_r, &spans)
-        } else {
-            shape_cavity_loop(ol, convex_r, concave_r)
-        };
-        let cl = if openish {
-            resolve_open_runs(shape, &spans, &mut o, &mut peg_splits)
-        } else {
-            CavityLoop::untouched(shape)
-        };
+        assert!(
+            !cls.is_empty(),
+            "a cavity loop vanished when clipped to the bin outline"
+        );
+        for cl in cls {
         let islands: Vec<Island> = holes_of(ol)
             .iter()
             .map(|il| Island {
@@ -1609,7 +1433,7 @@ fn plan_piece(
         };
         let mut entries: Vec<(CavityLoop, Vec<Island>, Option<Banded>)> = Vec::new();
         if cl.touched() || full_walls.is_empty() {
-            entries.push((cl, islands, None));
+            entries.push((cl, islands.clone(), None));
         } else {
             let mut region: Vec<Vec<Seg>> = vec![cl.segs.clone()];
             region.extend(islands.iter().map(|il| reverse_loop(&il.segs)));
@@ -1786,7 +1610,21 @@ fn plan_piece(
             }
             planned.push((cl, islands, loop_fr, banded));
         }
+        }
     }
+
+    // The standing wall is the outline with every opened compartment taken out
+    // of it. A compartment that keeps all its walls is left solid here and
+    // carved by its own cavity stack, exactly as before.
+    let wall_loops = if openish {
+        let w = region_difference(&outline, &opened);
+        for p in w.iter().flatten().map(|sg| sg.start()) {
+            o.split_outline_at(p, &mut peg_splits);
+        }
+        w
+    } else {
+        Vec::new()
+    };
 
     drop(_g);
     let mut _g = crate::kernel::perf::scope(crate::kernel::perf::Metric::PlanOps);
@@ -1980,11 +1818,8 @@ fn plan_piece(
         }
     }
 
-    let sector_segs: Vec<Vec<Seg>> = if openish {
-        plan_wall_sectors(&o, &touched)
-    } else {
-        Vec::new()
-    };
+    let _ = &touched;
+    let sector_segs: Vec<Vec<Seg>> = wall_loops;
     let top_walls: Vec<Vec<Seg>> = if openish {
         sector_segs.clone()
     } else {
@@ -2140,6 +1975,8 @@ fn plan_piece(
     }
 
     for (si, sl) in sector_segs.iter().enumerate() {
+        // `region_difference` winds a hole the other way, and a hole is a
+        // compartment the wall encloses rather than material it bounds.
         prog.push(
             format!("{tag}: wall sector {si}"),
             POp::Wall {
@@ -2147,7 +1984,7 @@ fn plan_piece(
                 upper: sl.clone(),
                 z0: floor_z,
                 z1: total_h,
-                outward: true,
+                outward: loop_area(sl) > 0.0,
             },
         );
     }
@@ -2212,59 +2049,6 @@ fn plan_piece(
             },
         );
     }
-}
-
-fn plan_wall_sectors(o: &OuterLoops, touched: &[CavityLoop]) -> Vec<Vec<Seg>> {
-    let mut frags: Vec<Vec<Seg>> = Vec::new();
-    for (li, pieces) in o.loops.iter().enumerate() {
-        let cons = &o.consumed[li];
-        let n = pieces.len();
-        if cons.iter().all(|&c| c) {
-            continue;
-        }
-        if !cons.iter().any(|&c| c) {
-            frags.push(pieces.iter().map(|p| p.seg).collect());
-            continue;
-        }
-        let start = cons.iter().position(|&c| c).unwrap();
-        let mut run: Vec<Seg> = Vec::new();
-        for k in 1..=n {
-            let idx = (start + k) % n;
-            if !cons[idx] {
-                run.push(pieces[idx].seg);
-            } else if !run.is_empty() {
-                frags.push(std::mem::take(&mut run));
-            }
-        }
-        if !run.is_empty() {
-            frags.push(run);
-        }
-    }
-    for cl in touched {
-        let n = cl.segs.len();
-        if cl.coincident.iter().all(|&c| c) {
-            continue;
-        }
-        let start = cl.coincident.iter().position(|&c| c).unwrap();
-        let mut run: Vec<Seg> = Vec::new();
-        let flush = |run: &mut Vec<Seg>, frags: &mut Vec<Vec<Seg>>| {
-            if !run.is_empty() {
-                frags.push(run.iter().rev().map(|s| s.reversed()).collect());
-                run.clear();
-            }
-        };
-        for k in 1..=n {
-            let idx = (start + k) % n;
-            if !cl.coincident[idx] {
-                run.push(cl.segs[idx]);
-            } else {
-                flush(&mut run, &mut frags);
-            }
-        }
-        flush(&mut run, &mut frags);
-    }
-
-    chain_fragments(frags)
 }
 
 fn shape_cavity_loop_open(lp: &TracedLoop, rc: f32, rf: f32, spans: &[OpenSpan]) -> Vec<Seg> {
