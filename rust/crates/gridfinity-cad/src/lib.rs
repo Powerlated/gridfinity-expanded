@@ -1248,6 +1248,50 @@ mod tests {
         );
     }
 
+    /// A free-form wall's leak, from `fuzz_inner_walls` at seed 7. The B-rep is
+    /// sound -- `validate` passes and `audit` reports nothing -- and the mesh
+    /// still leaked 4 edges at every tessellation density, which is what ruled
+    /// out a sampling artifact and pointed at winding. All four were the edges
+    /// of one small face, the partial-height wall's top cap: it took
+    /// `triangulate`'s 4-vertex fast path while its neighbours went through
+    /// `planar`, and the two disagree about output winding.
+    #[test]
+    fn a_partial_height_walls_top_cap_is_wound_like_its_neighbours() {
+        let p = gridfinity::Params {
+            bins: vec![gridfinity::LogicalBin {
+                cells: vec![GridCell { x: 1, y: 0 }],
+                ..Default::default()
+            }],
+            inner_walls: vec![
+                gridfinity::InnerWall {
+                    x1: 54.0,
+                    y1: 32.5,
+                    x2: -10.0,
+                    y2: 53.5,
+                    width: 2.0,
+                    height: Some(9.5),
+                },
+                gridfinity::InnerWall {
+                    x1: 51.5,
+                    y1: 36.5,
+                    x2: 35.5,
+                    y2: -12.0,
+                    width: 0.8,
+                    height: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let solid = gridfinity::build(&p);
+        solid.validate().expect("closed manifold");
+        assert!(audit(&solid).is_ok(), "{}", audit(&solid));
+        // Density is the tell: a sampling artifact moves with it, a winding
+        // mismatch does not.
+        for segs in [4, 8, 16, 24] {
+            assert_watertight(&tessellate(&solid, segs).to_mesh());
+        }
+    }
+
     /// An opening takes the wall over its own run and nothing else. The chain
     /// dies on the mouth, where the corner is void rather than material, so
     /// `fillet.rs` emits a cap to close it off -- see the capped runout in

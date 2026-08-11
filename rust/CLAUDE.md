@@ -241,8 +241,9 @@ fail the build), which is exactly why only `require_blends` profiles treat them 
 `fuzz_openings_and_inner_walls` are clean at six seeds (default, 1, 7, 13, 42, 99) — that pair is
 the gate for *adding a wall opening or an internal wall never breaks filleting*. `fuzz_bin_shapes`
 and `fuzz_split_pieces` are clean of *unexpected* findings at all six, meeting only
-`TRIM_SECTION_CURVE` at 1-3/120. `fuzz_inner_walls` is green at the default seed and finds 1-5/150
-of the freeform defects below at others. `fuzz_params_broad` is at 9/400 / 6 defects.
+`TRIM_SECTION_CURVE` at 1-3/120. `fuzz_inner_walls` is green at the default seed and at 7, 13 and
+42; seeds 1 and 99 leave 2/150 and 1/150, neither of them the winding leak (an audit failure, a
+56-edge leak between two cavity-corner faces, and one edge used four times). `fuzz_params_broad` is at 9/400 / 6 defects.
 
 ### The long campaign, and what it fixed
 
@@ -403,11 +404,10 @@ reported a missed selection as a non-manifold solid, and masked five that genuin
 fixes (the self-intersecting-face refusal, the sorted `bm` iteration) took the rest at the default
 seed. The classes below are what the surviving off-seed failures still look like:
 
-- **7 cases are the tessellator, not the model.** `validate` passes and `audit` reports **zero
-  errors**, so the B-rep is sound and the mesh still leaks. They move with `wall_thickness` and
-  `cavity_corner_radius` in no pattern -- a case leaks at 1.2/0.0, is clean at 1.5/0.0, leaks again
-  at 2.0/0.0 -- which rules out one degenerate value and points at a general fragility where an
-  inner wall meets the cavity's rounded corner.
+- **7 cases were the tessellator, not the model** -- `validate` passed and `audit` reported zero
+  errors while the mesh leaked -- and they are **fixed**. The winding vote was the cause; see the
+  note under `tess.rs`. Seeds 7 and 42 went to 0/150 and seed 1 from 5 to 2.
+  `a_partial_height_walls_top_cap_is_wound_like_its_neighbours` pins the repro.
 - **2 cases are a real blend defect** on a **spindle torus** (`major_r` 1.45 < `minor_r` 4.0, the
   shape `orient.rs` already warns about): the blend edge's curve lands 2.05 mm from its own vertex
   and deviates 2.9 mm from the torus it is meant to lie on.
@@ -616,12 +616,28 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   loud error for a silently broken part). `program::run` applies blends through it, which is what
   lets a compartment-splitting divider keep the fillet on the corners that *do* close.
 - **`tess.rs`** — analytic faces → triangles. **Watertight by construction:** each edge is sampled
-  once (cached by `EdgeId`), so the two faces sharing it emit identical boundary points. Winding is
-  decided **once per face** (area-weighted vote of the emitted triangles' geometric normals against
-  the analytic ones) — never per triangle, or curved faces get inconsistent internal edges. That
-  vote is literal, not the `uv_area · uv_orientation · sign` proxy it used to be: the proxy assumes
-  a face's uv handedness is constant, which a **spindle torus** (floor-fillet blend, `major_r` <
-  `minor_r`) violates, and it silently inverted those faces once loop winding was normalised.
+  once (cached by `EdgeId`), so the two faces sharing it emit identical boundary points.
+  **Winding comes from the loop; only the normals are voted on.** `triangulate` answers in the
+  caller's loop order — `planar` re-winds every loop to outer-CCW/holes-CW for its sweep and is
+  un-wound again on the way out, and the 3- and 4-vertex fast paths already emitted in input order —
+  so a face wound like its loop closes against its neighbours by construction. Deciding the *winding*
+  per face instead, by an area-weighted vote of the emitted triangles' geometric normals against the
+  analytic ones, was a survival from before `orient::normalize` existed, and it is strictly less
+  informed: it sees one face at a time. Where it disagreed with the topology it inverted that face
+  alone, and the mesh then leaked along **every** one of its edges. That is what the free-form-wall
+  leaks were — a partial-height wall's 4-vertex top cap took the fast path while its neighbours went
+  through `planar`, and the vote resolved the two conventions differently. Never decide winding per
+  triangle either, or curved faces get inconsistent internal edges.
+  The vote survives for the **normals**. `orient::normalize` guarantees consistency per connected
+  component, not per face, so one face's `sense` can still oppose the loops around it — and there the
+  analytic normal is the thing that has to give, not the winding that just closed the shell.
+  Negating it keeps shading and the STL facet normal pointing out of the solid. (Flipping such a
+  face's `sense` in `normalize` instead was tried and is wrong: it breaks `fuzz_bin_shapes`,
+  `fuzz_inner_walls` and `fuzz_split_pieces`, because the per-component decision is what keeps edge
+  alternation intact.) That vote is literal, not the `uv_area · uv_orientation · sign` proxy it used
+  to be: the proxy assumes a face's uv handedness is constant, which a **spindle torus**
+  (floor-fillet blend, `major_r` < `minor_r`) violates, and it silently inverted those faces once
+  loop winding was normalised.
   The structured-grid path tries **both edge rotations** when matching a quad's loop to its
   iso-u/iso-v roles, since which of the four edges comes first depends on where the loop starts;
   without the retry a normalised loop falls through to the planar path, which chords straight across

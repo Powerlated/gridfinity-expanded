@@ -239,12 +239,36 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
             RETAIN_NS.with(|c| c.set(c.get() + t2.elapsed().as_nanos() as u64));
         }
 
+        // The loop decides the winding, not the geometry. Every loop the
+        // builder hands out alternates with its neighbours, and `triangulate`
+        // now answers in the loop's own order, so following it is what makes
+        // the shell close. Deciding per face instead -- an area-weighted vote
+        // against the analytic normals -- was a survival from before
+        // `orient::normalize` existed, and it is strictly less informed: it
+        // sees one face at a time, so where it disagreed with the topology it
+        // wound that face against every neighbour and the mesh leaked along
+        // each of its edges. That is the free-form-wall leak: a partial-height
+        // wall's 4-vertex top cap took `triangulate`'s fast path, its
+        // neighbours went through `planar`, and the vote resolved the two
+        // conventions differently.
+        //
+        // The vote still decides the *normals*. `orient::normalize` guarantees
+        // consistency per connected component, not per face, so a single face's
+        // `sense` can still oppose the loops around it -- and where it does,
+        // the analytic normal, not the winding, is the thing that has to give.
+        // Negating it there keeps shading and the STL facet normal pointing out
+        // of the solid without touching the topology that just closed.
         let mut vote = 0.0f32;
         for &[a, b, c] in &sc.tris {
             let geo = (sc.pts3[b] - sc.pts3[a]).cross(sc.pts3[c] - sc.pts3[a]);
             vote += geo.dot(sc.nrm[a] + sc.nrm[b] + sc.nrm[c]);
         }
-        let flip = vote < 0.0;
+        if vote < 0.0 {
+            for n in sc.nrm.iter_mut() {
+                *n = -*n;
+            }
+        }
+        let flip = false;
 
         out.tris.reserve(sc.tris.len());
         out.face_of_tri.reserve(sc.tris.len());
@@ -528,4 +552,16 @@ fn triangulate_into(sc: &mut Scratch) {
     }
 
     sc.planar.run(&sc.uv, &sc.spans, &mut sc.tris);
+    // `planar` re-winds every loop to outer-CCW / holes-CW for its sweep, so it
+    // answers in its own convention rather than the caller's. The short fast
+    // paths above emit in input order. Putting both in the caller's order is
+    // what lets `tessellate` take a face's winding from its loop -- the one
+    // thing in the kernel that is globally consistent -- instead of guessing it
+    // back from the geometry.
+    let (s, e) = sc.spans[0];
+    if !crate::kernel::planar::span_ccw(&sc.uv, s, e) {
+        for t in &mut sc.tris {
+            t.swap(1, 2);
+        }
+    }
 }

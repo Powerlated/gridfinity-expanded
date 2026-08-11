@@ -37,7 +37,7 @@ fn cross(o: Vec2, a: Vec2, b: Vec2) -> f32 {
 }
 
 /// Signed area of `p[s..e]` traversed in order; positive is counter-clockwise.
-fn span_ccw(p: &[Vec2], s: usize, e: usize) -> bool {
+pub fn span_ccw(p: &[Vec2], s: usize, e: usize) -> bool {
     let mut a = 0.0f32;
     for i in s..e {
         let (u, v) = (p[i], p[if i + 1 == e { s } else { i + 1 }]);
