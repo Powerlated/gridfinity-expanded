@@ -178,17 +178,23 @@ profiles use; `Share(1, 2)` is `fuzz_stripped_polyominoes`.
 
 | profile | what it varies | status at the default seed |
 | --- | --- | --- |
-| `fuzz_inner_walls` | freeform walls on a fixed 2×2 | **red 62/150** — refused fillets |
+| `fuzz_inner_walls` | freeform walls on a fixed 2×2 | **red 66/150** — refused fillets |
 | `fuzz_tidy_inner_walls` | tidy walls, up to 3 so they cross | green |
 | `fuzz_wall_openings` | `open_edges` + `divider_edges` on rectangles | green |
 | `fuzz_openings_and_inner_walls` | both of the above at once | **red 1/150** — `OPENING_LOSES_FILLET` |
 | `fuzz_bin_shapes` | polyominoes, flood-fill pieces | green |
 | `fuzz_split_pieces` | polyominoes, `SplitLine`s + `partition_cells` | **red 1/120** — `TRIM_SECTION_CURVE` |
 | `fuzz_stripped_polyominoes` | polyominoes with **half** the perimeter wall opened | **red 90/150** — refused fillets |
-| `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | **red 124/400** — 3 defects |
+| `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | **red 127/400** — 3 defects |
 
 Every one of those reds was already failing before; it was on a `known` list, or behind the
 `require_blends` opt-out, or both. Nothing here is a regression, and the counts are the backlog.
+
+Almost all of it is **one defect**: a blend chain terminating where no face reaches the point it
+lands on, diagnosed under `fillet.rs` below and needing a runout that ends inside a face. The
+edge-keyed `move_vertex` fix moved two of these counts *up* slightly (62→66, 124→127), which is the
+expected shape of a correctness fix here: a handful of cases used to scrape through on two faces
+disagreeing about an edge in a way that happened to weld anyway, and they now refuse honestly.
 
 **Wall openings were never fuzzed before.** `open_edges` flows to `layout::effective_walls` and an
 opening deletes the wall the floor fillet was blending against — the runout case. The profile drew
@@ -790,6 +796,33 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   exactly two faces means the solid was already non-manifold, and degrading there would swap a
   loud error for a silently broken part). `program::run` applies blends through it, which is what
   lets a compartment-splitting divider keep the fillet on the corners that *do* close.
+
+  **How far along an edge a blend reaches belongs to the edge, not to the face asking.** Both faces
+  sharing an edge rebuild it independently and the two results have to weld; where they disagree
+  the builder interns two edges and the solid opens along the seam, surfacing far away as
+  `edge N used fwd=1 bwd=0`. `move_vertex` decided it by distance to the *asking face's* surface,
+  which is a disagreement waiting to happen: a partial-height inner wall meeting the perimeter puts
+  **both** tangent points on the wall's side plane, so that face's test is a tie, while the
+  cavity-wall face across the same edge sees only `ta` on itself and picks it. It now measures
+  against the edge's own supporting curve (`dist_to_curve`, closed form for `Line` and `Circle`),
+  which both faces compute identically because the curve belongs to neither of them.
+
+  The assertion is the real deliverable, not the fix: `rebuild_loop` records every edge's terminal
+  point keyed by `(edge, vertex)` and fails naming the two faces that differ. The quantity has to be
+  the point where the edge *stops being wall and becomes blend*, because a face reaches it two ways
+  — one retreats its endpoint there, the other keeps the corner and splits the edge there — and
+  comparing raw endpoints calls that legitimate pair a defect. It fires nowhere across all eight
+  profiles now.
+
+  **A runout is absorbed by the only candidate face without checking it lands there, and that is the
+  largest single class of refused fillet.** A partial-height wall meeting the perimeter puts the
+  chain's corner exactly on the wall's top, so the tangent point up the perimeter stands above the
+  wall's side face entirely and the trim curve would run through open cavity. Gating on
+  `planar_face_contains` is **not** the repair — it also refuses
+  `partial_wall_one_end_on_boundary_is_watertight`, whose runout lands on its face's boundary rather
+  than strictly inside it, so the predicate must separate "outside the face" from "on its edge"
+  first. The real repair is a runout that terminates in a face's *interior*, cutting a new boundary
+  into it, which is the same capability `trim` lacks for an enclosed piece.
 - **`tess.rs`** — analytic faces → triangles. **Watertight by construction:** each edge is sampled
   once (cached by `EdgeId`), so the two faces sharing it emit identical boundary points.
   **Winding comes from the loop; only the normals are voted on.** `triangulate` answers in the

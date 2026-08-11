@@ -8,6 +8,16 @@ use std::collections::HashMap;
 /// reaches it. See `rust/CLAUDE.md`.
 pub const NON_FINITE_NORMAL: &str = "blend: face normal is not finite";
 
+/// How far apart two faces' answers for one edge's moved endpoint may be.
+///
+/// Zero would be the honest bound -- both faces run the same arithmetic on the
+/// same inputs -- but the two tangent points can be selected through different
+/// expressions along a chain, so this allows the last bits of an `f32` near the
+/// model's 100 mm scale and nothing more. It is well under `topo`'s weld
+/// quantum, which is the distance at which a disagreement starts interning two
+/// vertices, so anything this catches would have cracked the solid open.
+const END_AGREE: f32 = 1e-4;
+
 #[derive(Clone, Copy)]
 struct CurvEdge {
     curve: Curve,
@@ -370,6 +380,10 @@ fn fillet_edges_with(
     let mut loop_scratch: Vec<(EdgeId, bool)> = Vec::new();
     let mut items_scratch: Vec<Emitted> = Vec::new();
     let mut inner_ranges: Vec<usize> = Vec::new();
+    // Every unblended edge's new endpoints, keyed by the edge and the original
+    // vertex, so the second face to rebuild an edge is checked against the
+    // first. See the assertion in `rebuild_loop`.
+    let mut moved_ends: HashMap<(EdgeId, usize), Vec3> = HashMap::new();
 
     for (fi, &is_touched) in touched.iter().enumerate() {
         if !is_touched {
@@ -390,6 +404,7 @@ fn fillet_edges_with(
             &mut b,
             &mut items_scratch,
             &mut loop_scratch,
+            &mut moved_ends,
         )?;
         let outer_len = loop_scratch.len();
         for lp in solid.inner_loops(fi) {
@@ -406,6 +421,7 @@ fn fillet_edges_with(
                 &mut b,
                 &mut items_scratch,
                 &mut loop_scratch,
+                &mut moved_ends,
             )?;
             inner_ranges.push(loop_scratch.len() - before);
         }
@@ -670,11 +686,25 @@ fn plan_runout_end(
         }
         cands.push(fi);
     }
-    if cands.len() == 1 {
-        return Ok(RunoutEnd::Absorb { face: cands[0] });
-    }
     if cands.is_empty() {
         return Err(format!("blend runout: no terminating face at vertex {v}"));
+    }
+    // NOTE: being the only candidate is not the same as being able to take the
+    // curve, and this does not check. A partial-height inner wall meeting the
+    // bin's perimeter puts the corner exactly on the wall's top, so the tangent
+    // point up the perimeter stands above the wall's side face entirely and the
+    // trim curve runs through open cavity; absorbing it there splices a curve
+    // into a loop that does not reach it. That is the largest single class of
+    // refused fillet in the fuzzer.
+    //
+    // Gating this on `planar_face_contains` was tried and is **not** the fix:
+    // it also refuses `partial_wall_one_end_on_boundary_is_watertight`, whose
+    // runout lands on its face's boundary rather than strictly inside it, so
+    // the predicate has to distinguish "outside the face" from "on its edge"
+    // before it can be trusted here. The real repair is a runout that
+    // terminates in a face's interior, cutting a new boundary into it.
+    if cands.len() == 1 {
+        return Ok(RunoutEnd::Absorb { face: cands[0] });
     }
     // Several candidates in one plane are not an ambiguity about *where* the
     // blend ends. The bin's outer wall is cut into bands by the peg profile and
@@ -1028,8 +1058,8 @@ fn rebuild_loop(
     b: &mut Builder,
     items: &mut Vec<Emitted>,
     out: &mut Vec<(EdgeId, bool)>,
+    moved_ends: &mut HashMap<(EdgeId, usize), Vec3>,
 ) -> Result<(), String> {
-    let face_surface = solid.faces[fi].surface;
     let split_at = |v: usize, e: EdgeId| -> Option<Vec3> {
         let ro = runouts.get(&v)?;
         if ro.absorbing() != Some(fi) {
@@ -1048,7 +1078,7 @@ fn rebuild_loop(
     let point_at = |v: usize, e: EdgeId, fallback: Vec3| -> Vec3 {
         match runouts.get(&v) {
             Some(ro) if ro.keeps_corner(fi) => fallback,
-            _ => split_at(v, e).unwrap_or_else(|| move_vertex(vinfo, v, fallback, face_surface)),
+            _ => split_at(v, e).unwrap_or_else(|| move_vertex(vinfo, v, e, solid, fallback)),
         }
     };
 
@@ -1081,9 +1111,33 @@ fn rebuild_loop(
             let (start, end) = if fwd { (new0, new1) } else { (new1, new0) };
             // The cap pairs with the stub between the tangent point and the
             // corner, so the edge running into the corner is cut in two there.
-            let cut = [ed.v0, ed.v1]
-                .into_iter()
-                .find_map(|v| runouts.get(&v).and_then(|ro| ro.cap_split(fi, &ef[e])));
+            let cut_at = |v: usize| runouts.get(&v).and_then(|ro| ro.cap_split(fi, &ef[e]));
+            let cut = [ed.v0, ed.v1].into_iter().find_map(cut_at);
+            // **How far along an edge the blend reaches belongs to the edge,
+            // not to the face asking.** Both faces rebuild it independently and
+            // the two results have to weld; where they disagree the builder
+            // interns two edges and the solid opens along the seam, which it
+            // reports far from here as `edge N used fwd=1 bwd=0`.
+            //
+            // The quantity they must agree on is the point where this edge
+            // stops being ordinary wall and becomes blend, and a face reaches
+            // it two ways: one *retreats* its endpoint there, the other keeps
+            // the corner and *splits* the edge there. Comparing raw endpoints
+            // would call that legitimate pair a defect, so the terminal point
+            // is the split if there is one and the moved endpoint otherwise.
+            for (v, moved) in [(ed.v0, new0), (ed.v1, new1)] {
+                let term = cut_at(v).unwrap_or(moved);
+                match moved_ends.get(&(e, v)) {
+                    Some(&had) => assert!(
+                        (had - term).length() <= END_AGREE,
+                        "blend: face {fi} ends edge {e} at vertex {v} at {term:?}, but the face \
+                         across it ended the same edge at {had:?}"
+                    ),
+                    None => {
+                        moved_ends.insert((e, v), term);
+                    }
+                }
+            }
             if let Some(p) = cut {
                 if !matches!(ed.curve, Curve::Line { .. }) {
                     return Err(format!(
@@ -1164,37 +1218,81 @@ fn rebuild_loop(
     Ok(())
 }
 
+/// Where the edge `e` running into blended vertex `v` puts that endpoint.
+///
+/// **This is a property of the edge, never of the face asking.** Both faces
+/// sharing an edge rebuild it independently, and if they disagree about where
+/// its endpoint moved, the builder interns two edges and the solid opens along
+/// the seam -- `edge N used fwd=1 bwd=0`, from a blend that is otherwise
+/// perfectly well formed.
+///
+/// Choosing by distance to the *asking face's* surface is exactly such a
+/// disagreement, and it was the bug here. A partial-height inner wall meeting
+/// the bin's perimeter wall puts both tangent points on the wall's side plane,
+/// so that face's test is a tie; the cavity-wall face across the same edge sees
+/// only `ta` on itself and picks it, and the two answers differ. The two
+/// tangent points are the corner retreating along the two edges that meet
+/// there, so what settles it is which of them lies on *this* edge's own
+/// supporting curve -- a quantity both faces compute identically because
+/// neither the curve nor the corner belongs to either of them.
 fn move_vertex(
     vinfo: &HashMap<usize, (Vec3, Vec3)>,
     v: usize,
+    e: EdgeId,
+    solid: &Solid,
     fallback: Vec3,
-    surface: Surface,
 ) -> Vec3 {
-    if let Some((pa, pb)) = vinfo.get(&v) {
-        if dist_to_surface(*pa, surface) < dist_to_surface(*pb, surface) {
-            *pa
-        } else {
-            *pb
+    let Some(&(pa, pb)) = vinfo.get(&v) else {
+        return fallback;
+    };
+    let ed = solid.edges[e];
+    let (da, db) = (
+        dist_to_curve(pa, &ed, solid),
+        dist_to_curve(pb, &ed, solid),
+    );
+    assert!(
+        da.is_finite() && db.is_finite(),
+        "blend: tangent points {pa:?}/{pb:?} are {da}/{db} from edge {e}'s curve"
+    );
+    if da <= db { pa } else { pb }
+}
+
+/// Distance from `p` to the curve supporting edge `ed`, **extended** past its
+/// own parameter range: a retreating corner lands beyond the edge's stored ends
+/// as often as inside them, so a range-clamped distance would rank the two
+/// tangent points by how far past the end they fall rather than by which line
+/// they are on.
+///
+/// Closed form for the two curve kinds a corner actually retreats along. A
+/// blend chain may not terminate on an ellipse or a torus section (see
+/// `plan_runout_end`), so the remaining kinds fall back to the chord, which is
+/// still a function of the edge alone -- which is the property that matters.
+fn dist_to_curve(p: Vec3, ed: &crate::kernel::topo::Edge, solid: &Solid) -> f32 {
+    match ed.curve {
+        Curve::Line { p0, dir } => {
+            let rel = p - p0;
+            (rel - dir * rel.dot(dir)).length()
         }
-    } else {
-        fallback
+        Curve::Circle {
+            center,
+            axis,
+            radius,
+            ..
+        } => {
+            let rel = p - center;
+            let along = rel.dot(axis);
+            let radial = (rel - axis * along).length();
+            ((radial - radius).powi(2) + along * along).sqrt()
+        }
+        _ => {
+            let (a, b) = (solid.verts[ed.v0].point, solid.verts[ed.v1].point);
+            let d = (b - a).normalize_or_zero();
+            let rel = p - a;
+            (rel - d * rel.dot(d)).length()
+        }
     }
 }
 
-fn dist_to_surface(p: Vec3, s: Surface) -> f32 {
-    match s {
-        Surface::Plane { origin, normal, .. } => (p - origin).dot(normal).abs(),
-        Surface::Cylinder {
-            base, axis, radius, ..
-        } => {
-            let rel = p - base;
-            (rel - axis * rel.dot(axis)).length() - radius
-        }
-        Surface::Sphere { center, radius, .. } => (p - center).length() - radius,
-        _ => (s.point(s.project(p)) - p).length(),
-    }
-    .abs()
-}
 
 fn emit_curv(b: &mut Builder, start: Vec3, end: Vec3, ce: CurvEdge) -> (EdgeId, bool) {
     let vs = b.vertex(start);

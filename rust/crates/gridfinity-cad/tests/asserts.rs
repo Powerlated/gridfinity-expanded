@@ -39,7 +39,7 @@ const BUDGET: &[(&str, usize)] = &[
     ("kernel/audit.rs", 5),
     ("kernel/build.rs", 1),
     ("kernel/chamfer.rs", 2),
-    ("kernel/fillet.rs", 5),
+    ("kernel/fillet.rs", 4),
     ("kernel/isect.rs", 4),
     ("kernel/orient.rs", 2),
     ("kernel/planar.rs", 4),
