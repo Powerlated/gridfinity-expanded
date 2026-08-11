@@ -151,32 +151,44 @@ convex corner, all in the same bin. `Openings::Share(1, 4)` is what the three as
 profiles use; `Share(1, 2)` is `fuzz_stripped_polyominoes`.
 
 `Options` names what a case *generates* (`Shape`, `Walls`, `openings`, `dividers`, `vary_params`,
-`slope`, `baseplate`, `Split`) and what it *insists on* (`require_blends`, `known`). Two of those
-knobs exist because a checker cannot tell an over-ask from a defect on its own:
+`slope`, `baseplate`, `Split`). It no longer names anything a profile *forgives*.
 
-- **`Walls::Tidy` vs `Walls::Freeform` decides whether a refused blend is a defect.** Tidy is what
+- **A fillet that does not land is a failure, on every profile.** `fillet_best_effort` would rather
+  leave a corner sharp than fail the build, so the model's own policy is to degrade silently and
+  hand the user an unrounded part with no error. The fuzzer takes the opposite line, the one a
+  commercial modeller takes: `!BlendReport::is_clean()` is `FILLET_FAILED`, full stop. This used to
+  be a per-profile `require_blends` opt-in, and the profiles that opted out were exactly the ones
+  where the model degrades most, so the degradation was invisible by construction. What turning it
+  on everywhere surfaced is in "what a refused fillet costs" below.
+- **`Walls::Tidy` vs `Walls::Freeform` decides how hard the fillet is asked to work.** Tidy is what
   the editor and the Projects packer emit — axis aligned, on a cell boundary or centre, spanning
-  the bin, 0.8–3.0 mm. The model rounds every one of those cleanly, so a tidy profile can *require*
-  the blends. A freeform wall sits at any angle and any offset and routinely leaves a sliver
-  narrower than the floor fillet; there `fillet_best_effort` degrades **by design** and requiring
-  blends would assert the impossible. Measured: a plain 2×2 is 150/150 blend-clean, and so is every
-  canonical wall (centre divider at 1.2/3.0/8.0 mm, free-standing island, partial height); freeform
-  walls drop 18–28 of 26–42 requested blends, independent of wall width.
-- **`known` names a pre-existing, undiagnosed defect** so a profile stays a gate for everything
-  else instead of being demoted to reporting wholesale. A known finding is still counted and still
-  printed, tagged `KNOWN`; only `unexpected` fails the assert. Never add a signature to silence
-  something new.
+  the bin, 0.8–3.0 mm — and the model rounds every one of those cleanly. A freeform wall sits at any
+  angle and any offset and routinely leaves a sliver narrower than the floor fillet. Measured: a
+  plain 2×2 is 150/150 blend-clean, and so is every canonical wall (centre divider at 1.2/3.0/8.0
+  mm, free-standing island, partial height); freeform walls drop 18–28 of 26–42 requested blends,
+  independent of wall width.
+- **There is no expected failure, and there must never be one again.** A profile used to carry a
+  `known` list of message substrings — pre-existing undiagnosed defects that were counted, printed
+  tagged `KNOWN`, and excluded from the assert, so the profile "stayed a gate for everything else".
+  That mechanism is **gone**: `Report` holds `failures`, and `gate()` asserts it is zero. A
+  forgiveness list is how a defect sits in a suite indefinitely behind a green tick, and every
+  entry outlives the diagnosis that justified it. Do not reintroduce it, in this fuzzer or in any
+  other test — a red profile naming a real bug is the correct state, and the fix is the model, not
+  the list.
 
-| profile | what it varies | gate |
+| profile | what it varies | status at the default seed |
 | --- | --- | --- |
-| `fuzz_inner_walls` | freeform walls on a fixed 2×2 | asserts |
-| `fuzz_tidy_inner_walls` | tidy walls, up to 3 so they cross, `require_blends` | asserts |
-| `fuzz_wall_openings` | `open_edges` + `divider_edges` on rectangles, `require_blends` | asserts |
-| `fuzz_openings_and_inner_walls` | both of the above at once, `require_blends` | asserts |
-| `fuzz_bin_shapes` | polyominoes, flood-fill pieces | asserts |
-| `fuzz_split_pieces` | polyominoes, `SplitLine`s + `partition_cells` | asserts |
-| `fuzz_stripped_polyominoes` | polyominoes with **half** the perimeter wall opened | asserts |
-| `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | asserts |
+| `fuzz_inner_walls` | freeform walls on a fixed 2×2 | **red 62/150** — refused fillets |
+| `fuzz_tidy_inner_walls` | tidy walls, up to 3 so they cross | green |
+| `fuzz_wall_openings` | `open_edges` + `divider_edges` on rectangles | green |
+| `fuzz_openings_and_inner_walls` | both of the above at once | **red 1/150** — `OPENING_LOSES_FILLET` |
+| `fuzz_bin_shapes` | polyominoes, flood-fill pieces | green |
+| `fuzz_split_pieces` | polyominoes, `SplitLine`s + `partition_cells` | **red 1/120** — `TRIM_SECTION_CURVE` |
+| `fuzz_stripped_polyominoes` | polyominoes with **half** the perimeter wall opened | **red 90/150** — refused fillets |
+| `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | **red 124/400** — 3 defects |
+
+Every one of those reds was already failing before; it was on a `known` list, or behind the
+`require_blends` opt-out, or both. Nothing here is a regression, and the counts are the backlog.
 
 **Wall openings were never fuzzed before.** `open_edges` flows to `layout::effective_walls` and an
 opening deletes the wall the floor fillet was blending against — the runout case. The profile drew
@@ -213,18 +225,37 @@ shared a ring; **an enclosed hole is where they do**, and there the base and the
 The sector loop now asserts what it relies on instead: the signed areas sum to the material's own
 area, so every hole is wound against its outer loop.
 
-**An opening used to delete its compartment's floor fillet outright, and `require_blends` could not
-see it.** That gate holds the model to the blends it *asked for*, and the loss happened one step
-earlier: `plan_piece` zeroed `loop_fr` for any cavity loop `resolve_open_runs` touched, so the
+**An opening used to delete its compartment's floor fillet outright, and the blend report could not
+see it.** `FILLET_FAILED` holds the model to the blends it *asked for*, and the loss happens one
+step earlier: `plan_piece` zeroed `loop_fr` for any cavity loop `resolve_open_runs` touched, so the
 report read 0 requested / 0 refused and audited perfectly clean. `opening_keeps_the_fillet` in
 `tests/fuzz.rs` closes that hole by building the same bin twice — once as generated and once with
-`open_edges` cleared — and failing when the opened build makes no blend though the closed one did
-and walls are still standing. `BlendReport::made()` is what it counts: `is_clean` cannot tell a bin
-that wanted no blend from one that got none. It found **80/150** of `fuzz_wall_openings`.
+`open_edges` cleared — and comparing them. It found **80/150** of `fuzz_wall_openings`.
 
-That is fixed. `fuzz_wall_openings` is now a hard gate with no `known` at six seeds, and the
-`OPENING_LOSES_FILLET` signature survives only on `fuzz_openings_and_inner_walls` at 2–8/150, where
-what zeroes the fillet is an inner wall's `island_clears` check rather than the opening.
+**What it compares is the solid, not the report, and it compares per compartment.**
+`floor_fillet_coverage` returns `(cavity floors, floors that meet every wall sharp)` by reading
+tangency straight off the B-rep: a rolling-ball blend meets the floor along their shared edge with
+the floor's own normal — that is what the blend *is* — while an unblended wall meets it at a right
+angle, so an edge of a floor face is rounded exactly when the face on its far side has `|n·Z| = 1`
+there. A cavity floor is a `Plane` with a vertical normal at `BASE_TOTAL_HEIGHT + FLOOR_THICKNESS`,
+and there is nothing else in the model at that height.
+
+Three things follow, and each was a hole in the previous count-based check. `EdgeId`s and request
+counts do not survive a change to the input, so nothing but geometry could have compared two builds
+of two *different* bins at all. A compartment the closed bin rounds and the opened bin leaves sharp
+now fails even when every other compartment kept its blends — the old check only fired when the bin
+lost **every** blend. And because the comparison is against the closed build, degradation that is
+present in both cancels, so the check is safe to run on shapes where the fillet legitimately
+struggles rather than only on rectangles; it runs on every profile now, not just the opening ones.
+`a_cavity_floor_is_rounded_exactly_when_the_model_filleted_it` pins the predicate against a 2×2 with
+and without a divider and with `floor_fillet` on and off — both of its failure modes (finding no
+floor, and calling every floor rounded) are otherwise silent passes.
+
+That is fixed. **`fuzz_wall_openings` is clean at six seeds** (default, 1, 7, 13, 42, 99) and at
+`FUZZ_CASES=600`, under the per-compartment check and with a refused fillet failing — which is the
+gate for *adding a wall opening does not break filleting*. `OPENING_LOSES_FILLET` survives only on
+`fuzz_openings_and_inner_walls`, at 0–2/150 across those seeds, where what zeroes the fillet is an
+inner wall's `island_clears` check rather than the opening, and on `fuzz_params_broad` at 6/400.
 
 Three things had to change, and only the first is the model:
 
@@ -291,15 +322,13 @@ existing caller changed. Without it a regression that stops rounding corners nea
 inner wall passes every gate — the solid is still manifold, still audits clean, still tessellates
 without leaks. Both counters are outcomes the model chooses on purpose (`find_seg_edge` returning
 `None` leaves a selection unblended; `fillet_best_effort` would rather leave a corner sharp than
-fail the build), which is exactly why only `require_blends` profiles treat them as failures.
+fail the build). The fuzzer does not accept either as an outcome: both are `FILLET_FAILED`.
 
-**Status at the default seed: all seven pass.** `fuzz_wall_openings` and
-`fuzz_openings_and_inner_walls` are clean at six seeds (default, 1, 7, 13, 42, 99) — that pair is
-the gate for *adding a wall opening or an internal wall never breaks filleting*. `fuzz_bin_shapes`
-and `fuzz_split_pieces` are clean of *unexpected* findings at all six, meeting only
-`TRIM_SECTION_CURVE` at 1-3/120. `fuzz_inner_walls` is green at the default seed and at 7, 13 and
-42; seeds 1 and 99 leave 2/150 and 1/150, neither of them the winding leak (an audit failure, a
-56-edge leak between two cavity-corner faces, and one edge used four times). `fuzz_params_broad` is at 9/400 / 6 defects.
+**Status at the default seed: three of eight profiles pass** — `fuzz_tidy_inner_walls`,
+`fuzz_wall_openings` and `fuzz_bin_shapes`. The table above has the counts for the other five, and
+every one of them is a fillet the model refused or a defect that used to sit on a `known` list.
+`fuzz_wall_openings` is additionally clean at six seeds (default, 1, 7, 13, 42, 99) and at
+`FUZZ_CASES=600`.
 
 ### The long campaign, and what it fixed
 
@@ -418,9 +447,9 @@ Three things it does not get for free, and all three were manifold errors first:
 
 **`fuzz_stripped_polyominoes` found four undiagnosed classes on its first run and now gates at
 0/150.** Half a complex polyomino's perimeter is the first thing to reach openings meeting a
-reentrant corner in quantity. It started at 66/150. It does not `require_blends` -- a reentrant
-corner is where the floor fillet legitimately degrades -- so what it holds is that the bin builds,
-stays manifold, audits clean and tessellates without leaks. All four classes were verified
+reentrant corner in quantity. It started at 66/150. What it holds is that the bin builds,
+stays manifold, audits clean and tessellates without leaks, all of which it now does; its current
+90/150 is entirely refused fillets at reentrant corners, which used to be exempted here. All four classes were verified
 **pre-existing** against `749a3a5`, the tree before this session's kernel work: they are
 configurations nothing had fuzzed before, not regressions. What each one turned out to be:
 

@@ -9,12 +9,12 @@
 use gridfinity_cad::gridfinity::{
     self, BinSlope, GRID_PITCH, InnerWall, LogicalBin, Mode, Params, SlopeDir, rect_cells,
 };
+use gridfinity_cad::kernel::geom::Surface;
 use gridfinity_cad::kernel::mesh::Mesh;
-use gridfinity_cad::kernel::program::BlendReport;
 use gridfinity_cad::kernel::tess::tessellate;
 use gridfinity_cad::layout::{
-    Axis, GridCell, GridEdge, SplitLine, effective_walls, internal_edges, partition_cells,
-    perimeter_edges,
+    Axis, GridCell, GridEdge, Orientation, SplitLine, effective_walls, internal_edges,
+    partition_cells, perimeter_edges,
 };
 use gridfinity_cad::{Solid, audit, tessellation_leaks};
 use rayon::prelude::*;
@@ -76,14 +76,16 @@ enum Shape {
 
 /// What kind of free-form inner walls a case gets.
 ///
-/// The split matters because it decides whether a refused blend is a defect.
 /// `Tidy` is the shape the editor and the Projects packer emit -- axis
 /// aligned, spanning the bin, a printable thickness -- and the model rounds
-/// every one of those cleanly, so a profile generating them can *require* the
-/// blends to land. `Freeform` puts a wall at any angle and any offset, which
-/// routinely leaves a sliver too thin to carry the floor fillet; there
-/// `fillet_best_effort` degrades by design and requiring blends would be
-/// asserting the impossible.
+/// every one of those cleanly. `Freeform` puts a wall at any angle and any
+/// offset, which routinely leaves a sliver too thin to carry the floor fillet.
+///
+/// That difference used to decide whether a refused blend counted as a defect,
+/// through a `require_blends` opt-in. It no longer does: a fillet that does not
+/// land is an error on every profile (`FILLET_FAILED`), so what the split now
+/// decides is only how *often* the model is asked for something it currently
+/// cannot do.
 #[derive(Clone, Copy, PartialEq)]
 enum Walls {
     None,
@@ -144,18 +146,6 @@ struct Options {
     /// Sometimes build a baseplate instead of a bin.
     baseplate: bool,
     split: Split,
-    /// Insist every blend the model asked for was actually made. A dropped
-    /// blend is legal geometry -- `fillet_best_effort` would rather leave a
-    /// corner sharp than fail the build -- so this only means something on a
-    /// profile whose features all have room for the model's radii. See
-    /// `Walls`.
-    require_blends: bool,
-    /// Substrings naming defects that are pre-existing, undiagnosed and
-    /// recorded in `rust/CLAUDE.md`. A case failing only these is still
-    /// counted and still printed, but does not fail the gate -- so the profile
-    /// keeps catching everything else instead of being demoted to reporting
-    /// wholesale. Never add a signature here to silence something new.
-    known: &'static [&'static str],
 }
 
 impl Default for Options {
@@ -169,8 +159,6 @@ impl Default for Options {
             slope: false,
             baseplate: false,
             split: Split::Whole,
-            require_blends: false,
-            known: &[],
         }
     }
 }
@@ -649,21 +637,77 @@ fn pieces_of(c: &Case) -> Vec<Vec<GridCell>> {
     }
 }
 
-/// An opening must not cost the compartment the floor fillet it would have had
+/// The height of every bin's cavity floor. `plan_piece` takes it from these two
+/// constants unconditionally, so a face at that z is a floor and nothing else
+/// in the model is.
+const FLOOR_Z: f32 = gridfinity::BASE_TOTAL_HEIGHT + gridfinity::FLOOR_THICKNESS;
+
+/// How far a normal may sit off `+-Z` and still count as parallel to it. The
+/// two normals are equal in exact arithmetic -- tangency is what a rolling-ball
+/// blend *is* -- so this bounds accumulated f32 error in the blend solve and
+/// the surface evaluation, nothing about the model.
+const NORMAL_TOL: f32 = 1e-3;
+
+/// `(cavity floors, of those, floors that meet every one of their walls sharp)`.
+///
+/// The floor fillet is the one thing about a bin whose loss is invisible to
+/// every other invariant here: with every corner left sharp the solid is still
+/// manifold, still audits clean and still tessellates without leaks. It is
+/// visible in the finished B-rep as **tangency**. A rolling-ball blend meets
+/// the floor along their shared edge with the floor's own normal -- that is the
+/// definition of the blend, not a property of how it was requested -- while an
+/// unblended wall meets the floor at a right angle. So an edge of a floor face
+/// is rounded exactly when the face on its far side has `|n . Z| = 1` there.
+///
+/// Reading the solid rather than the `BlendReport` is what makes two builds of
+/// two *different* bins comparable at all: `EdgeId`s do not survive a change to
+/// the input, and the counts in the report do not say which compartment lost
+/// what.
+fn floor_fillet_coverage(solid: &Solid) -> (usize, usize) {
+    let ef = solid.edge_faces();
+    let (mut floors, mut sharp) = (0, 0);
+    for fid in 0..solid.faces.len() {
+        let Surface::Plane { origin, normal, .. } = solid.faces[fid].surface else {
+            continue;
+        };
+        if normal.z.abs() < 1.0 - NORMAL_TOL || (origin.z - FLOOR_Z).abs() > 1e-3 {
+            continue;
+        }
+        floors += 1;
+        let rounded = solid.face_loops(fid).flatten().any(|&(e, _)| {
+            let edge = &solid.edges[e];
+            let p = edge.curve.point(0.5 * (edge.t0 + edge.t1));
+            ef[e].iter().filter(|&&g| g != fid).any(|&g| {
+                let s = &solid.faces[g].surface;
+                s.normal(s.project(p)).z.abs() >= 1.0 - NORMAL_TOL
+            })
+        });
+        if !rounded {
+            sharp += 1;
+        }
+    }
+    (floors, sharp)
+}
+
+/// An opening must not cost a compartment the floor fillet it would have had
 /// without it.
 ///
-/// `require_blends` alone cannot see this. It holds the model to the blends it
-/// *asked for*, and the loss happens one step earlier: the pinch that pulls an
-/// open run back to the outer boundary leaves the cavity loop with sharp
-/// corners, `plan_piece` zeroes that loop's fillet radius outright, and a
-/// report of 0 requested / 0 refused is perfectly clean. So the same bin is
-/// built again with `open_edges` cleared, and the opened build has to keep a
-/// blend if the closed one had any.
+/// `FILLET_FAILED` alone cannot see this. It holds the model to the blends it
+/// *asked for*, and the loss happens one step earlier: whatever leaves the
+/// cavity loop with sharp corners also stops `plan_piece` asking, and a report
+/// of 0 requested / 0 refused is perfectly clean. So the same bin is built
+/// again with `open_edges` cleared and the two are compared by
+/// `floor_fillet_coverage`, **per floor face**: a compartment the closed bin
+/// rounds and the opened bin leaves sharp is the defect, however many other
+/// compartments kept their blends. Comparing against the closed build is also
+/// what lets the check run on shapes where the fillet legitimately degrades --
+/// a reentrant corner the model declines to round is declined in both builds
+/// and cancels.
 ///
 /// A bin with no wall left standing is exempt: there is nothing for a floor
 /// fillet to roll against.
-fn opening_keeps_the_fillet(c: &Case, opened: &BlendReport) -> Result<(), String> {
-    if c.params.open_edges.is_empty() || opened.made() > 0 {
+fn opening_keeps_the_fillet(c: &Case, opened: &Solid) -> Result<(), String> {
+    if c.params.open_edges.is_empty() {
         return Ok(());
     }
     let walls = effective_walls(
@@ -677,16 +721,17 @@ fn opening_keeps_the_fillet(c: &Case, opened: &BlendReport) -> Result<(), String
     }
     let mut closed = c.params.clone();
     closed.open_edges.clear();
-    let Ok((_, before)) = gridfinity::try_build_reporting(&closed) else {
+    let Ok(before) = gridfinity::try_build(&closed) else {
         return Ok(());
     };
-    if before.made() == 0 {
+    let (was_floors, was_sharp) = floor_fillet_coverage(&before);
+    let (now_floors, now_sharp) = floor_fillet_coverage(opened);
+    if now_sharp <= was_sharp {
         return Ok(());
     }
     Err(format!(
-        "{OPENING_LOSES_FILLET}: {} opening(s) took the bin from {} blend(s) to none, though {} wall(s) still stand",
+        "{OPENING_LOSES_FILLET}: {} opening(s) took the bin from {was_sharp} of {was_floors} cavity floor(s) unrounded to {now_sharp} of {now_floors}, though {} wall(s) still stand",
         c.params.open_edges.len(),
-        before.made(),
         walls.walled.len()
     ))
 }
@@ -726,18 +771,22 @@ fn check(c: &Case) -> Result<(), String> {
         // so a pre-existing model defect never reads as a split defect.
         sound(&whole, if pieces.is_empty() { "" } else { "whole " })?;
 
-        if c.opts.require_blends && !blends.is_clean() {
+        // A fillet that does not land is a failure, not a degradation. The
+        // model's own policy is the opposite -- `fillet_best_effort` would
+        // rather leave a corner sharp than fail the build, so the user gets an
+        // unrounded part and no error -- and that policy is exactly what a
+        // fuzzer must not adopt: every profile here holds the model to every
+        // blend it asked for.
+        if !blends.is_clean() {
             return Err(format!(
-                "fillet: of {} blend(s) the model asked for, {} matched no edge and {} were refused",
+                "{FILLET_FAILED}: of {} blend(s) the model asked for, {} matched no edge and {} were refused",
                 blends.requested,
                 blends.unresolved,
                 blends.dropped.len()
             ));
         }
 
-        if c.opts.require_blends {
-            opening_keeps_the_fillet(c, &blends)?;
-        }
+        opening_keeps_the_fillet(c, &whole)?;
 
         if pieces.is_empty() {
             return Ok(());
@@ -1100,30 +1149,25 @@ struct Finding {
     detail: String,
 }
 
-/// A sweep's outcome. `text` is the whole report, known defects included;
-/// `unexpected` counts only the cases that failed for a reason the profile did
-/// not already know about, and is what a gate asserts on.
+/// A sweep's outcome: the whole report, and how many cases produced it.
+///
+/// There is no notion of an expected, known or tolerated failure here, and
+/// there must not be one. A mechanism for forgiving a named signature is a
+/// mechanism for a defect to sit in the suite indefinitely while the profile
+/// around it reads green, and every use of it eventually outlives the diagnosis
+/// that justified it. A profile either passes or it is telling you about a bug.
 struct Report {
     text: String,
-    unexpected: usize,
+    failures: usize,
 }
 
 impl Report {
-    /// Print the findings, then fail if any of them was new.
+    /// Print the findings, then fail if there were any.
     fn gate(&self) {
         if !self.text.is_empty() {
             println!("{}", self.text);
         }
-        assert!(self.unexpected == 0, "{}", self.text);
-    }
-
-    /// Print the findings and let them all pass.
-    fn note(&self) {
-        if self.text.is_empty() {
-            println!("all clean");
-        } else {
-            println!("{}", self.text);
-        }
+        assert!(self.failures == 0, "{}", self.text);
     }
 }
 
@@ -1156,7 +1200,7 @@ fn sweep(opts: Options, cases: u32, seed: u64) -> Report {
     if found.is_empty() {
         return Report {
             text: String::new(),
-            unexpected: 0,
+            failures: 0,
         };
     }
 
@@ -1167,30 +1211,22 @@ fn sweep(opts: Options, cases: u32, seed: u64) -> Report {
         .collect();
     drop(quiet);
 
-    let is_known = |f: &Finding| opts.known.iter().any(|k| f.detail.contains(k));
-    let unexpected: usize = entries
-        .iter()
-        .filter(|(_, f)| !is_known(f))
-        .map(|(_, f)| f.count)
-        .sum();
-
     let mut out = format!(
-        "{failures}/{cases} cases failed ({unexpected} unexpected), {} distinct defect(s) (seed {seed}):\n",
+        "{failures}/{cases} cases failed, {} distinct defect(s) (seed {seed}):\n",
         found.len()
     );
     for (i, ((_, f), small)) in entries.iter().zip(smallest.iter()).enumerate() {
         out.push_str(&format!(
-            "\n[{}] x{}{}  {}\n     {}\n",
+            "\n[{}] x{}  {}\n     {}\n",
             i + 1,
             f.count,
-            if is_known(f) { " KNOWN" } else { "" },
             f.detail.lines().next().unwrap_or(""),
             repro(small)
         ));
     }
     Report {
         text: out,
-        unexpected,
+        failures,
     }
 }
 
@@ -1208,30 +1244,62 @@ fn run(opts: Options, default_cases: u32) -> Report {
 }
 
 // ---------------------------------------------------------------------------
+// The floor-fillet predicate itself
+// ---------------------------------------------------------------------------
+
+/// `floor_fillet_coverage` has to be pinned against a bin whose answer is known
+/// by construction, because both of its failure modes are silent: a predicate
+/// that finds no floor at all, and one that calls every floor rounded, each
+/// make `opening_keeps_the_fillet` pass unconditionally.
+///
+/// A divider is per *cell* edge, so it takes both internal H edges of a 2x2 to
+/// cut the cavity in two -- one of them alone leaves the floor a connected U
+/// around the far column, which is a single face and correctly counted as one.
+/// `floor_fillet: 0.0` is the model declining to round any of them.
+#[test]
+fn a_cavity_floor_is_rounded_exactly_when_the_model_filleted_it() {
+    let bin = |dividers: Vec<GridEdge>, fr: f32| {
+        let mut p = Params {
+            divider_edges: dividers,
+            ..Params::rect(2, 2)
+        };
+        p.floor_fillet = fr;
+        floor_fillet_coverage(&gridfinity::try_build(&p).expect("2x2 bin builds"))
+    };
+    let d = Params::default();
+    assert!(d.floor_fillet > 0.0, "the default bin must want a fillet");
+
+    assert_eq!(bin(Vec::new(), d.floor_fillet), (1, 0), "one round floor");
+    assert_eq!(bin(Vec::new(), 0.0), (1, 1), "one sharp floor");
+
+    let split: Vec<GridEdge> = (0..2)
+        .map(|x| GridEdge {
+            x,
+            y: 1,
+            orientation: Orientation::H,
+        })
+        .collect();
+    assert_eq!(bin(split.clone(), d.floor_fillet), (2, 0), "both rounded");
+    assert_eq!(bin(split, 0.0), (2, 2), "both sharp");
+}
+
+// ---------------------------------------------------------------------------
 // Profiles
 // ---------------------------------------------------------------------------
 
-/// The one section curve `trim` still cannot express. Recorded in
-/// `rust/CLAUDE.md` as undiagnosed; both split profiles meet it at ~1-2% of
-/// cases at every seed, so it is named rather than left to redden the gate.
-const TRIM_SECTION_CURVE: &str = "no closed-form section curve for a face the cut crosses";
-
-/// Two inner walls crossing at a cell centre can hand the triangulator a face
-/// whose loops do not tile. Found by `fuzz_tidy_inner_walls`, undiagnosed, and
-/// recorded in `rust/CLAUDE.md`. It is named only where a profile is aimed at
-/// something else; `fuzz_tidy_inner_walls` itself keeps reporting it.
-const CROSSING_WALL_TILING: &str = "is not a tiling";
-
-/// An opening still costs its compartment the whole floor fillet. Down from
-/// 80/150 to 6/150 now that `fillet.rs` can cap a runout, and what is left is
-/// an inner wall's island clearance rather than the opening -- see
-/// `rust/CLAUDE.md`.
+/// An opening still costs a compartment its whole floor fillet.
 const OPENING_LOSES_FILLET: &str = "opening cost the floor fillet";
 
-/// Free-form inner walls on a fixed 2x2 -- the manifoldness gate. Blends are
-/// *not* required here: a wall at an arbitrary angle routinely leaves a sliver
-/// narrower than the floor fillet, and the model declining that blend is the
-/// documented policy rather than a defect.
+/// A blend the model asked for did not land. Every profile fails on this now:
+/// a fillet that does not build is an error, the way it is in a commercial
+/// modeller, not a corner quietly left sharp.
+const FILLET_FAILED: &str = "fillet failed";
+
+/// Free-form inner walls on a fixed 2x2 -- the manifoldness gate, and now the
+/// sharpest measure of what `fillet_best_effort` cannot do. A wall at an
+/// arbitrary angle routinely leaves a sliver narrower than the floor fillet and
+/// the blend is refused; that used to be exempted here as documented policy and
+/// is a `FILLET_FAILED` failure now.
 #[test]
 fn fuzz_inner_walls() {
     run(
@@ -1247,15 +1315,13 @@ fn fuzz_inner_walls() {
 /// Inner walls the product actually makes, up to three of them so they cross
 /// one another. **Reports rather than gates**: two crossing walls at certain
 /// positions hand the triangulator a face whose loops do not tile, which is a
-/// live undiagnosed defect (see `rust/CLAUDE.md`). The blend requirement over
-/// tidy walls is gated by `fuzz_openings_and_inner_walls`.
+/// live undiagnosed defect (see `rust/CLAUDE.md`).
 #[test]
 fn fuzz_tidy_inner_walls() {
     run(
         Options {
             shape: Shape::Rect,
             inner_walls: Walls::Tidy(1, 3),
-            require_blends: true,
             ..Options::default()
         },
         150,
@@ -1263,10 +1329,15 @@ fn fuzz_tidy_inner_walls() {
     .gate();
 }
 
-/// Wall openings and grid dividers, with every blend required to land -- an
-/// opening removes a wall the floor fillet was blending against, which is
-/// exactly where a runout has to hold up. `Shape::Rect` keeps the outline free
-/// of reentrant corners; `fuzz_params_broad` covers the ones that are not.
+/// Wall openings and grid dividers -- an opening removes a wall the floor
+/// fillet was blending against, which is exactly where a runout has to hold up.
+/// `Shape::Rect` keeps the outline free of reentrant corners;
+/// `fuzz_stripped_polyominoes` and `fuzz_params_broad` cover the ones that are
+/// not. Together with `fuzz_openings_and_inner_walls` this is the pair that
+/// gates "adding a wall opening does not break filleting", and it holds three
+/// separate things: every blend the opened bin asks for lands
+/// (`FILLET_FAILED`), no compartment it rounded when closed comes back sharp
+/// (`OPENING_LOSES_FILLET`), and the solid is still sound.
 #[test]
 fn fuzz_wall_openings() {
     run(
@@ -1274,7 +1345,6 @@ fn fuzz_wall_openings() {
             shape: Shape::Rect,
             openings: Openings::Share(1, 4),
             dividers: true,
-            require_blends: true,
             ..Options::default()
         },
         150,
@@ -1283,8 +1353,8 @@ fn fuzz_wall_openings() {
 }
 
 /// Openings, dividers and inner walls together: the combination the fillet has
-/// the least room to work in, still required to blend. This is the gate for
-/// "adding a wall opening or an internal wall never breaks filleting".
+/// the least room to work in. This is the gate for "adding a wall opening or an
+/// internal wall never breaks filleting".
 #[test]
 fn fuzz_openings_and_inner_walls() {
     run(
@@ -1293,8 +1363,6 @@ fn fuzz_openings_and_inner_walls() {
             inner_walls: Walls::Tidy(1, 2),
             openings: Openings::Share(1, 4),
             dividers: true,
-            require_blends: true,
-            known: &[CROSSING_WALL_TILING, OPENING_LOSES_FILLET],
             ..Options::default()
         },
         150,
@@ -1312,10 +1380,10 @@ fn fuzz_openings_and_inner_walls() {
 /// corner, a run of them meeting end to end, and an opening wrapped around a
 /// convex corner so the cavity leaves the outline on two sides at once.
 ///
-/// It does not require blends. A reentrant corner is where the floor fillet
-/// legitimately degrades, so insisting on them here would assert the
-/// impossible; what this profile is for is that the bin still *builds*, stays
-/// manifold, audits clean and tessellates without leaks.
+/// A reentrant corner is where the floor fillet used to be allowed to degrade,
+/// and this profile is where that shows up in quantity: it also holds that the
+/// bin *builds*, stays manifold, audits clean and tessellates without leaks,
+/// all of which it does.
 #[test]
 fn fuzz_stripped_polyominoes() {
     run(
@@ -1340,7 +1408,6 @@ fn fuzz_bin_shapes() {
             shape: Shape::Polyomino,
             vary_params: true,
             split: Split::Flood,
-            known: &[TRIM_SECTION_CURVE],
             ..Options::default()
         },
         120,
@@ -1357,7 +1424,6 @@ fn fuzz_split_pieces() {
             shape: Shape::Polyomino,
             vary_params: true,
             split: Split::Lines,
-            known: &[TRIM_SECTION_CURVE],
             ..Options::default()
         },
         120,
