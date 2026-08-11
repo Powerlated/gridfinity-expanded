@@ -1648,13 +1648,19 @@ fn plan_piece(
                     }
                 }
             }
-            if fr > 0.0 && has_sharp_corner(segs) {
-                *loop_fr = 0.0;
-            }
         };
+        // A sharp corner terminates a blend chain rather than continuing it, so
+        // a loop carrying one takes no fillet -- except when the corner is the
+        // pinch a wall opening leaves, where the chain runs out onto the mouth
+        // and the rest of the compartment keeps its rounding. See `fillet.rs`'s
+        // capped runout.
+        let sharp_kills = |segs: &[Seg]| fr > 0.0 && has_sharp_corner(segs);
         for (cl, mut islands, banded) in entries {
             let mut loop_fr = fr;
             clamp(&cl.segs, true, &mut loop_fr);
+            if !cl.touched() && sharp_kills(&cl.segs) {
+                loop_fr = 0.0;
+            }
             for isl in &islands {
                 if !island_clears(&isl.segs, &cl.segs, loop_fr) {
                     loop_fr = 0.0;
@@ -1663,12 +1669,15 @@ fn plan_piece(
             for isl in &mut islands {
                 let mut island_fr = fr;
                 clamp(&isl.segs, false, &mut island_fr);
+                if sharp_kills(&isl.segs) {
+                    island_fr = 0.0;
+                }
                 if !island_clears(&isl.segs, &cl.segs, island_fr + loop_fr) {
                     island_fr = 0.0;
                 }
                 isl.fr = island_fr;
             }
-            if cl.touched() || banded.is_some() {
+            if banded.is_some() {
                 loop_fr = 0.0;
             }
             if std::env::var("DIAG_LOOP").is_ok() {
@@ -1754,6 +1763,23 @@ fn plan_piece(
                         outward: true,
                     },
                 ));
+            }
+            // An opening deletes the wall over its own run, not the rest of
+            // the compartment's. The segments the outer walk replaced are the
+            // ones with no wall left to roll against; every other floor-wall
+            // edge still gets its fillet, and the chain runs out on the mouth.
+            if loop_fr > 0.01 {
+                let walled: Vec<bool> = cl.coincident.iter().map(|&c| !c).collect();
+                for (s, keep) in cl.segs.iter().zip(blendable_segs(&cl.segs, &walled)) {
+                    if keep {
+                        fillet_edges.push((*s, floor_z, loop_fr));
+                    }
+                }
+            }
+            for isl in &island_shapes {
+                if isl.fr > 0.01 {
+                    fillet_edges.extend(isl.segs.iter().map(|s| (*s, floor_z, isl.fr)));
+                }
             }
             touched.push(cl);
             continue;
@@ -2206,13 +2232,37 @@ fn seg_tangent(s: &Seg, end: bool) -> Vec2 {
     }
 }
 
+const TANGENT_DOT: f32 = 0.9995;
+
+fn sharp_between(shape: &[Seg], i: usize, j: usize) -> bool {
+    seg_tangent(&shape[i], true).dot(seg_tangent(&shape[j], false)) < TANGENT_DOT
+}
+
 fn has_sharp_corner(shape: &[Seg]) -> bool {
     let n = shape.len();
-    (0..n).any(|i| {
-        let out = seg_tangent(&shape[i], true);
-        let inn = seg_tangent(&shape[(i + 1) % n], false);
-        out.dot(inn) < 0.9995
-    })
+    (0..n).any(|i| sharp_between(shape, i, (i + 1) % n))
+}
+
+/// Which of a loop's segments a rolling-ball blend may run along, given which
+/// ones the caller allows at all.
+///
+/// A blend chain has to stay tangent-continuous, because a vertex with two
+/// blended edges *continues* the chain and joining two blends that do not share
+/// a tangent there leaves a gap the size of the two radii. A sharp corner has to
+/// terminate the chain instead, which costs one of its two segments and turns
+/// the vertex into a runout `fillet.rs` can close off. It costs one segment, not
+/// the whole loop: an opening's pinch leaves sharp corners that used to delete
+/// every fillet on the compartment.
+fn blendable_segs(shape: &[Seg], allow: &[bool]) -> Vec<bool> {
+    let n = shape.len();
+    let mut keep = allow.to_vec();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        if keep[i] && keep[j] && sharp_between(shape, i, j) {
+            keep[j] = false;
+        }
+    }
+    keep
 }
 
 fn is_convex_arc(shape: &[Seg], s: &Seg) -> bool {

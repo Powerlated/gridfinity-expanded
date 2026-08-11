@@ -1248,6 +1248,49 @@ mod tests {
         );
     }
 
+    /// An opening takes the wall over its own run and nothing else. The chain
+    /// dies on the mouth, where the corner is void rather than material, so
+    /// `fillet.rs` emits a cap to close it off -- see the capped runout in
+    /// `rust/CLAUDE.md`. Before that existed the model zeroed the whole
+    /// compartment's fillet rather than ask for a blend it could not build.
+    #[test]
+    fn an_opening_keeps_the_rest_of_the_compartments_floor_fillet() {
+        let closed = gridfinity::Params::rect(2, 2);
+        let (_, before) = gridfinity::try_build_reporting(&closed).expect("closed bin builds");
+        assert!(before.made() > 0, "the closed bin should blend its floor");
+
+        for open in [
+            GridEdge {
+                x: 0,
+                y: 0,
+                orientation: Orientation::H,
+            },
+            GridEdge {
+                x: 0,
+                y: 0,
+                orientation: Orientation::V,
+            },
+        ] {
+            let mut p = gridfinity::Params::rect(2, 2);
+            p.open_edges = vec![open];
+            let (solid, after) = gridfinity::try_build_reporting(&p).expect("opened bin builds");
+            assert!(
+                after.made() > 0,
+                "{open:?} left the compartment with no floor fillet at all"
+            );
+            assert_eq!(
+                (after.unresolved, after.dropped.len()),
+                (0, 0),
+                "{open:?}: {} of {} blends did not land",
+                after.unresolved + after.dropped.len(),
+                after.requested
+            );
+            solid.validate().expect("opened bin is a closed manifold");
+            assert!(audit(&solid).is_ok(), "{open:?}: {}", audit(&solid));
+            assert_watertight(&tessellate(&solid, 8).to_mesh());
+        }
+    }
+
     #[test]
     fn fillet_cylinder_top_is_watertight() {
         use crate::kernel::fillet::fillet_edges;

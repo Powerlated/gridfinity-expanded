@@ -514,6 +514,53 @@ impl Curve {
         }
     }
 
+    /// d(point)/dt, in closed form. Not normalised -- callers wanting a
+    /// direction normalise it themselves, and a zero-length result means the
+    /// parameterisation is stationary there.
+    pub fn tangent(&self, t: f32) -> Vec3 {
+        match *self {
+            Curve::Line { dir, .. } => dir,
+            Curve::Circle {
+                axis,
+                radius,
+                ref_dir,
+                ..
+            } => {
+                let (d0, d1) = radial_frame(axis, ref_dir);
+                radius * (-t.sin() * d0 + t.cos() * d1)
+            }
+            Curve::Ellipse { a, b, .. } => -t.sin() * a + t.cos() * b,
+            Curve::TorusSection {
+                axis,
+                ref_dir,
+                major,
+                minor,
+                offset,
+                branch,
+                ..
+            } => {
+                let (d0, d1) = radial_frame(axis, ref_dir);
+                let rad = major + minor * t.cos();
+                let d_rad = -minor * t.sin();
+                let cos_u = (offset / rad).clamp(-1.0, 1.0);
+                let su = (1.0 - cos_u * cos_u).max(0.0).sqrt();
+                let sin_u = branch * su;
+                // cos_u = offset / rad, so d(cos_u)/dt follows the quotient
+                // rule; su falls to zero where the section turns back on itself
+                // and the radial term drops out with it.
+                let d_cos_u = -offset * d_rad / (rad * rad);
+                let d_sin_u = if su > 1e-6 {
+                    branch * (-cos_u * d_cos_u / su)
+                } else {
+                    0.0
+                };
+                d_rad * (cos_u * d0 + sin_u * d1)
+                    + rad * (d_cos_u * d0 + d_sin_u * d1)
+                    + minor * t.cos() * axis
+            }
+        }
+    }
+
     pub fn torus_section(
         center: Vec3,
         axis: Vec3,

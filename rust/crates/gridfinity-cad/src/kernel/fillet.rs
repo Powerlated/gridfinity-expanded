@@ -196,7 +196,11 @@ fn fillet_edges_with(
         let ed = solid.edges[e];
         let (fa, fb) = (edge_faces[e][0], edge_faces[e][1]);
         let (p0, p1) = (solid.verts[ed.v0].point, solid.verts[ed.v1].point);
-        let mid = (p0 + p1) * 0.5;
+        // The *curve's* midpoint, not the chord's. They agree on a line, and on
+        // a semicircle the chord midpoint is the circle's centre -- nowhere near
+        // either surface, so every normal taken there is meaningless.
+        let t_mid = (ed.t0 + ed.t1) * 0.5;
+        let mid = ed.curve.point(t_mid);
         let r = want[&e];
         let na_mid = face_outward(fa, mid);
         let nb_mid = face_outward(fb, mid);
@@ -206,11 +210,25 @@ fn fillet_edges_with(
                 "blend: edge {e} degenerate (parallel faces or r≤0)"
             ));
         }
-        let centroid_a = face_centroid(solid, fa);
-        let to_centroid = centroid_a - mid;
+        // Which side of the edge the blend sits on is decided *locally*, from
+        // the direction fa's material lies in at this edge. The orientation
+        // invariant says a loop keeps its face's material on the left, so that
+        // direction is `outward normal x edge tangent`. Reading it off
+        // `face_centroid` instead only works for a face whose centroid is
+        // inside it: an L-shaped cavity floor, and any floor with an opening's
+        // mouth in it, pull the centroid far enough to flip the choice on one
+        // edge of a chain, which lands that edge's tangent points 2r away from
+        // its neighbour's and tears the loop open.
+        let fwd_a = loop_edge_dir(solid, fa, e);
+        // `tangent` differentiates in increasing t, and an edge whose stored
+        // range runs backwards traverses v0 -> v1 the other way.
+        let rising = if ed.t1 >= ed.t0 { 1.0 } else { -1.0 };
+        let tan_mid = (ed.curve.tangent(t_mid) * rising).normalize_or_zero();
+        let along_a = if fwd_a { tan_mid } else { -tan_mid };
+        let into_a = na_mid.cross(along_a);
         let ta_plus = mid + r * (na_mid + nb_mid) / sin_mid - r * na_mid;
         let ta_minus = mid - r * (na_mid + nb_mid) / sin_mid + r * na_mid;
-        let s = if to_centroid.dot(ta_minus - mid) > to_centroid.dot(ta_plus - mid) {
+        let s = if into_a.dot(ta_minus - mid) > into_a.dot(ta_plus - mid) {
             -1.0
         } else {
             1.0
@@ -233,8 +251,6 @@ fn fillet_edges_with(
         let plane_b = as_plane(&solid.faces[fb].surface);
         let cyl = as_cyl(&solid.faces[fa].surface).or_else(|| as_cyl(&solid.faces[fb].surface));
         let is_circle = matches!(ed.curve, Curve::Circle { .. });
-
-        let fwd_a = loop_edge_dir(solid, fa, e);
 
         let mut blend = if plane_a.is_some() && plane_b.is_some() {
             build_cyl_blend(ed, cv0, cv1, ma, na0, ta_p0, ta_p1, tb_p0, tb_p1, r, fwd_a)?
@@ -267,9 +283,6 @@ fn fillet_edges_with(
                     "blend: runout at vertex {v} is only supported for cylindrical blends"
                 ));
             }
-            let ft = find_runout_face(solid, v, fa, fb)?;
-            let plane = as_plane(&solid.faces[ft].surface)
-                .ok_or_else(|| format!("blend: runout face {ft} at vertex {v} is not planar"))?;
             let dir = match ed.curve {
                 Curve::Line { dir, .. } => dir,
                 _ => return Err(format!("blend: runout at vertex {v} needs a straight edge")),
@@ -279,6 +292,15 @@ fn fillet_edges_with(
             } else {
                 (cv1, ta_p1, tb_p1)
             };
+            let land =
+                |plane| runout_cyl(cv, dir, r, tap, tbp, plane).map(|(a, b, _)| (a + b) * 0.5);
+            let end = plan_runout_end(solid, v, e, fa, fb, edge_faces, land)?;
+            let ft = match end {
+                RunoutEnd::Absorb { face } => face,
+                RunoutEnd::Cap { fa_side, .. } => fa_side,
+            };
+            let plane = as_plane(&solid.faces[ft].surface)
+                .ok_or_else(|| format!("blend: runout face {ft} at vertex {v} is not planar"))?;
             let (ta_new, tb_new, arc) = runout_cyl(cv, dir, r, tap, tbp, plane)?;
             if at_v0 {
                 blend.ta_p0 = ta_new;
@@ -292,7 +314,8 @@ fn fillet_edges_with(
             runouts.insert(
                 v,
                 Runout {
-                    face: ft,
+                    end,
+                    corner: solid.verts[v].point,
                     arc,
                     ta_p: ta_new,
                     tb_p: tb_new,
@@ -384,6 +407,10 @@ fn fillet_edges_with(
     let mut blend_faces: Vec<usize> = Vec::with_capacity(bm.len());
     let mut blend_keys: Vec<EdgeId> = bm.keys().copied().collect();
     blend_keys.sort_unstable();
+    // How the blend face traversed each capped end's trim curve. The cap shares
+    // that edge and has to run the other way, which is what fixes its winding
+    // against all three of its neighbours at once.
+    let mut arc_used: HashMap<usize, (EdgeId, bool)> = HashMap::new();
     for k in blend_keys {
         let bld = &bm[&k];
         let e_ta = emit_curv(&mut b, bld.ta_p0, bld.ta_p1, bld.ta);
@@ -395,7 +422,41 @@ fn fillet_edges_with(
         } else {
             [e_ta, e_ca1, (e_tb.0, !e_tb.1), (e_ca0.0, !e_ca0.1)]
         };
+        let ed = solid.edges[k];
+        let (used0, used1) = if bld.fwd_a {
+            (e_ca0, (e_ca1.0, !e_ca1.1))
+        } else {
+            ((e_ca0.0, !e_ca0.1), e_ca1)
+        };
+        arc_used.insert(ed.v0, used0);
+        arc_used.insert(ed.v1, used1);
         blend_faces.push(b.face_from(bld.surface, bld.sense, &lp, &[]));
+    }
+
+    // Where the chain died on an opening's mouth there was no face to take the
+    // trim curve, so the cap is emitted here. Every one of its three edges is
+    // interned by its endpoints -- the ellipse is the edge the blend face just
+    // built, and the two stubs are the lines the neighbours emitted when their
+    // edge was split at the tangent point -- so the cap pairs up without being
+    // told who its neighbours are.
+    let mut cap_vs: Vec<usize> = runouts.keys().copied().collect();
+    cap_vs.sort_unstable();
+    for v in cap_vs {
+        let ro = runouts[&v];
+        let RunoutEnd::Cap { fa_side, .. } = ro.end else {
+            continue;
+        };
+        let (va, vc, vb) = (b.vertex(ro.ta_p), b.vertex(ro.corner), b.vertex(ro.tb_p));
+        let arc = emit_curv(&mut b, ro.tb_p, ro.ta_p, ro.arc);
+        let mut lp = vec![b.line(va, vc), b.line(vc, vb), arc];
+        if arc_used.get(&v) == Some(&arc) {
+            lp.reverse();
+            for x in &mut lp {
+                x.1 = !x.1;
+            }
+        }
+        let f = &solid.faces[fa_side];
+        b.face_from(f.surface, f.sense, &lp, &[]);
     }
 
     let s = b.build_compact_unvalidated();
@@ -422,18 +483,6 @@ fn loop_edge_dir(solid: &Solid, fid: usize, e: EdgeId) -> bool {
     true
 }
 
-fn face_centroid(solid: &Solid, fid: usize) -> Vec3 {
-    let mut sum = Vec3::ZERO;
-    let mut n = 0;
-    for &(e, fwd) in solid.outer_edges(fid) {
-        let ed = solid.edges[e];
-        let v = if fwd { ed.v0 } else { ed.v1 };
-        sum += solid.verts[v].point;
-        n += 1;
-    }
-    if n > 0 { sum / n as f32 } else { Vec3::ZERO }
-}
-
 fn as_plane(s: &Surface) -> Option<(Vec3, Vec3)> {
     if let Surface::Plane { origin, normal, .. } = s {
         Some((*origin, *normal))
@@ -453,14 +502,79 @@ fn as_cyl(s: &Surface) -> Option<(Vec3, Vec3, f32)> {
     }
 }
 
+/// How a blend chain's end is closed off.
+///
+/// `Absorb` is the original case: one face beyond the chain owns the corner at
+/// the vertex, so trimming its two edges back to the tangent points and
+/// splicing the trim curve between them closes the gap.
+///
+/// `Cap` is what an opening's mouth needs. There the chain dies on a boundary
+/// where the corner is *void* rather than material -- the wall stops and the
+/// blend's quarter-round cross-section is left standing in mid-air -- so no
+/// existing face can absorb the curve and one has to be emitted. The two
+/// neighbours either side of the corner keep their vertex; each has its edge
+/// split at the tangent point instead, and the piece from there to the corner
+/// pairs with the new cap.
+#[derive(Clone, Copy, PartialEq)]
+enum RunoutEnd {
+    Absorb {
+        face: usize,
+    },
+    Cap {
+        /// The neighbour across the fa-side edge, whose edge splits at `ta_p`.
+        fa_side: usize,
+        /// The neighbour across the fb-side edge, whose edge splits at `tb_p`.
+        fb_side: usize,
+    },
+}
+
 #[derive(Clone, Copy)]
 struct Runout {
-    face: usize,
+    end: RunoutEnd,
+    /// The corner the chain dies on. `Cap` keeps it; `Absorb` trims it away.
+    corner: Vec3,
     arc: CurvEdge,
     ta_p: Vec3,
     tb_p: Vec3,
     fa: usize,
     fb: usize,
+}
+
+impl Runout {
+    /// The face whose loop the trim curve is spliced into, if any. A capped
+    /// runout has none -- the curve bounds the cap instead.
+    fn absorbing(&self) -> Option<usize> {
+        match self.end {
+            RunoutEnd::Absorb { face } => Some(face),
+            RunoutEnd::Cap { .. } => None,
+        }
+    }
+
+    /// Where face `fi`'s edge into the corner has to be split, for a capped
+    /// runout. `None` when `fi` is not one of the two neighbours, or when the
+    /// edge in hand is not the one that reaches the blend.
+    fn cap_split(&self, fi: usize, edge_faces: &[usize]) -> Option<Vec3> {
+        match self.end {
+            RunoutEnd::Cap { fa_side, fb_side } => {
+                if fi == fa_side && edge_faces.contains(&self.fa) {
+                    Some(self.ta_p)
+                } else if fi == fb_side && edge_faces.contains(&self.fb) {
+                    Some(self.tb_p)
+                } else {
+                    None
+                }
+            }
+            RunoutEnd::Absorb { .. } => None,
+        }
+    }
+
+    /// Whether face `fi` keeps the corner vertex where it is. Only the two
+    /// blended faces retreat to their tangent points; a capped runout leaves
+    /// the corner standing for every other face that meets it, including the
+    /// two the cap pairs with.
+    fn keeps_corner(&self, fi: usize) -> bool {
+        matches!(self.end, RunoutEnd::Cap { .. }) && fi != self.fa && fi != self.fb
+    }
 }
 
 fn faces_at_vertex(solid: &Solid, v: usize) -> Vec<usize> {
@@ -492,7 +606,43 @@ fn coplanar(x: &Surface, y: &Surface) -> bool {
     }
 }
 
-fn find_runout_face(solid: &Solid, v: usize, fa: usize, fb: usize) -> Result<usize, String> {
+/// The face across `side`'s edge at `v` -- the neighbour the blend meets when
+/// it runs off the end of `side` at that corner. `skip` is the blended edge
+/// itself, which is not a way out.
+fn across_at(
+    solid: &Solid,
+    v: usize,
+    side: usize,
+    skip: EdgeId,
+    ef: &crate::kernel::topo::EdgeFaces,
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    for &(e, _) in solid.face_loops(side).flatten() {
+        let ed = solid.edges[e];
+        if e == skip || (ed.v0 != v && ed.v1 != v) {
+            continue;
+        }
+        for &f in &ef[e] {
+            if f != side && !out.contains(&f) {
+                out.push(f);
+            }
+        }
+    }
+    out
+}
+
+/// Decide how the chain's end at `v` is closed. `land` reports where the runout
+/// would come to rest on a given plane, which is what tells a face the blend
+/// actually runs into from one that merely touches the vertex.
+fn plan_runout_end(
+    solid: &Solid,
+    v: usize,
+    e: EdgeId,
+    fa: usize,
+    fb: usize,
+    ef: &crate::kernel::topo::EdgeFaces,
+    land: impl Fn((Vec3, Vec3)) -> Result<Vec3, String>,
+) -> Result<RunoutEnd, String> {
     let mut cands = Vec::new();
     for fi in faces_at_vertex(solid, v) {
         if fi == fa
@@ -504,13 +654,91 @@ fn find_runout_face(solid: &Solid, v: usize, fa: usize, fb: usize) -> Result<usi
         }
         cands.push(fi);
     }
-    match cands.len() {
-        1 => Ok(cands[0]),
-        0 => Err(format!("blend runout: no terminating face at vertex {v}")),
-        n => Err(format!(
-            "blend runout: {n} candidate terminating faces at vertex {v}"
-        )),
+    if cands.len() == 1 {
+        return Ok(RunoutEnd::Absorb { face: cands[0] });
     }
+    if cands.is_empty() {
+        return Err(format!("blend runout: no terminating face at vertex {v}"));
+    }
+    // Several candidates in one plane are not an ambiguity about *where* the
+    // blend ends. The bin's outer wall is cut into bands by the peg profile and
+    // three of them meet at the pinch a wall opening leaves, so the plane is
+    // settled and only the owner of the trim curve is open. Whichever band the
+    // runout actually lands in absorbs it; if it lands in none of them the
+    // corner is void -- the mouth of the opening -- and the blend needs a cap.
+    let plane = as_plane(&solid.faces[cands[0]].surface);
+    let one_plane = cands[1..]
+        .iter()
+        .all(|&c| coplanar(&solid.faces[c].surface, &solid.faces[cands[0]].surface));
+    if let (true, Some(plane)) = (one_plane, plane) {
+        let at = land(plane)?;
+        let inside: Vec<usize> = cands
+            .iter()
+            .copied()
+            .filter(|&c| planar_face_contains(solid, c, at))
+            .collect();
+        if inside.len() == 1 {
+            return Ok(RunoutEnd::Absorb { face: inside[0] });
+        }
+        if inside.is_empty() {
+            let fa_side = across_at(solid, v, fa, e, ef);
+            let fb_side = across_at(solid, v, fb, e, ef);
+            let pick = |xs: &[usize]| -> Option<usize> {
+                let hit: Vec<usize> = xs.iter().copied().filter(|c| cands.contains(c)).collect();
+                (hit.len() == 1).then(|| hit[0])
+            };
+            if let (Some(a), Some(b)) = (pick(&fa_side), pick(&fb_side)) {
+                if a != b {
+                    return Ok(RunoutEnd::Cap {
+                        fa_side: a,
+                        fb_side: b,
+                    });
+                }
+            }
+        }
+    }
+    Err(format!(
+        "blend runout: {} candidate terminating faces at vertex {v}",
+        cands.len()
+    ))
+}
+
+/// Whether `p` lies inside planar face `f`, by even-odd parity against every
+/// loop projected into the surface's own uv. A curved edge contributes its
+/// midpoint as well as its endpoints, so a mostly-curved loop does not collapse
+/// onto its chords.
+fn planar_face_contains(solid: &Solid, f: usize, p: Vec3) -> bool {
+    let surf = &solid.faces[f].surface;
+    let Some((origin, n)) = as_plane(surf) else {
+        return false;
+    };
+    if (p - origin).dot(n.normalize_or_zero()).abs() > 1e-3 {
+        return false;
+    }
+    let uv = surf.project(p);
+    let mut crossings = 0u32;
+    let mut poly: Vec<(f32, f32)> = Vec::new();
+    for lp in solid.face_loops(f) {
+        poly.clear();
+        for &(e, fwd) in lp {
+            let ed = solid.edges[e];
+            let a = if fwd { ed.v0 } else { ed.v1 };
+            poly.push(surf.project(solid.verts[a].point));
+            if !matches!(ed.curve, Curve::Line { .. }) {
+                poly.push(surf.project(ed.curve.point((ed.t0 + ed.t1) * 0.5)));
+            }
+        }
+        let m = poly.len();
+        for i in 0..m {
+            let (q0, q1) = (poly[i], poly[(i + 1) % m]);
+            if (q0.1 > uv.1) != (q1.1 > uv.1)
+                && q0.0 + (uv.1 - q0.1) / (q1.1 - q0.1) * (q1.0 - q0.0) > uv.0
+            {
+                crossings += 1;
+            }
+        }
+    }
+    crossings % 2 == 1
 }
 
 fn runout_cyl(
@@ -788,7 +1016,7 @@ fn rebuild_loop(
     let face_surface = solid.faces[fi].surface;
     let split_at = |v: usize, e: EdgeId| -> Option<Vec3> {
         let ro = runouts.get(&v)?;
-        if ro.face != fi {
+        if ro.absorbing() != Some(fi) {
             return None;
         }
         if ef[e].contains(&ro.fa) {
@@ -797,6 +1025,14 @@ fn rebuild_loop(
             Some(ro.tb_p)
         } else {
             None
+        }
+    };
+    // A capped runout leaves the corner standing, so a face that only touches
+    // it must not follow the blend back to a tangent point.
+    let point_at = |v: usize, e: EdgeId, fallback: Vec3| -> Vec3 {
+        match runouts.get(&v) {
+            Some(ro) if ro.keeps_corner(fi) => fallback,
+            _ => split_at(v, e).unwrap_or_else(|| move_vertex(vinfo, v, fallback, face_surface)),
         }
     };
 
@@ -824,11 +1060,31 @@ fn rebuild_loop(
         } else {
             let pos0 = solid.verts[ed.v0].point;
             let pos1 = solid.verts[ed.v1].point;
-            let new0 =
-                split_at(ed.v0, e).unwrap_or_else(|| move_vertex(vinfo, ed.v0, pos0, face_surface));
-            let new1 =
-                split_at(ed.v1, e).unwrap_or_else(|| move_vertex(vinfo, ed.v1, pos1, face_surface));
+            let new0 = point_at(ed.v0, e, pos0);
+            let new1 = point_at(ed.v1, e, pos1);
             let (start, end) = if fwd { (new0, new1) } else { (new1, new0) };
+            // The cap pairs with the stub between the tangent point and the
+            // corner, so the edge running into the corner is cut in two there.
+            let cut = [ed.v0, ed.v1]
+                .into_iter()
+                .find_map(|v| runouts.get(&v).and_then(|ro| ro.cap_split(fi, &ef[e])));
+            if let Some(p) = cut {
+                if !matches!(ed.curve, Curve::Line { .. }) {
+                    return Err(format!(
+                        "blend runout: capped end needs a straight edge into the corner (face {fi})"
+                    ));
+                }
+                for (s, t) in [(start, p), (p, end)] {
+                    let (vs, ve) = (b.vertex(s), b.vertex(t));
+                    items.push(Emitted {
+                        edge: b.line(vs, ve),
+                        start: s,
+                        end_v: end_v,
+                        end: t,
+                    });
+                }
+                continue;
+            }
             let vs = b.vertex(start);
             let ve = b.vertex(end);
             let eid = match ed.curve {
@@ -870,7 +1126,7 @@ fn rebuild_loop(
         out.push(items[i].edge);
         let next_start = items[(i + 1) % n].start;
         if let Some(ro) = runouts.get(&items[i].end_v) {
-            if ro.face == fi && (next_start - items[i].end).length() > 1e-6 {
+            if ro.absorbing() == Some(fi) && (next_start - items[i].end).length() > 1e-6 {
                 out.push(emit_curv(b, items[i].end, next_start, ro.arc));
             }
         }

@@ -157,35 +157,55 @@ blood on its first run (see the open-run panic below). Openings and dividers are
 `GridEdge`s at random cell coordinates with a random orientation, and `effective_walls` consults the
 divider set *only* for `EdgeClass::Internal`, so most of those dividers were no-ops.
 
-**An opening deletes its compartment's floor fillet outright, and `require_blends` could not see
-it.** That gate holds the model to the blends it *asked for*, and the loss happens one step earlier:
-`plan_piece` zeroes `loop_fr` for any cavity loop `resolve_open_runs` touched, so the report reads
-0 requested / 0 refused and audits perfectly clean. `opening_keeps_the_fillet` in `tests/fuzz.rs`
-closes that hole by building the same bin twice — once as generated and once with `open_edges`
-cleared — and failing when the opened build makes no blend though the closed one did and walls are
-still standing. It fires on 80/150 of `fuzz_wall_openings`, is signed `OPENING_LOSES_FILLET`, and is
-in `known` on both opening profiles until the kernel can carry it. `BlendReport::made()` is what the
-comparison counts: `is_clean` cannot tell a bin that wanted no blend from one that got none.
+**An opening used to delete its compartment's floor fillet outright, and `require_blends` could not
+see it.** That gate holds the model to the blends it *asked for*, and the loss happened one step
+earlier: `plan_piece` zeroed `loop_fr` for any cavity loop `resolve_open_runs` touched, so the
+report read 0 requested / 0 refused and audited perfectly clean. `opening_keeps_the_fillet` in
+`tests/fuzz.rs` closes that hole by building the same bin twice — once as generated and once with
+`open_edges` cleared — and failing when the opened build makes no blend though the closed one did
+and walls are still standing. `BlendReport::made()` is what it counts: `is_clean` cannot tell a bin
+that wanted no blend from one that got none. It found **80/150** of `fuzz_wall_openings`.
 
-The diagnosis is complete and the blocker is in `fillet.rs`, not the model. Blending the whole
-non-coincident run works right up to the chain's ends, and *every* way of ending it is unsupported:
+That is fixed. `fuzz_wall_openings` is now a hard gate with no `known` at six seeds, and the
+`OPENING_LOSES_FILLET` signature survives only on `fuzz_openings_and_inner_walls` at 2–8/150, where
+what zeroes the fillet is an inner wall's `island_clears` check rather than the opening.
 
-- **End it at the pinch** (the two sharp corners where the open run is pulled back to the outer
-  boundary) and `find_runout_face` reports 3 candidates. They are all the same plane — the bin's
-  outer wall at y=0.25, cut into bands by the peg profile — so the plane is not in doubt, only which
-  band's loop takes the trim curve. None of them is the answer: on a 2×2 opened at `(0,0,H)` the
-  runout lands at `(40.775, 0.25, 9.425)`, which is *above* the lip at `z=8.2` and inside the open
-  span, so it sits on no face at all.
-- **End it one segment earlier** and the terminating face is the cavity's rounded corner, a
-  cylinder — `runout face N is not planar`. Supporting that means a blend-cylinder ∩ corner-cylinder
-  section curve, which for perpendicular axes is a quartic and outside the analytic curve set.
-- **End it on the arc itself** and the blend is a torus, which the runout does not do at all.
+Three things had to change, and only the first is the model:
 
-So the missing operator is a **cap runout**: where the chain dies on an opening's mouth there is no
-face to absorb the trim curve, and one has to be emitted — a planar cap bounded by the end ellipse
-plus the trimmed lip and wall edges, which also means splitting the two edges the ellipse's
-endpoints land on and rewriting the neighbouring bands' loops. That is a new face in the
-manifold-critical rebuild path, not a repair of the existing splice.
+- **The blend request follows the wall, not the loop.** A touched cavity loop now blends its
+  non-coincident segments — the ones the outer walk did *not* replace, i.e. where a wall still
+  stands — and `blendable_segs` drops one segment at each remaining sharp corner so the chain
+  terminates there instead of trying to continue through a corner it has no tangent across.
+  Dropping the *loop* was what cost a 2×2 all 8 of its blends for one open edge.
+- **`fillet.rs` can cap a runout.** `RunoutEnd` is now `Absorb` (the original: one face beyond the
+  chain owns the corner, so trimming its two edges back to the tangent points and splicing the trim
+  curve between them closes the gap) or `Cap`. A chain dying on an opening's mouth has no face to
+  absorb the curve — on a 2×2 opened at `(0,0,H)` the runout lands at `(40.775, 0.25, 9.425)`, above
+  the lip at `z=8.2` and inside the open span, on no face at all — so one is emitted: a planar cap
+  bounded by the end ellipse and the two stubs between the tangent points and the corner. The
+  neighbours either side keep their corner and have their edge **split** at the tangent point
+  instead of retreating to it, and every one of the cap's three edges is interned by its endpoints,
+  so it pairs up without being told who its neighbours are. Its winding comes from the blend face's
+  own traversal of the shared ellipse, reversed — one comparison that fixes all three edges at once,
+  since `orient::normalize` cannot re-wind a single face against its own component.
+  `plan_runout_end` also settles the older ambiguity: several coplanar candidates are the outer wall
+  cut into bands by the peg profile, so the plane was never in doubt, only which band's loop takes
+  the curve, and `planar_face_contains` picks the band the runout actually lands in.
+- **The blend's side is decided locally.** `s` used to come from `face_centroid`, which only means
+  anything for a face whose centroid is inside it. An L-shaped cavity floor — or any floor with an
+  opening's mouth in it — pulls the centroid far enough to flip the choice on *one* edge of a chain,
+  landing its tangent points 2r from its neighbour's and tearing the loop open. It now comes from
+  the direction fa's material lies in at that edge, `outward normal × edge tangent`, which the
+  orientation invariant guarantees. Two traps: `Curve::tangent` (new, closed-form for all four
+  variants) differentiates in increasing `t` and an edge whose stored range runs *backwards*
+  traverses `v0 -> v1` the other way; and the reference point has to be the **curve's** midpoint,
+  not the chord's, because on a semicircle the chord midpoint is the circle's centre and every
+  normal taken there is meaningless. That one cost `fillet_cylinder_top_is_watertight`.
+
+Still unsupported, and still the reason a chain may not end just anywhere: a runout onto a
+**cylinder** (`runout face N is not planar`) would need a blend-cylinder ∩ corner-cylinder section
+curve, a quartic for perpendicular axes and outside the analytic curve set; and a chain may not end
+*on* an arc, because the runout does not do torus blends.
 
 `fuzz_split_pieces` asserts what "split" is supposed to mean rather than only that each piece is
 sound:

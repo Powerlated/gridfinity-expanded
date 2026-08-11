@@ -1210,8 +1210,9 @@ const TRIM_SECTION_CURVE: &str = "no closed-form section curve for a face the cu
 /// something else; `fuzz_tidy_inner_walls` itself keeps reporting it.
 const CROSSING_WALL_TILING: &str = "is not a tiling";
 
-/// An opening zeroes its compartment's floor fillet outright. Diagnosed, and
-/// blocked on `fillet.rs`'s runout rather than on the model -- see
+/// An opening still costs its compartment the whole floor fillet. Down from
+/// 80/150 to 6/150 now that `fillet.rs` can cap a runout, and what is left is
+/// an inner wall's island clearance rather than the opening -- see
 /// `rust/CLAUDE.md`.
 const OPENING_LOSES_FILLET: &str = "opening cost the floor fillet";
 
@@ -1262,7 +1263,6 @@ fn fuzz_wall_openings() {
             openings: true,
             dividers: true,
             require_blends: true,
-            known: &[OPENING_LOSES_FILLET],
             ..Options::default()
         },
         150,
