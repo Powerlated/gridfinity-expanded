@@ -154,7 +154,7 @@ knobs exist because a checker cannot tell an over-ask from a defect on its own:
 | `fuzz_openings_and_inner_walls` | both of the above at once, `require_blends` | asserts |
 | `fuzz_bin_shapes` | polyominoes, flood-fill pieces | asserts |
 | `fuzz_split_pieces` | polyominoes, `SplitLine`s + `partition_cells` | asserts |
-| `fuzz_stripped_polyominoes` | polyominoes with **half** the perimeter wall opened | reports |
+| `fuzz_stripped_polyominoes` | polyominoes with **half** the perimeter wall opened | asserts |
 | `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | reports |
 
 **Wall openings were never fuzzed before.** `open_edges` flows to `layout::effective_walls` and an
@@ -348,7 +348,7 @@ compose. `resolve_open_runs`, `pinch`, `consume_walk`, `consume_all_near`, `plan
 went 57/150 → **40/150** with both the `no pinch for run` and `wall-sector chain stuck` classes
 retired outright.
 
-Two things it does not get for free, and both were manifold errors first:
+Three things it does not get for free, and all three were manifold errors first:
 
 - **One presplit for both booleans.** They share the wall between them and their results have to
   weld, so `presplit_regions` gives the cavity shapes and the outline a single segmentation before
@@ -359,37 +359,53 @@ Two things it does not get for free, and both were manifold errors first:
   wall. Without it the base emits one long edge across a span the floor and the wall above have
   already divided (`edge 240 used fwd=0 bwd=1`). That split is also where `peg_splits` stations come
   from, so the peg profile still welds to the wall's bottom ring.
+- **The wall subtracts one compartment at a time.** The opened cavities are not a region a single
+  difference can take: each runs out past the outline to the pitch line at its own openings, so two
+  compartments facing the same empty cell overlap out there. Clipping them to the outline first only
+  trades that for a pair of long runs coincident with the outline, which the sweep resolves to
+  nothing at all; unioning them first is worse, merging the compartments the divider between them is
+  supposed to keep apart. Folding the loop `w = region_difference(&w, &[shape])` asks the boolean for
+  none of it.
 
-**`fuzz_stripped_polyominoes` reports rather than gates, and it found four undiagnosed classes on
-its first run.** Half a complex polyomino's perimeter is the first thing to reach openings meeting a
-reentrant corner in quantity. It started at 66/150, 42 of them open-run panics that the boolean
-reformulation has since retired; it is at **40/150**, and 36 of those are one class. It does not `require_blends` -- a
-reentrant corner is where the floor fillet legitimately degrades -- so what it holds is that the bin
-builds, stays manifold, audits clean and tessellates without leaks. The rest:
+**`fuzz_stripped_polyominoes` found four undiagnosed classes on its first run and now gates at
+0/150.** Half a complex polyomino's perimeter is the first thing to reach openings meeting a
+reentrant corner in quantity. It started at 66/150. It does not `require_blends` -- a reentrant
+corner is where the floor fillet legitimately degrades -- so what it holds is that the bin builds,
+stays manifold, audits clean and tessellates without leaks. All four classes were verified
+**pre-existing** against `749a3a5`, the tree before this session's kernel work: they are
+configurations nothing had fuzzed before, not regressions. What each one turned out to be:
 
-- **36 cases hand the triangulator a face whose loops do not tile** (21 at first; each open-run fix
-  carries more previously-panicking cases far enough to reach this instead, so the count rises as
-  the others fall). The same assert as
-  `CROSSING_WALL_TILING`, reached through openings rather than crossing walls. Characterised on a
-  **one-cell** bin at `height_units: 1`, `cavity_corner_radius: 4.0` with one open edge: the face is
-  the outer wall band at the opening, between the peg top and the floor, and its loop is
-  `(124.55, 4.75) → (122.0, 4.75) → (122.0, 8.2) → (121.55, 8.2) → (124.55, 8.2)`. That fourth point
-  is a **spur** — the loop runs 0.45 mm left along z=8.2 and then straight back over itself — so the
-  loop is not simple and no triangulation of it can tile. The defect is in whoever authored that
-  loop, which is what the `triangulate` assert has always said; where the 0.45 comes from is not yet
-  known.
-- **2 cases leave an edge unpaired** (`used fwd=0 bwd=1`).
-- **1 case builds a `Plane` from a zero-length normal.** That one is now caught where it is made
-  rather than four layers downstream: `Surface::plane` asserts its normal is finite and non-zero,
-  because `normalize` on a zero vector yields NaN, `sin.max(1e-9)` then hides the NaN inside the
-  blend's ball-centre solve, and it only surfaced as `vertex at a non-finite point` in the builder.
-  `fillet_edges_with` asserts the same of each blended edge's four face normals, so a NaN arriving
-  from anywhere else is named too.
+- **42 open-run panics** (`no pinch for run`, `wall-sector chain stuck`, `arc before/after the run`),
+  retired outright by the boolean reformulation above.
+- **36 cases handed the triangulator a face whose loops do not tile** — the same assert as
+  `CROSSING_WALL_TILING`, reached through openings. The loop had a **spur**: it ran a fraction of a
+  millimetre along one edge and straight back over itself. The author was the cap runout, splitting
+  an edge at a point that was not on it. `plan_runout_end` now projects the cap point onto the edge
+  it means to split and refuses the runout unless the parameter lands strictly inside — a dropped
+  blend is geometry the model already handles, a backwards spur is not.
+- **2 cases left an edge unpaired** (`used fwd=0 bwd=1`), both at a **diagonal pinch**, where the
+  outline visits one lattice point twice — rounding the corner on one visit and squaring it on the
+  other — and the peg welded only to the rounded visit. `SharedWithPegs` now records the squared
+  visits in `squared` and subtracts them from `corners` after authoring, and `split_peg_profile`
+  splits the peg's corner *arcs* by angle about the corner centre as well as splitting its lines, so
+  the peg carries a vertex for each visit.
+- **1 case built a `Plane` from a zero-length normal**, from a zero-length segment a boolean left
+  behind; `drop_degenerate` discards those before `wall_between` sees them. The plane is now caught
+  where it is made rather than four layers downstream: `Surface::plane` asserts its normal is finite
+  and non-zero, because `normalize` on a zero vector yields NaN, `sin.max(1e-9)` then hides the NaN
+  inside the blend's ball-centre solve, and it only surfaced as `vertex at a non-finite point` in the
+  builder. `fillet_edges_with` asserts the same of each blended edge's four face normals, so a NaN
+  arriving from anywhere else is named too.
 
-All four were verified **pre-existing** by running the shrunk repros against `749a3a5`, the tree
-before this session's kernel work: they are configurations nothing had fuzzed before, not
-regressions. They are deliberately *not* in `known` -- masking four broad signatures on a profile
-this exploratory would hide the next real regression, and `note()` prints every one of them anyway.
+**A split may not leave a piece shorter than the distance `chain_loops` welds with.** The last case
+standing was a `region_difference` that returned *nothing* — 717 mm² of wall vanished. A vertex both
+regions already agreed on, `(44.153893, 84.0)`, sat 1.8e-4 mm off the outline arc it was supposed to
+lie on, so the sweep found the true arc∩line crossing at `44.15371` and split the 1 mm line beside
+it there. The resulting 1.8e-4 mm sliver is longer than `EPS` (so `chain_loops` will not weld across
+it) but the two regions now disagreed about where that vertex is, the chain ran off the end, and an
+unclosed chain is silently dropped. `split_seg`'s line branch measured its margin as a *fraction* of
+the segment — generous on a long one, vanishing on a short one — and now measures it in millimetres
+against `SLIVER`, the way the arc branch always has. `SLIVER > EPS` is a `const` assert.
 
 **An opening onto an enclosed hole's boundary is ignored, not honoured.** `layout::enclosed_holes`
 flood-fills the empty cells a bin's cell set surrounds, and `effective_walls` drops any `open_edge`

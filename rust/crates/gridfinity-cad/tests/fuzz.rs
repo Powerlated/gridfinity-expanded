@@ -763,16 +763,17 @@ fn check(c: &Case) -> Result<(), String> {
                     piece.len()
                 ));
             }
-            let trespass = pieces
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != i)
-                .find_map(|(j, other)| {
-                    mesh.positions
-                        .iter()
-                        .find(|p| well_inside(other, p.x, p.y))
-                        .map(|p| (j, *p))
-                });
+            let trespass =
+                pieces
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .find_map(|(j, other)| {
+                        mesh.positions
+                            .iter()
+                            .find(|p| well_inside(other, p.x, p.y))
+                            .map(|p| (j, *p))
+                    });
             if let Some((j, p)) = trespass {
                 return Err(format!(
                     "piece {i} keeps material at ({:.3}, {:.3}), which stands over piece {j}",
@@ -886,31 +887,28 @@ fn shrink(c: &Case, sig: &str) -> Case {
         if cells.len() <= 1 {
             break;
         }
-        let Some(smaller) = cells
-            .par_iter()
-            .find_map_first(|&victim| {
-                let kept: Vec<GridCell> = cells.iter().copied().filter(|&c| c != victim).collect();
-                if !edge_connected(&kept) {
-                    return None;
-                }
-                let pieces: Vec<Vec<GridCell>> = best
-                    .pieces
-                    .iter()
-                    .map(|p| p.iter().copied().filter(|&c| c != victim).collect())
-                    .filter(|p: &Vec<GridCell>| !p.is_empty())
-                    .collect();
-                if pieces.iter().any(|p| flood_parts(p, &[]).len() != 1) {
-                    return None;
-                }
-                let mut q = Case {
-                    pieces,
-                    ..best.clone()
-                };
-                q.params.bins[0].cells = kept;
-                prune_edges(&mut q);
-                same(&q).then_some(q)
-            })
-        else {
+        let Some(smaller) = cells.par_iter().find_map_first(|&victim| {
+            let kept: Vec<GridCell> = cells.iter().copied().filter(|&c| c != victim).collect();
+            if !edge_connected(&kept) {
+                return None;
+            }
+            let pieces: Vec<Vec<GridCell>> = best
+                .pieces
+                .iter()
+                .map(|p| p.iter().copied().filter(|&c| c != victim).collect())
+                .filter(|p: &Vec<GridCell>| !p.is_empty())
+                .collect();
+            if pieces.iter().any(|p| flood_parts(p, &[]).len() != 1) {
+                return None;
+            }
+            let mut q = Case {
+                pieces,
+                ..best.clone()
+            };
+            q.params.bins[0].cells = kept;
+            prune_edges(&mut q);
+            same(&q).then_some(q)
+        }) else {
             break;
         };
         best = smaller;
@@ -1224,8 +1222,6 @@ const TRIM_SECTION_CURVE: &str = "no closed-form section curve for a face the cu
 /// something else; `fuzz_tidy_inner_walls` itself keeps reporting it.
 const CROSSING_WALL_TILING: &str = "is not a tiling";
 
-
-
 /// An opening still costs its compartment the whole floor fillet. Down from
 /// 80/150 to 6/150 now that `fillet.rs` can cap a runout, and what is left is
 /// an inner wall's island clearance rather than the opening -- see
@@ -1332,7 +1328,7 @@ fn fuzz_stripped_polyominoes() {
         },
         150,
     )
-    .note();
+    .gate();
 }
 
 /// The split path through the web app's partition model: arbitrary connected

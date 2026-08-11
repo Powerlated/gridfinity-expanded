@@ -1090,6 +1090,20 @@ fn rebuild_loop(
                         "blend runout: capped end needs a straight edge into the corner (face {fi})"
                     ));
                 }
+                // The tangent point has to land *inside* the edge it splits. A
+                // blend wider than the run leaves it beyond the far end, and
+                // splitting there emits a stub that doubles back over the rest
+                // of the edge -- a loop no triangulation can tile. Refusing
+                // costs the chain a blend, which `fillet_best_effort` already
+                // treats as a corner left sharp.
+                let d = end - start;
+                let t = (p - start).dot(d) / d.length_squared();
+                if !(1e-4..=1.0 - 1e-4).contains(&t) {
+                    return Err(format!(
+                        "blend runout: capped end at {p:?} is not inside the edge it splits \
+                         ({start:?} -> {end:?})"
+                    ));
+                }
                 for (s, t) in [(start, p), (p, end)] {
                     let (vs, ve) = (b.vertex(s), b.vertex(t));
                     items.push(Emitted {

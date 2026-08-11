@@ -504,6 +504,14 @@ fn assert_tiles_the_loops(sc: &Scratch) {
     }
     for (&(u, v), &n) in &seen {
         let want_n = if want.contains(&(u, v)) { 1 } else { 2 };
+        if n != want_n && std::env::var("TILE_DIAG").is_ok() {
+            for &(a, b) in &sc.spans {
+                eprintln!("TILE loop:");
+                for i in a..b {
+                    eprintln!("   {i:2} {:?}", sc.pts3[i]);
+                }
+            }
+        }
         assert_eq!(
             n,
             want_n,

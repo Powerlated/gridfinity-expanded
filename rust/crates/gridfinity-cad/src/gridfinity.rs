@@ -630,6 +630,15 @@ struct OuterPiece {
 struct SharedWithPegs {
     sides: HashSet<GridEdge>,
     corners: HashSet<(i32, i32)>,
+    /// Lattice points some traversal left square. A **diagonal pinch** -- two
+    /// cells meeting only at a corner, with both their shared neighbours absent
+    /// -- puts the outline through the same point twice, and the two visits can
+    /// disagree about rounding it when an opening runs into one of them. The
+    /// peg looks corners up by lattice point, so it would see the rounded visit
+    /// and weld its arc to an outline that squared the other one, leaving the
+    /// arc paired with nothing. A corner counts as shared only if *every* visit
+    /// rounded it.
+    squared: HashSet<(i32, i32)>,
 }
 
 fn author_outer_loop(
@@ -725,6 +734,7 @@ fn author_outer_loop(
                 edge: None,
             });
         } else {
+            shared.squared.insert(s.to);
             let q = mm(s.to) + nrm * ins + n1 * ins_next;
             pieces.push(OuterPiece {
                 seg: Seg::Line { a: start, b: q },
@@ -817,15 +827,22 @@ impl OuterLoops {
     /// the wall above starts or stops. Without it the base emits one long edge
     /// across a span the floor and the wall above have already divided, and
     /// nothing pairs with it.
-    fn split_outline_at(&mut self, p: Vec2, peg_splits: &mut HashMap<GridEdge, Vec<f32>>) {
+    fn split_outline_at(
+        &mut self,
+        p: Vec2,
+        peg_splits: &mut HashMap<GridEdge, Vec<f32>>,
+        peg_arcs: &mut Vec<Vec2>,
+    ) {
         for li in 0..self.loops.len() {
-            if self.loops[li]
+            let hit = self.loops[li]
                 .iter()
-                .any(|pc| point_seg_distance(p, &pc.seg) < W_EPS)
-            {
-                self.split_at(li, p, peg_splits);
-                return;
+                .find(|pc| point_seg_distance(p, &pc.seg) < W_EPS);
+            let Some(pc) = hit else { continue };
+            if pc.shared && matches!(pc.seg, Seg::Arc { .. }) {
+                peg_arcs.push(p);
             }
+            self.split_at(li, p, peg_splits);
+            return;
         }
     }
 
@@ -869,8 +886,22 @@ impl OuterLoops {
                         return;
                     }
                     (
-                        Seg::Arc { a, b: p, center, radius, a0, a1: t },
-                        Seg::Arc { a: p, b, center, radius, a0: t, a1 },
+                        Seg::Arc {
+                            a,
+                            b: p,
+                            center,
+                            radius,
+                            a0,
+                            a1: t,
+                        },
+                        Seg::Arc {
+                            a: p,
+                            b,
+                            center,
+                            radius,
+                            a0: t,
+                            a1,
+                        },
                     )
                 }
             };
@@ -893,7 +924,6 @@ impl OuterLoops {
         }
         panic!("open-face pinch point {p:?} is not on the outer loop");
     }
-
 }
 
 struct CavityLoop {
@@ -931,6 +961,25 @@ fn seg_mid(seg: &Seg) -> Vec2 {
     }
 }
 
+/// Drop segments a boolean left with coincident endpoints.
+///
+/// A region sweep can cut a run twice at what is the same point in f32 and hand
+/// back a hair between the two cuts. The loop stays continuous without it --
+/// the neighbours already meet there -- and `build::wall_between` takes a
+/// segment's plane normal from the quad it sweeps, so a zero-length one gives a
+/// zero normal and no plane at all.
+fn drop_degenerate(loops: Vec<Vec<Seg>>) -> Vec<Vec<Seg>> {
+    loops
+        .into_iter()
+        .map(|l| {
+            l.into_iter()
+                .filter(|sg| (sg.end() - sg.start()).length() > W_EPS)
+                .collect::<Vec<Seg>>()
+        })
+        .filter(|l| l.len() >= 3)
+        .collect()
+}
+
 fn outline_region(o: &OuterLoops) -> Vec<Vec<Seg>> {
     o.loops
         .iter()
@@ -961,11 +1010,14 @@ fn on_outline(outline: &[Vec<Seg>], p: Vec2) -> bool {
 /// outline walks that did not compose. The boolean has no such cases -- it is
 /// the same computation the cavity is traced by.
 fn clip_cavity_to_outline(shape: &[Seg], outline: &[Vec<Seg>]) -> Vec<CavityLoop> {
-    region_intersection(&[shape.to_vec()], outline)
+    drop_degenerate(region_intersection(&[shape.to_vec()], outline))
         .into_iter()
         .filter(|l| loop_area(l) > 0.0)
         .map(|segs| {
-            let coincident = segs.iter().map(|sg| on_outline(outline, seg_mid(sg))).collect();
+            let coincident = segs
+                .iter()
+                .map(|sg| on_outline(outline, seg_mid(sg)))
+                .collect();
             CavityLoop { segs, coincident }
         })
         .collect()
@@ -1111,10 +1163,20 @@ fn peg_seg_free(s: &Seg, c: GridCell, shared: &SharedWithPegs) -> bool {
     }
 }
 
+/// Split a peg ring so its edges weld to whatever the outer profile was cut at.
+///
+/// A straight run is cut by *station* -- an absolute coordinate, which lands on
+/// every ring because they are concentric. A corner is cut by **angle** about
+/// the corner's centre, which works for the same reason and is what the three
+/// rings sharing one corner axis buys: `PEG_R_MID` is chosen so all three
+/// corner arcs are coaxial, so one angle names the same place on each. A point
+/// is matched to its corner by its distance from that centre, since two corners
+/// of the same ring can otherwise claim the same angle.
 fn split_peg_profile(
     segs: Vec<Seg>,
     c: GridCell,
     splits: &HashMap<GridEdge, Vec<f32>>,
+    arc_points: &[Vec2],
 ) -> Vec<Seg> {
     let [west, east, south, north] = cell_edges(c);
     let cx = (c.x as f32 + 0.5) * GRID_PITCH;
@@ -1122,6 +1184,65 @@ fn split_peg_profile(
     let mut out = Vec::with_capacity(segs.len());
     for s in segs {
         let Seg::Line { a, b } = s else {
+            if let Seg::Arc {
+                a,
+                b,
+                center,
+                radius,
+                a0,
+                a1,
+            } = s
+            {
+                let (lo, hi) = (a0.min(a1), a0.max(a1));
+                let mut cuts: Vec<f32> = arc_points
+                    .iter()
+                    .filter(|p| ((**p - center).length() - OUTER_R).abs() < W_EPS)
+                    .map(|p| {
+                        let mut t = (p.y - center.y).atan2(p.x - center.x);
+                        while t < lo - 1e-4 {
+                            t += std::f32::consts::TAU;
+                        }
+                        while t > hi + 1e-4 {
+                            t -= std::f32::consts::TAU;
+                        }
+                        t
+                    })
+                    .filter(|t| *t > lo + 1e-4 && *t < hi - 1e-4)
+                    .collect();
+                if cuts.is_empty() {
+                    out.push(s);
+                    continue;
+                }
+                if a1 >= a0 {
+                    cuts.sort_by(f32::total_cmp);
+                } else {
+                    cuts.sort_by(|x, y| y.total_cmp(x));
+                }
+                cuts.dedup_by(|x, y| (*x - *y).abs() < 1e-4);
+                let at = |t: f32| center + Vec2::new(t.cos(), t.sin()) * radius;
+                let (mut prev_p, mut prev_t) = (a, a0);
+                for t in cuts {
+                    out.push(Seg::Arc {
+                        a: prev_p,
+                        b: at(t),
+                        center,
+                        radius,
+                        a0: prev_t,
+                        a1: t,
+                    });
+                    prev_p = at(t);
+                    prev_t = t;
+                }
+                out.push(Seg::Arc {
+                    a: prev_p,
+                    b,
+                    center,
+                    radius,
+                    a0: prev_t,
+                    a1,
+                });
+                continue;
+            }
             out.push(s);
             continue;
         };
@@ -1310,9 +1431,17 @@ fn plan_piece(
         .iter()
         .map(|steps| author_outer_loop(steps, &inset, &walled, &mut shared))
         .collect();
+    shared.corners = shared
+        .corners
+        .difference(&shared.squared)
+        .copied()
+        .collect();
     let mut o = OuterLoops::new(outer_loops);
     let spans = open_spans(cells, &walls);
     let mut peg_splits: HashMap<GridEdge, Vec<f32>> = HashMap::new();
+    // Corner cuts, kept as points: a corner has no station, and the ring it
+    // welds to is found by distance from the corner's own centre.
+    let mut peg_arcs: Vec<Vec2> = Vec::new();
 
     let wt = if openish {
         p.wall_thickness.max(0.4).min(PEG_TANGENT - 0.6)
@@ -1394,7 +1523,7 @@ fn plan_piece(
         let cls = if openish {
             let cls = clip_cavity_to_outline(&shape, &outline);
             if cls.iter().any(|c| c.touched()) {
-                opened.push(shape);
+                opened.push(shape.clone());
             }
             cls
         } else {
@@ -1405,211 +1534,213 @@ fn plan_piece(
             "a cavity loop vanished when clipped to the bin outline"
         );
         for cl in cls {
-        let islands: Vec<Island> = holes_of(ol)
-            .iter()
-            .map(|il| Island {
-                segs: shape_cavity_loop(il, rc, fr),
-                top: None,
-                fr: 0.0,
-            })
-            .collect();
-        // A sloped bin takes no free-form inner wall at all. The wall is carved
-        // out of the cavity as a z-prism island whose bottom ring sits at a
-        // flat `floor_z`, but a sloped floor is a tilted plane, so the island's
-        // bottom edges do not lie on the floor they meet -- `audit` reports
-        // `EdgeOnSurface` and `EdgeVertexGeometry` in equal numbers, and a
-        // plain straight divider is as broken as a diagonal one. Dropping the
-        // wall is what the partial-height branch below already does on a slope;
-        // doing it here too means a sloped bin builds without its dividers
-        // rather than failing outright.
-        let full_walls: Vec<Vec<Seg>> = if slope.is_some() {
-            Vec::new()
-        } else {
-            p.inner_walls
+            let islands: Vec<Island> = holes_of(ol)
                 .iter()
-                .filter(|w| w.height.is_none_or(|h| h >= cavity_depth))
-                .filter_map(|w| inner_wall_quad_in(w, fr, &cl.segs))
-                .collect()
-        };
-        let mut entries: Vec<(CavityLoop, Vec<Island>, Option<Banded>)> = Vec::new();
-        if cl.touched() || full_walls.is_empty() {
-            entries.push((cl, islands.clone(), None));
-        } else {
-            let mut region: Vec<Vec<Seg>> = vec![cl.segs.clone()];
-            region.extend(islands.iter().map(|il| reverse_loop(&il.segs)));
-            for q in &full_walls {
-                region = region_difference(&region, std::slice::from_ref(q));
-            }
-            let mut outs: Vec<(Vec<Seg>, Vec<Island>)> = Vec::new();
-            let mut hole_loops: Vec<Vec<Seg>> = Vec::new();
-            for lp in region {
-                let lp = round_sharp_corners(&lp, rc, fr);
-                if loop_area(&lp) > 0.0 {
-                    outs.push((lp, Vec::new()));
-                } else {
-                    hole_loops.push(lp);
+                .map(|il| Island {
+                    segs: shape_cavity_loop(il, rc, fr),
+                    top: None,
+                    fr: 0.0,
+                })
+                .collect();
+            // A sloped bin takes no free-form inner wall at all. The wall is carved
+            // out of the cavity as a z-prism island whose bottom ring sits at a
+            // flat `floor_z`, but a sloped floor is a tilted plane, so the island's
+            // bottom edges do not lie on the floor they meet -- `audit` reports
+            // `EdgeOnSurface` and `EdgeVertexGeometry` in equal numbers, and a
+            // plain straight divider is as broken as a diagonal one. Dropping the
+            // wall is what the partial-height branch below already does on a slope;
+            // doing it here too means a sloped bin builds without its dividers
+            // rather than failing outright.
+            let full_walls: Vec<Vec<Seg>> = if slope.is_some() {
+                Vec::new()
+            } else {
+                p.inner_walls
+                    .iter()
+                    .filter(|w| w.height.is_none_or(|h| h >= cavity_depth))
+                    .filter_map(|w| inner_wall_quad_in(w, fr, &cl.segs))
+                    .collect()
+            };
+            let mut entries: Vec<(CavityLoop, Vec<Island>, Option<Banded>)> = Vec::new();
+            if cl.touched() || full_walls.is_empty() {
+                entries.push((cl, islands.clone(), None));
+            } else {
+                let mut region: Vec<Vec<Seg>> = vec![cl.segs.clone()];
+                region.extend(islands.iter().map(|il| reverse_loop(&il.segs)));
+                for q in &full_walls {
+                    region = region_difference(&region, std::slice::from_ref(q));
                 }
-            }
-            for h in hole_loops {
-                let pt = h[0].start();
-                let mut best: Option<usize> = None;
-                for (i, (o, _)) in outs.iter().enumerate() {
-                    if point_in_segs(pt, o)
-                        && best.is_none_or(|bi| loop_area(o).abs() < loop_area(&outs[bi].0).abs())
-                    {
-                        best = Some(i);
+                let mut outs: Vec<(Vec<Seg>, Vec<Island>)> = Vec::new();
+                let mut hole_loops: Vec<Vec<Seg>> = Vec::new();
+                for lp in region {
+                    let lp = round_sharp_corners(&lp, rc, fr);
+                    if loop_area(&lp) > 0.0 {
+                        outs.push((lp, Vec::new()));
+                    } else {
+                        hole_loops.push(lp);
                     }
                 }
-                if let Some(bi) = best {
-                    outs[bi].1.push(Island {
-                        segs: reverse_loop(&h),
-                        top: None,
-                        fr: 0.0,
-                    });
+                for h in hole_loops {
+                    let pt = h[0].start();
+                    let mut best: Option<usize> = None;
+                    for (i, (o, _)) in outs.iter().enumerate() {
+                        if point_in_segs(pt, o)
+                            && best
+                                .is_none_or(|bi| loop_area(o).abs() < loop_area(&outs[bi].0).abs())
+                        {
+                            best = Some(i);
+                        }
+                    }
+                    if let Some(bi) = best {
+                        outs[bi].1.push(Island {
+                            segs: reverse_loop(&h),
+                            top: None,
+                            fr: 0.0,
+                        });
+                    }
+                }
+                for (o, isls) in outs {
+                    entries.push((CavityLoop::untouched(o), isls, None));
                 }
             }
-            for (o, isls) in outs {
-                entries.push((CavityLoop::untouched(o), isls, None));
-            }
-        }
-        let partial_walls: Vec<(&InnerWall, Vec<Seg>, f32)> = p
-            .inner_walls
-            .iter()
-            .filter_map(|w| {
-                let h = w.height?;
-                if h >= cavity_depth {
-                    return None;
-                }
-                Some((w, inner_wall_quad(w, 0.0)?, floor_z + h.max(0.5)))
-            })
-            .collect();
-        'walls: for &(w, ref q, t) in &partial_walls {
-            for (ecl, eisl, band) in &mut entries {
-                if ecl.touched() {
-                    continue;
-                }
-                let corners: Vec<Vec2> = q.iter().map(|s| s.start()).collect();
-                let n_in = corners
-                    .iter()
-                    .filter(|&&c| point_in_segs(c, &ecl.segs))
-                    .count();
-                if n_in == 0 {
-                    continue;
-                }
-                let clear = corners
-                    .iter()
-                    .all(|&c| eisl.iter().all(|il| !point_in_segs(c, &il.segs)));
-                if !clear {
-                    continue 'walls;
-                }
-                if n_in == corners.len() {
-                    let rounded = inner_wall_quad(w, fr).expect("non-degenerate (filtered above)");
-                    eisl.push(Island {
-                        segs: rounded,
-                        top: Some(t),
-                        fr: 0.0,
+            let partial_walls: Vec<(&InnerWall, Vec<Seg>, f32)> = p
+                .inner_walls
+                .iter()
+                .filter_map(|w| {
+                    let h = w.height?;
+                    if h >= cavity_depth {
+                        return None;
+                    }
+                    Some((w, inner_wall_quad(w, 0.0)?, floor_z + h.max(0.5)))
+                })
+                .collect();
+            'walls: for &(w, ref q, t) in &partial_walls {
+                for (ecl, eisl, band) in &mut entries {
+                    if ecl.touched() {
+                        continue;
+                    }
+                    let corners: Vec<Vec2> = q.iter().map(|s| s.start()).collect();
+                    let n_in = corners
+                        .iter()
+                        .filter(|&&c| point_in_segs(c, &ecl.segs))
+                        .count();
+                    if n_in == 0 {
+                        continue;
+                    }
+                    let clear = corners
+                        .iter()
+                        .all(|&c| eisl.iter().all(|il| !point_in_segs(c, &il.segs)));
+                    if !clear {
+                        continue 'walls;
+                    }
+                    if n_in == corners.len() {
+                        let rounded =
+                            inner_wall_quad(w, fr).expect("non-degenerate (filtered above)");
+                        eisl.push(Island {
+                            segs: rounded,
+                            top: Some(t),
+                            fr: 0.0,
+                        });
+                        continue 'walls;
+                    }
+                    if slope.is_some() {
+                        continue 'walls;
+                    }
+                    let bd = band.get_or_insert_with(|| Banded {
+                        outline_a: vec![ecl.segs.iter().map(|&s| (s, None)).collect()],
+                        outline_b: ecl.segs.clone(),
+                        notches: Vec::new(),
                     });
-                    continue 'walls;
-                }
-                if slope.is_some() {
-                    continue 'walls;
-                }
-                let bd = band.get_or_insert_with(|| Banded {
-                    outline_a: vec![ecl.segs.iter().map(|&s| (s, None)).collect()],
-                    outline_b: ecl.segs.clone(),
-                    notches: Vec::new(),
-                });
-                let ni = bd.notches.len();
-                let qa: Vec<Vec<(Seg, Option<usize>)>> =
-                    vec![q.iter().map(|&s| (s, Some(ni))).collect()];
-                let sa = split_regions(&bd.outline_a, &qa);
-                if sa.b_inside.is_empty() || sa.a_inside.is_empty() {
-                    continue 'walls;
-                }
-                let mut kept = sa.a_outside.clone();
-                kept.extend(sa.b_inside.iter().map(|&(s, t)| (s.reversed(), t)));
-                bd.outline_a = chain_loops(kept);
-                let ob: Vec<Vec<(Seg, ())>> = vec![
-                    std::mem::take(&mut bd.outline_b)
+                    let ni = bd.notches.len();
+                    let qa: Vec<Vec<(Seg, Option<usize>)>> =
+                        vec![q.iter().map(|&s| (s, Some(ni))).collect()];
+                    let sa = split_regions(&bd.outline_a, &qa);
+                    if sa.b_inside.is_empty() || sa.a_inside.is_empty() {
+                        continue 'walls;
+                    }
+                    let mut kept = sa.a_outside.clone();
+                    kept.extend(sa.b_inside.iter().map(|&(s, t)| (s.reversed(), t)));
+                    bd.outline_a = chain_loops(kept);
+                    let ob: Vec<Vec<(Seg, ())>> = vec![
+                        std::mem::take(&mut bd.outline_b)
+                            .into_iter()
+                            .map(|s| (s, ()))
+                            .collect(),
+                    ];
+                    let qb: Vec<Vec<(Seg, ())>> = vec![q.iter().map(|&s| (s, ())).collect()];
+                    let sb = split_regions(&ob, &qb);
+                    let mut b_all = sb.a_outside;
+                    b_all.extend(sb.a_inside);
+                    bd.outline_b = chain_loops(b_all)
+                        .pop()
+                        .unwrap_or_else(|| ob[0].clone())
                         .into_iter()
-                        .map(|s| (s, ()))
-                        .collect(),
-                ];
-                let qb: Vec<Vec<(Seg, ())>> = vec![q.iter().map(|&s| (s, ())).collect()];
-                let sb = split_regions(&ob, &qb);
-                let mut b_all = sb.a_outside;
-                b_all.extend(sb.a_inside);
-                bd.outline_b = chain_loops(b_all)
-                    .pop()
-                    .unwrap_or_else(|| ob[0].clone())
-                    .into_iter()
-                    .map(|(s, _)| s)
-                    .collect();
-                bd.notches.push(Notch {
-                    quad: q.clone(),
-                    contact: sa.a_inside.into_iter().map(|(s, _)| s).collect(),
-                    top: t,
-                });
-                continue 'walls;
-            }
-        }
-        let clamp = |segs: &[Seg], ball_inside_convex: bool, loop_fr: &mut f32| {
-            for s in segs {
-                if let Seg::Arc { radius, .. } = s {
-                    if *radius < *loop_fr + MIN_TORUS_MAJOR
-                        && is_convex_arc(segs, s) == ball_inside_convex
-                    {
-                        *loop_fr = (*radius - MIN_TORUS_MAJOR).max(0.0);
-                    }
+                        .map(|(s, _)| s)
+                        .collect();
+                    bd.notches.push(Notch {
+                        quad: q.clone(),
+                        contact: sa.a_inside.into_iter().map(|(s, _)| s).collect(),
+                        top: t,
+                    });
+                    continue 'walls;
                 }
             }
-        };
-        // A sharp corner terminates a blend chain rather than continuing it, so
-        // a loop carrying one takes no fillet -- except when the corner is the
-        // pinch a wall opening leaves, where the chain runs out onto the mouth
-        // and the rest of the compartment keeps its rounding. See `fillet.rs`'s
-        // capped runout.
-        let sharp_kills = |segs: &[Seg]| fr > 0.0 && has_sharp_corner(segs);
-        for (cl, mut islands, banded) in entries {
-            let mut loop_fr = fr;
-            clamp(&cl.segs, true, &mut loop_fr);
-            if !cl.touched() && sharp_kills(&cl.segs) {
-                loop_fr = 0.0;
-            }
-            for isl in &islands {
-                if !island_clears(&isl.segs, &cl.segs, loop_fr) {
+            let clamp = |segs: &[Seg], ball_inside_convex: bool, loop_fr: &mut f32| {
+                for s in segs {
+                    if let Seg::Arc { radius, .. } = s {
+                        if *radius < *loop_fr + MIN_TORUS_MAJOR
+                            && is_convex_arc(segs, s) == ball_inside_convex
+                        {
+                            *loop_fr = (*radius - MIN_TORUS_MAJOR).max(0.0);
+                        }
+                    }
+                }
+            };
+            // A sharp corner terminates a blend chain rather than continuing it, so
+            // a loop carrying one takes no fillet -- except when the corner is the
+            // pinch a wall opening leaves, where the chain runs out onto the mouth
+            // and the rest of the compartment keeps its rounding. See `fillet.rs`'s
+            // capped runout.
+            let sharp_kills = |segs: &[Seg]| fr > 0.0 && has_sharp_corner(segs);
+            for (cl, mut islands, banded) in entries {
+                let mut loop_fr = fr;
+                clamp(&cl.segs, true, &mut loop_fr);
+                if !cl.touched() && sharp_kills(&cl.segs) {
                     loop_fr = 0.0;
                 }
-            }
-            for isl in &mut islands {
-                let mut island_fr = fr;
-                clamp(&isl.segs, false, &mut island_fr);
-                if sharp_kills(&isl.segs) {
-                    island_fr = 0.0;
+                for isl in &islands {
+                    if !island_clears(&isl.segs, &cl.segs, loop_fr) {
+                        loop_fr = 0.0;
+                    }
                 }
-                if !island_clears(&isl.segs, &cl.segs, island_fr + loop_fr) {
-                    island_fr = 0.0;
+                for isl in &mut islands {
+                    let mut island_fr = fr;
+                    clamp(&isl.segs, false, &mut island_fr);
+                    if sharp_kills(&isl.segs) {
+                        island_fr = 0.0;
+                    }
+                    if !island_clears(&isl.segs, &cl.segs, island_fr + loop_fr) {
+                        island_fr = 0.0;
+                    }
+                    isl.fr = island_fr;
                 }
-                isl.fr = island_fr;
-            }
-            if banded.is_some() {
-                loop_fr = 0.0;
-            }
-            if std::env::var("DIAG_LOOP").is_ok() {
-                eprintln!(
-                    "loop_fr={loop_fr} segs={} islands={}",
-                    cl.segs.len(),
-                    islands.len()
-                );
-                let n = cl.segs.len();
-                for i in 0..n {
-                    let o = seg_tangent(&cl.segs[i], true);
-                    let v = seg_tangent(&cl.segs[(i + 1) % n], false);
-                    eprintln!("   {i:2} {:?} -> dot {:.5}", cl.segs[i], o.dot(v));
+                if banded.is_some() {
+                    loop_fr = 0.0;
                 }
+                if std::env::var("DIAG_LOOP").is_ok() {
+                    eprintln!(
+                        "loop_fr={loop_fr} segs={} islands={}",
+                        cl.segs.len(),
+                        islands.len()
+                    );
+                    let n = cl.segs.len();
+                    for i in 0..n {
+                        let o = seg_tangent(&cl.segs[i], true);
+                        let v = seg_tangent(&cl.segs[(i + 1) % n], false);
+                        eprintln!("   {i:2} {:?} -> dot {:.5}", cl.segs[i], o.dot(v));
+                    }
+                }
+                planned.push((cl, islands, loop_fr, banded));
             }
-            planned.push((cl, islands, loop_fr, banded));
-        }
         }
     }
 
@@ -1617,9 +1748,21 @@ fn plan_piece(
     // of it. A compartment that keeps all its walls is left solid here and
     // carved by its own cavity stack, exactly as before.
     let wall_loops = if openish {
-        let w = region_difference(&outline, &opened);
+        // One compartment at a time. Taken together the raw shapes are not a
+        // region a difference can subtract -- each runs out to the pitch line
+        // at its openings, so two compartments facing the same empty cell
+        // overlap out there -- and clipping them first only trades that for a
+        // pair of long runs coincident with the outline, which the sweep
+        // resolves to nothing at all. Unioning them first is worse still: it
+        // merges the compartments the divider between them is supposed to keep
+        // apart. Subtracting one at a time asks the boolean for none of it.
+        let mut w = outline.clone();
+        for shape in &opened {
+            w = region_difference(&w, &[shape.clone()]);
+        }
+        let w = drop_degenerate(w);
         for p in w.iter().flatten().map(|sg| sg.start()) {
-            o.split_outline_at(p, &mut peg_splits);
+            o.split_outline_at(p, &mut peg_splits, &mut peg_arcs);
         }
         w
     } else {
@@ -1633,9 +1776,24 @@ fn plan_piece(
         .map(|&c| {
             (
                 c,
-                split_peg_profile(peg_profile(c, PEG_W_BOTTOM, PEG_R_BOTTOM), c, &peg_splits),
-                split_peg_profile(peg_profile(c, PEG_W_MID, PEG_R_MID), c, &peg_splits),
-                split_peg_profile(peg_profile(c, PEG_W_TOP, OUTER_R), c, &peg_splits),
+                split_peg_profile(
+                    peg_profile(c, PEG_W_BOTTOM, PEG_R_BOTTOM),
+                    c,
+                    &peg_splits,
+                    &peg_arcs,
+                ),
+                split_peg_profile(
+                    peg_profile(c, PEG_W_MID, PEG_R_MID),
+                    c,
+                    &peg_splits,
+                    &peg_arcs,
+                ),
+                split_peg_profile(
+                    peg_profile(c, PEG_W_TOP, OUTER_R),
+                    c,
+                    &peg_splits,
+                    &peg_arcs,
+                ),
             )
         })
         .collect();

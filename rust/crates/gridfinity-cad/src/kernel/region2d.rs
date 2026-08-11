@@ -5,6 +5,18 @@ use crate::kernel::sketch::{Aabb, Seg, loop_area, point_in_segs};
 
 const EPS: f32 = 1e-4;
 
+/// Shortest piece a split is allowed to leave behind, in millimetres. A cut
+/// nearer than this to an end of the segment it lands on is dropped and the
+/// existing vertex stands in for it. It has to exceed `EPS` -- the distance
+/// `chain_loops` welds endpoints with -- or a split can leave a piece whose two
+/// ends weld to each other. It matches the 1e-3 `on_seg` accepts as "on".
+const SLIVER: f32 = 1e-3;
+
+const _: () = assert!(
+    SLIVER > EPS,
+    "a split may not leave a piece shorter than the distance chain_loops welds endpoints with"
+);
+
 const BOX_TOL: f32 = 1e-2;
 
 const _: () = assert!(
@@ -430,9 +442,16 @@ fn seg_mid(seg: &Seg) -> Vec2 {
 fn split_seg(seg: &Seg, cuts: &mut Vec<(f32, Vec2)>) -> Vec<Seg> {
     match *seg {
         Seg::Line { a, b } => {
-            cuts.retain(|&(t, _)| (EPS..=1.0 - EPS).contains(&t));
+            // The margin is a distance, not a fraction. A parametric epsilon is
+            // generous on a long segment and vanishing on a short one, and a cut
+            // a fraction of a micron in from a vertex leaves a sliver shorter
+            // than the tolerance `chain_loops` welds endpoints with -- the two
+            // regions then disagree about where that vertex is and the chain
+            // breaks. The arc branch below already measures in arc length.
+            let margin = SLIVER / (b - a).length().max(1e-6);
+            cuts.retain(|&(t, _)| (margin..=1.0 - margin).contains(&t));
             cuts.sort_by(|x, y| x.0.total_cmp(&y.0));
-            cuts.dedup_by(|x, y| (x.0 - y.0).abs() < EPS);
+            cuts.dedup_by(|x, y| (x.0 - y.0).abs() < margin);
             let mut out = Vec::with_capacity(cuts.len() + 1);
             let mut prev = a;
             for &(_, p) in cuts.iter() {
@@ -453,7 +472,7 @@ fn split_seg(seg: &Seg, cuts: &mut Vec<(f32, Vec2)>) -> Vec<Seg> {
             let fwd = a1 >= a0;
             let (lo, hi) = (a0.min(a1), a0.max(a1));
             let span = (hi - lo).max(1e-9);
-            let aeps = EPS.max(1e-3 / radius.max(1e-3));
+            let aeps = EPS.max(SLIVER / radius.max(1e-3));
             cuts.retain(|&(t, _)| t > lo + aeps * span.min(1.0) && t < hi - aeps * span.min(1.0));
             if fwd {
                 cuts.sort_by(|x, y| x.0.total_cmp(&y.0));
@@ -572,6 +591,37 @@ mod tests {
             (lhs - rhs).abs() < 1e-2,
             "area not conserved: {lhs} vs {rhs}"
         );
+    }
+
+    /// A vertex the two regions already agree on, but which sits a fraction of
+    /// a micron off the curve it is supposed to lie on, makes the sweep find a
+    /// "crossing" a hair in from the end of the segment beside it. Splitting
+    /// there leaves a piece shorter than the distance `chain_loops` welds
+    /// endpoints with, and the two regions stop agreeing about where that
+    /// vertex is -- the chain then runs off the end and the whole difference
+    /// comes back empty. The cut has to be dropped in favour of the vertex.
+    #[test]
+    fn a_crossing_a_hair_from_a_vertex_does_not_split_off_a_sliver() {
+        let mut cuts = vec![(1.8e-4 / 1.0, Vec2::new(9.99982, 0.0))];
+        let pieces = split_seg(
+            &Seg::Line {
+                a: Vec2::new(10.0, 0.0),
+                b: Vec2::new(9.0, 0.0),
+            },
+            &mut cuts,
+        );
+        assert_eq!(pieces.len(), 1, "sliver split: {pieces:?}");
+
+        // Far enough in, the same cut is a real one.
+        let mut cuts = vec![(0.5, Vec2::new(9.5, 0.0))];
+        let pieces = split_seg(
+            &Seg::Line {
+                a: Vec2::new(10.0, 0.0),
+                b: Vec2::new(9.0, 0.0),
+            },
+            &mut cuts,
+        );
+        assert_eq!(pieces.len(), 2, "real split lost: {pieces:?}");
     }
 
     #[test]
