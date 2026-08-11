@@ -3,6 +3,11 @@ use crate::kernel::math::Vec3;
 use crate::kernel::topo::{Builder, EdgeId, Solid};
 use std::collections::HashMap;
 
+/// A face whose analytic normal evaluates to NaN at one of a blended edge's
+/// endpoints. Pre-existing and undiagnosed; `fuzz_stripped_polyominoes` is what
+/// reaches it. See `rust/CLAUDE.md`.
+pub const NON_FINITE_NORMAL: &str = "blend: face normal is not finite";
+
 #[derive(Clone, Copy)]
 struct CurvEdge {
     curve: Curve,
@@ -235,6 +240,17 @@ fn fillet_edges_with(
         };
         let (na0, nb0) = (face_outward(fa, p0), face_outward(fb, p0));
         let (na1, nb1) = (face_outward(fa, p1), face_outward(fb, p1));
+        // A non-finite normal poisons everything downstream -- `sin.max(1e-9)`
+        // keeps a NaN cross product from being caught, the ball centre comes out
+        // NaN, and the failure only surfaces much later as a non-finite vertex
+        // in the builder. Name the surface that produced it instead.
+        for (which, fid, n) in [(0, fa, na0), (0, fb, nb0), (1, fa, na1), (1, fb, nb1)] {
+            assert!(
+                n.is_finite(),
+                "{NON_FINITE_NORMAL}: face {fid} at edge {e}'s v{which} ({n:?}), surface {:?}",
+                solid.faces[fid].surface
+            );
+        }
         let (ma0, mb0) = (s * na0, s * nb0);
         let (ma1, mb1) = (s * na1, s * nb1);
         let sin0 = ma0.cross(mb0).length().max(1e-9);

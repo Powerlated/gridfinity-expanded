@@ -56,6 +56,15 @@ pub enum Surface {
 
 impl Surface {
     pub fn plane(origin: Vec3, normal: Vec3) -> Surface {
+        // `normalize` on a zero or non-finite vector yields NaN, and a plane
+        // carrying a NaN normal is accepted everywhere: `sin.max(1e-9)` hides
+        // it in the blend, and it surfaces much later as a non-finite vertex in
+        // the builder. Refuse it where it is made, so the caller that computed
+        // the degenerate direction is the one named.
+        assert!(
+            normal.is_finite() && normal.length_squared() > 1e-24,
+            "plane at {origin:?} has a degenerate normal {normal:?}"
+        );
         let normal = normal.normalize();
         let a = if normal.z.abs() < 0.9 {
             Vec3::Z

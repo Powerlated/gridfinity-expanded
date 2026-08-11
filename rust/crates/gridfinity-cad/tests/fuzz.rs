@@ -115,12 +115,26 @@ enum Split {
     Lines,
 }
 
+/// How much of a bin's perimeter wall is taken away.
+///
+/// The share matters on its own, not just whether there is an opening at all.
+/// One opening in a rectangle is a single pinch against a straight run; half a
+/// complex polyomino's perimeter puts openings either side of a reentrant
+/// corner, back to back along one run, and wrapped around a convex corner, all
+/// in the same bin.
+#[derive(Clone, Copy, PartialEq)]
+enum Openings {
+    None,
+    /// Numerator and denominator of the share of perimeter edges opened.
+    Share(u32, u32),
+}
+
 #[derive(Clone, Copy)]
 struct Options {
     shape: Shape,
     inner_walls: Walls,
-    /// Open some perimeter edges (a wall opening).
-    openings: bool,
+    /// How much of the perimeter wall is opened.
+    openings: Openings,
     /// Wall off some internal edges (a divider).
     dividers: bool,
     /// Vary height, thicknesses, radii and holes rather than taking defaults.
@@ -149,7 +163,7 @@ impl Default for Options {
         Options {
             shape: Shape::Fixed(2, 2),
             inner_walls: Walls::None,
-            openings: false,
+            openings: Openings::None,
             dividers: false,
             vary_params: false,
             slope: false,
@@ -378,8 +392,8 @@ fn gen_case(rng: &mut Rng, opts: Options) -> Case {
         })
         .collect();
 
-    if opts.openings {
-        params.open_edges = subset(rng, &perimeter_edges(&cells), 1, 4);
+    if let Openings::Share(num, den) = opts.openings {
+        params.open_edges = subset(rng, &perimeter_edges(&cells), num, den);
     }
     if opts.dividers {
         params.divider_edges = subset(rng, &internal_edges(&cells), 1, 3);
@@ -1210,6 +1224,8 @@ const TRIM_SECTION_CURVE: &str = "no closed-form section curve for a face the cu
 /// something else; `fuzz_tidy_inner_walls` itself keeps reporting it.
 const CROSSING_WALL_TILING: &str = "is not a tiling";
 
+
+
 /// An opening still costs its compartment the whole floor fillet. Down from
 /// 80/150 to 6/150 now that `fillet.rs` can cap a runout, and what is left is
 /// an inner wall's island clearance rather than the opening -- see
@@ -1260,7 +1276,7 @@ fn fuzz_wall_openings() {
     run(
         Options {
             shape: Shape::Rect,
-            openings: true,
+            openings: Openings::Share(1, 4),
             dividers: true,
             require_blends: true,
             ..Options::default()
@@ -1279,7 +1295,7 @@ fn fuzz_openings_and_inner_walls() {
         Options {
             shape: Shape::Rect,
             inner_walls: Walls::Tidy(1, 2),
-            openings: true,
+            openings: Openings::Share(1, 4),
             dividers: true,
             require_blends: true,
             known: &[CROSSING_WALL_TILING, OPENING_LOSES_FILLET],
@@ -1288,6 +1304,35 @@ fn fuzz_openings_and_inner_walls() {
         150,
     )
     .gate();
+}
+
+/// Half a complex polyomino's perimeter wall taken away.
+///
+/// The other opening profiles use `Shape::Rect` deliberately, so every run an
+/// opening pinches against is straight. This one gives up that guarantee on
+/// purpose: a polyomino has reentrant corners, and at a quarter of the
+/// perimeter most of them are never reached. At a half they are, along with the
+/// cases a single opening cannot produce -- two openings either side of one
+/// corner, a run of them meeting end to end, and an opening wrapped around a
+/// convex corner so the cavity leaves the outline on two sides at once.
+///
+/// It does not require blends. A reentrant corner is where the floor fillet
+/// legitimately degrades, so insisting on them here would assert the
+/// impossible; what this profile is for is that the bin still *builds*, stays
+/// manifold, audits clean and tessellates without leaks.
+#[test]
+fn fuzz_stripped_polyominoes() {
+    run(
+        Options {
+            shape: Shape::Polyomino,
+            openings: Openings::Share(1, 2),
+            dividers: true,
+            vary_params: true,
+            ..Options::default()
+        },
+        150,
+    )
+    .note();
 }
 
 /// The split path through the web app's partition model: arbitrary connected
@@ -1334,7 +1379,7 @@ fn fuzz_params_broad() {
         Options {
             shape: Shape::SmallRect,
             inner_walls: Walls::Freeform(0, 2),
-            openings: true,
+            openings: Openings::Share(1, 4),
             dividers: true,
             vary_params: true,
             slope: true,

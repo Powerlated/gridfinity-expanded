@@ -123,6 +123,12 @@ feature it covers — the four-way divergence this replaced had `fuzz_split_piec
 counts, trespass and cut-plane gaps that `fuzz_bin_shapes` never applied to the same solids, and a
 repro printer that printed neither `open_edges` nor `split_lines`.
 
+`Openings` is a *share* of the perimeter, not a flag, because the share is itself a variable: one
+opening in a rectangle is a single pinch against a straight run, while half a polyomino's perimeter
+puts openings either side of a reentrant corner, back to back along one run, and wrapped around a
+convex corner, all in the same bin. `Openings::Share(1, 4)` is what the three asserting opening
+profiles use; `Share(1, 2)` is `fuzz_stripped_polyominoes`.
+
 `Options` names what a case *generates* (`Shape`, `Walls`, `openings`, `dividers`, `vary_params`,
 `slope`, `baseplate`, `Split`) and what it *insists on* (`require_blends`, `known`). Two of those
 knobs exist because a checker cannot tell an over-ask from a defect on its own:
@@ -148,6 +154,7 @@ knobs exist because a checker cannot tell an over-ask from a defect on its own:
 | `fuzz_openings_and_inner_walls` | both of the above at once, `require_blends` | asserts |
 | `fuzz_bin_shapes` | polyominoes, flood-fill pieces | asserts |
 | `fuzz_split_pieces` | polyominoes, `SplitLine`s + `partition_cells` | asserts |
+| `fuzz_stripped_polyominoes` | polyominoes with **half** the perimeter wall opened | reports |
 | `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | reports |
 
 **Wall openings were never fuzzed before.** `open_edges` flows to `layout::effective_walls` and an
@@ -316,6 +323,29 @@ Defects this rewrite found, all pre-existing and none diagnosed:
   group between runs, moving counts (13 vs 14 distinct defects at 2000 cases). `tessellation_leaks`
   builds its `Vec` by iterating a `HashMap`, and `TessLeak`'s `Debug` carries `faces: [..]`, so the
   message a case fails with is hash-ordered. The gating profiles are stable across five runs.
+
+**`fuzz_stripped_polyominoes` reports rather than gates, and it found four undiagnosed classes on
+its first run.** Half a complex polyomino's perimeter is the first thing to reach openings meeting a
+reentrant corner in quantity: 66/150 cases fail, 42 of them the two documented open-run panics
+(`open-run neighbour must be straight`, `no pinch for run`). It does not `require_blends` -- a
+reentrant corner is where the floor fillet legitimately degrades -- so what it holds is that the bin
+builds, stays manifold, audits clean and tessellates without leaks. The rest:
+
+- **21 cases hand the triangulator a face whose loops do not tile**, in two shapes: a boundary edge
+  in 2 triangles where 1 is wanted, and an interior edge in 4 where 2 are wanted. The same assert as
+  `CROSSING_WALL_TILING`, reached through openings rather than crossing walls.
+- **2 cases leave an edge unpaired** (`used fwd=0 bwd=1`).
+- **1 case builds a `Plane` from a zero-length normal.** That one is now caught where it is made
+  rather than four layers downstream: `Surface::plane` asserts its normal is finite and non-zero,
+  because `normalize` on a zero vector yields NaN, `sin.max(1e-9)` then hides the NaN inside the
+  blend's ball-centre solve, and it only surfaced as `vertex at a non-finite point` in the builder.
+  `fillet_edges_with` asserts the same of each blended edge's four face normals, so a NaN arriving
+  from anywhere else is named too.
+
+All four were verified **pre-existing** by running the shrunk repros against `749a3a5`, the tree
+before this session's kernel work: they are configurations nothing had fuzzed before, not
+regressions. They are deliberately *not* in `known` -- masking four broad signatures on a profile
+this exploratory would hide the next real regression, and `note()` prints every one of them anyway.
 
 **An opening onto an enclosed hole's boundary is ignored, not honoured.** `layout::enclosed_holes`
 flood-fills the empty cells a bin's cell set surrounds, and `effective_walls` drops any `open_edge`
