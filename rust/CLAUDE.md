@@ -227,7 +227,8 @@ counts come from. It started at **243/6000 across 15 distinct defects**; three f
 
 What remains at 170/6000, biggest first. **124 of them (73%) are one family: openings meeting
 geometry that is not a straight perimeter run** — the four panics below plus a non-tiling face and
-the enclosed-hole `total_h` case. The rest are 14 of the `wt = 2.700` manifold coincidence, 17
+the enclosed-hole `total_h` case (since resolved — see the enclosed-hole note below, which retires
+that share of the family). The rest are 14 of the `wt = 2.700` manifold coincidence, 17
 free-form-wall tessellation leaks, and 15 sloped audit failures.
 
 Defects this rewrite found, all pre-existing and none diagnosed:
@@ -265,17 +266,26 @@ Defects this rewrite found, all pre-existing and none diagnosed:
   builds its `Vec` by iterating a `HashMap`, and `TessLeak`'s `Debug` carries `faces: [..]`, so the
   message a case fails with is hash-ordered. The gating profiles are stable across five runs.
 
-`gridfinity-wasm`'s `opening_on_a_hole_boundary_stays_closed` is the workspace's one known-failing
-test. The bin is a **ring** whose opening sits on the enclosed hole's boundary, which merges the
-hole into the cavity — so the cavity's rim loop already swallows the hole, and the ring's own inner
-loop is then added as a *second* hole covering the same area. The two overlap: outer 15722 mm²,
-holes 1792 + 15141, a net of −1209 mm², leaving the face no interior. `audit` now reports it as
-`LoopContainment` (the containment pass had only ever tested each hole against the *outer* loop,
-never holes against each other), and `build_bin_solid` asserts the audit, so the failure names the
-defect instead of surfacing 196 tessellation leaks. Dropping a hole that another hole contains is
-**not** the fix — `divider_ring_island_is_watertight` has a legitimately nested pair and breaks.
-The rim holes have to come from one region computation that already accounts for the merge, the way
-`plan_cavity_flat`'s rim does.
+**An opening onto an enclosed hole's boundary is ignored, not honoured.** `layout::enclosed_holes`
+flood-fills the empty cells a bin's cell set surrounds, and `effective_walls` drops any `open_edge`
+touching one, so the wall stays. The bin builds and stays closed; the doorway the user asked for
+simply does not appear, the same degradation a sloped bin's inner walls take.
+
+The reason is a 0.25 mm mismatch, not a merge. `plan_cavity` builds the cavity from *cell rects*
+minus wall strips, and an enclosed hole is not a cell — so on the open side no strip is subtracted
+and the cavity stops dead at the pitch line, x=42.0 on a 3×3 ring. The hole's own material loop
+sits `HALF_TOL` the other way, at x=41.75. The island loop (bbox 42.0,40.55 → 85.45,85.45) and the
+hole loop (41.75,41.75 → 84.25,84.25) therefore **cross** instead of nesting, the rim's containment
+pass cannot put the hole loop inside the island face, and it lands on the outer rim face beside the
+cavity rim — outer 15722 mm², holes 1792 + 15141, a net of −1209 mm², leaving the face no interior.
+`audit` reports that as `LoopContainment` (the containment pass had only ever tested each hole
+against the *outer* loop, never holes against each other) and `build_bin_solid` asserts the audit,
+which is what turned 196 tessellation leaks into a message naming the defect.
+
+Honouring the opening properly is a larger feature and still unbuilt: the cavity region would have
+to extend through the doorway into the hole void, which turns the island into a C-shape and puts a
+through-hole in the cavity floor. Dropping a hole that another hole contains is **not** a shortcut
+to it — `divider_ring_island_is_watertight` has a legitimately nested pair and breaks.
 
 A torus blend's tangent circles take their parameter range from **their own tangent points**
 (`circle_span`), not from the edge being blended: once the blend radius exceeds the corner radius

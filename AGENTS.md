@@ -124,7 +124,9 @@ STL is the only wired export format.
 carved as cannot meet the tilted floor; the walls are dropped and the bin builds without them. See
 `rust/CLAUDE.md`.
 
-**A wall opening whose run reaches a reentrant corner or an enclosed hole's boundary does not
-build.** The open-run planner needs a straight perimeter run to pinch against; both cases panic
-rather than producing geometry, and the fix is a design decision about what such a bin should look
-like. See `rust/CLAUDE.md`.
+**A wall opening whose run reaches a reentrant corner does not build.** The open-run planner needs a
+straight perimeter run to pinch against, and there it panics rather than producing geometry; the fix
+is a design decision about what such a bin should look like. See `rust/CLAUDE.md`.
+
+**An opening onto an enclosed hole's boundary is ignored.** `layout::effective_walls` drops it and
+keeps the wall, so the bin builds and stays closed without the doorway. See `rust/CLAUDE.md`.

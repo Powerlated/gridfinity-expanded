@@ -189,13 +189,69 @@ pub struct EffectiveWalls {
     pub dividers: FxHashSet<GridEdge>,
 }
 
+/// The empty cells a cell set encloses: those unreachable from outside its
+/// bounding box by 4-connected moves through empty cells. A bin's cavity is
+/// planned from its cell rects, so it stops at the pitch line of an enclosed
+/// hole while the hole's own material boundary sits `HALF_TOL` beyond it. An
+/// opening onto such a boundary would leave the island loop and the hole loop
+/// crossing rather than nested, so `effective_walls` refuses to honour it.
+pub fn enclosed_holes(cells: &[GridCell]) -> CellSet {
+    let s = cell_set(cells);
+    if s.is_empty() {
+        return CellSet::default();
+    }
+    let lo = GridCell {
+        x: cells.iter().map(|c| c.x).min().unwrap() - 1,
+        y: cells.iter().map(|c| c.y).min().unwrap() - 1,
+    };
+    let hi = GridCell {
+        x: cells.iter().map(|c| c.x).max().unwrap() + 1,
+        y: cells.iter().map(|c| c.y).max().unwrap() + 1,
+    };
+    let mut outside = CellSet::default();
+    let mut stack = vec![lo];
+    outside.insert(lo);
+    while let Some(c) = stack.pop() {
+        for n in [
+            GridCell { x: c.x - 1, y: c.y },
+            GridCell { x: c.x + 1, y: c.y },
+            GridCell { x: c.x, y: c.y - 1 },
+            GridCell { x: c.x, y: c.y + 1 },
+        ] {
+            if n.x < lo.x || n.x > hi.x || n.y < lo.y || n.y > hi.y {
+                continue;
+            }
+            if s.contains(&n) || !outside.insert(n) {
+                continue;
+            }
+            stack.push(n);
+        }
+    }
+    let mut holes = CellSet::default();
+    for y in lo.y..=hi.y {
+        for x in lo.x..=hi.x {
+            let c = GridCell { x, y };
+            if !s.contains(&c) && !outside.contains(&c) {
+                holes.insert(c);
+            }
+        }
+    }
+    holes
+}
+
 pub fn effective_walls(
     piece_cells: &[GridCell],
     whole_bin_cells: &[GridCell],
     open_edges: &[GridEdge],
     divider_edges: &[GridEdge],
 ) -> EffectiveWalls {
-    let open_set: FxHashSet<GridEdge> = open_edges.iter().copied().collect();
+    let holes = enclosed_holes(whole_bin_cells);
+    let onto_hole = |e: GridEdge| edge_neighbours(e).iter().any(|c| holes.contains(c));
+    let open_set: FxHashSet<GridEdge> = open_edges
+        .iter()
+        .copied()
+        .filter(|&e| !onto_hole(e))
+        .collect();
     let divider_set: FxHashSet<GridEdge> = divider_edges.iter().copied().collect();
     let mut out = EffectiveWalls::default();
 
@@ -333,6 +389,54 @@ mod tests {
         let w = effective_walls(&whole, &whole, &[open_south], &[]);
         assert!(w.open.contains(&open_south));
         assert_eq!(w.walled.len(), 3);
+    }
+
+    #[test]
+    fn a_ring_encloses_its_middle_cell_and_a_c_shape_does_not() {
+        let ring = cells(&[
+            (0, 0),
+            (1, 0),
+            (2, 0),
+            (0, 1),
+            (2, 1),
+            (0, 2),
+            (1, 2),
+            (2, 2),
+        ]);
+        assert_eq!(
+            enclosed_holes(&ring).into_iter().collect::<Vec<_>>(),
+            vec![GridCell { x: 1, y: 1 }]
+        );
+        let c_shape = cells(&[(0, 0), (1, 0), (2, 0), (0, 1), (2, 1), (0, 2), (2, 2)]);
+        assert!(enclosed_holes(&c_shape).is_empty());
+    }
+
+    #[test]
+    fn an_opening_onto_an_enclosed_hole_stays_walled() {
+        let ring = cells(&[
+            (0, 0),
+            (1, 0),
+            (2, 0),
+            (0, 1),
+            (2, 1),
+            (0, 2),
+            (1, 2),
+            (2, 2),
+        ]);
+        let onto_hole = GridEdge {
+            x: 1,
+            y: 1,
+            orientation: Orientation::V,
+        };
+        let onto_outside = GridEdge {
+            x: 0,
+            y: 0,
+            orientation: Orientation::H,
+        };
+        let w = effective_walls(&ring, &ring, &[onto_hole, onto_outside], &[]);
+        assert!(w.walled.contains(&onto_hole));
+        assert!(!w.open.contains(&onto_hole));
+        assert!(w.open.contains(&onto_outside));
     }
 
     #[test]
