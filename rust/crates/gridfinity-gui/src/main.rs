@@ -328,6 +328,53 @@ impl App {
         true
     }
 
+    /// The bin as a Rust literal, with what the fillets actually did to it.
+    ///
+    /// The config alone says what was asked for; the `BlendReport` says which
+    /// blends landed and, when one did not, the message the kernel refused it
+    /// with. That message is the part that names the defect -- a count of
+    /// dropped edges does not -- and it is otherwise only visible from inside
+    /// `fillet_best_effort`.
+    fn config_report(&self) -> String {
+        let mut out = self.params.rust_literal();
+        out.push('\n');
+        match catch(|| gridfinity::try_build_reporting(&self.params)) {
+            Ok((_, r)) => {
+                out.push_str(&format!(
+                    "// blends: {} requested, {} made, {} matched no edge, {} refused\n",
+                    r.requested,
+                    r.made(),
+                    r.unresolved,
+                    r.dropped.len()
+                ));
+                if let Some(why) = &r.refusal {
+                    out.push_str(&format!("// refused because: {why}\n"));
+                }
+            }
+            // `catch` turns a panic into this too, which is the case worth
+            // exporting most: a bin the kernel cannot build at all.
+            Err(msg) => out.push_str(&format!("// build failed: {msg}\n")),
+        }
+        out
+    }
+
+    fn export_config(&mut self, ctx: &egui::Context) {
+        let text = self.config_report();
+        ctx.copy_text(text.clone());
+        let line = text.lines().count();
+        self.status = match rfd::FileDialog::new()
+            .set_file_name("bin-config.rs")
+            .add_filter("Rust", &["rs"])
+            .save_file()
+        {
+            Some(path) => match std::fs::write(&path, &text) {
+                Ok(()) => format!("Config copied to clipboard and written to {}", path.display()),
+                Err(e) => format!("Config copied to clipboard; writing failed: {e}"),
+            },
+            None => format!("Config copied to clipboard ({line} line(s))"),
+        };
+    }
+
     fn export_stl(&mut self) {
         if !self.errors.is_empty() {
             self.status = "Cannot export: fix the failed bin first".into();
@@ -647,6 +694,20 @@ impl App {
             }
             if ui.button("Fit view").clicked() {
                 self.regenerate(true);
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .button("Copy config")
+                .on_hover_text(
+                    "The bin as a Rust `Params` literal, plus what the fillets did to it. \
+                     Goes to the clipboard, and optionally to a file. Paste it into a test \
+                     to reproduce this exact bin.",
+                )
+                .clicked()
+            {
+                let ctx = ui.ctx().clone();
+                self.export_config(&ctx);
             }
         });
         ui.label(format!("{} triangles", self.tri_count));

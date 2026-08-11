@@ -710,6 +710,43 @@ mod tests {
         let _solid = gridfinity::build(&p);
     }
 
+    /// An L-shaped bin whose opening runs into the reentrant corner rounds
+    /// every corner it asks for.
+    ///
+    /// Two capabilities meet here and the chain needs both. The cavity's
+    /// concave corner is an **arc**, so its floor fillet is a torus and the
+    /// runout has to section a torus rather than a cylinder; and the wall that
+    /// arc rolls against tapers to nothing where the opened cavity meets the
+    /// outline, so the chain ends where no face can take the curve and only a
+    /// flat end closes it. Before either existed the bin came back with all ten
+    /// of its blends refused.
+    #[test]
+    fn an_opening_into_a_reentrant_corner_keeps_every_blend() {
+        let p = gridfinity::Params {
+            bins: vec![gridfinity::LogicalBin {
+                cells: cells(&[(0, 0), (0, 1), (1, 0)]),
+                ..Default::default()
+            }],
+            open_edges: vec![GridEdge {
+                x: 1,
+                y: 1,
+                orientation: Orientation::H,
+            }],
+            ..gridfinity::Params::default()
+        };
+        let (solid, report) =
+            gridfinity::try_build_reporting(&p).expect("the reentrant opened bin builds");
+        assert!(
+            report.is_clean() && report.made() > 0,
+            "the bin asked for {} blend(s), {} matched no edge and {} were refused: {:?}",
+            report.requested,
+            report.unresolved,
+            report.dropped.len(),
+            report.refusal
+        );
+        assert_watertight(&tessellate(&solid, 6).to_mesh());
+    }
+
     #[test]
     fn fully_open_1x1_bin_is_watertight() {
         let mut open_edges = Vec::new();
@@ -1060,6 +1097,92 @@ mod tests {
         };
         let b = &p.bins[0];
         let _solid = gridfinity::build_piece(&p, &b.cells, &b.cells, b.slope).expect("builds");
+    }
+
+    /// The exported literal has to name every field that is not at its default,
+    /// or a bin pasted back in is a *different* bin and the defect it was
+    /// exported to show does not reproduce. Checking the string mentions each
+    /// one is what catches a field added to `Params` and not to the printer --
+    /// the failure mode is silent, and it lands on whoever tries to use the
+    /// export months later.
+    #[test]
+    fn an_exported_config_names_every_field_it_changed() {
+        use crate::gridfinity::InnerWall;
+        let p = Params {
+            bins: vec![
+                LogicalBin {
+                    cells: vec![GridCell { x: 1, y: 2 }],
+                    split_lines: vec![SplitLine {
+                        axis: Axis::Y,
+                        index: 1,
+                    }],
+                    slope: Some(BinSlope {
+                        angle_deg: 9.0,
+                        dir: SlopeDir::PlusX,
+                    }),
+                },
+                LogicalBin::rect(1, 1),
+            ],
+            height_units: 6,
+            wall_thickness: 2.2,
+            cavity_corner_radius: 0.5,
+            floor_fillet: 1.25,
+            magnet_holes: true,
+            screw_holes: true,
+            open_edges: vec![GridEdge {
+                x: 1,
+                y: 0,
+                orientation: Orientation::H,
+            }],
+            divider_edges: vec![GridEdge {
+                x: 2,
+                y: 0,
+                orientation: Orientation::V,
+            }],
+            inner_walls: vec![InnerWall {
+                x1: 4.5,
+                y1: 18.0,
+                x2: 91.0,
+                y2: 15.0,
+                width: 1.2,
+                height: Some(6.5),
+            }],
+            mode: Mode::Baseplate,
+        };
+        let s = p.rust_literal();
+        for want in [
+            "GridCell { x: 1, y: 2 }",
+            "SplitLine { axis: Axis::Y, index: 1 }",
+            "BinSlope { angle_deg: 9.0, dir: SlopeDir::PlusX }",
+            "height_units: 6",
+            "wall_thickness: 2.2",
+            "cavity_corner_radius: 0.5",
+            "floor_fillet: 1.25",
+            "magnet_holes: true",
+            "screw_holes: true",
+            "mode: Mode::Baseplate",
+            "orientation: Orientation::H",
+            "orientation: Orientation::V",
+            "InnerWall { x1: 4.5",
+            "height: Some(6.5)",
+            "..Params::default()",
+        ] {
+            assert!(s.contains(want), "exported config omits {want}:\n{s}");
+        }
+        // Both bins, not just the one the fuzzer would have made.
+        assert!(
+            s.matches("LogicalBin {").count() == 2,
+            "exported config lists {} bin(s), want 2:\n{s}",
+            s.matches("LogicalBin {").count()
+        );
+        // A default `Params` carries none of that noise.
+        let d = Params::default().rust_literal();
+        for unwanted in ["height_units", "magnet_holes", "mode:", "inner_walls"] {
+            assert!(
+                !d.contains(unwanted),
+                "a default config should not mention {unwanted}:\n{d}"
+            );
+        }
     }
 
     #[test]

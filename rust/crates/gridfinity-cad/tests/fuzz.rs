@@ -779,10 +779,12 @@ fn check(c: &Case) -> Result<(), String> {
         // blend it asked for.
         if !blends.is_clean() {
             return Err(format!(
-                "{FILLET_FAILED}: of {} blend(s) the model asked for, {} matched no edge and {} were refused",
+                "{FILLET_FAILED}: of {} blend(s) the model asked for, {} matched no edge \
+                 and {} were refused -- {}",
                 blends.requested,
                 blends.unresolved,
-                blends.dropped.len()
+                blends.dropped.len(),
+                blends.refusal.as_deref().unwrap_or("no reason recorded")
             ));
         }
 
@@ -1038,103 +1040,21 @@ fn cell_list(cells: &[GridCell]) -> String {
     format!("vec![{}]", cs.join(", "))
 }
 
-fn edge_list(edges: &[GridEdge]) -> String {
-    let es: Vec<String> = edges
-        .iter()
-        .map(|e| {
-            format!(
-                "GridEdge {{ x: {}, y: {}, orientation: Orientation::{:?} }}",
-                e.x, e.y, e.orientation
-            )
-        })
-        .collect();
-    format!("vec![{}]", es.join(", "))
-}
-
+/// A failing case as the Rust literal that rebuilds it.
+///
+/// The `Params` half is `Params::rust_literal`, so a case the shrinker found and
+/// a bin exported from the egui debugger print in exactly one format and either
+/// pastes straight into a `#[test]`. Only the flood-fill piece list, which lives
+/// on the `Case` rather than on `Params`, is added here.
 fn repro(c: &Case) -> String {
-    let p = &c.params;
-    let d = Params::default();
-    let mut f: Vec<String> = Vec::new();
-    let bin = &p.bins[0];
-
-    let mut binf: Vec<String> = vec![format!("cells: {}", cell_list(&bin.cells))];
-    if !bin.split_lines.is_empty() {
-        let ls: Vec<String> = bin
-            .split_lines
-            .iter()
-            .map(|l| {
-                format!(
-                    "SplitLine {{ axis: Axis::{:?}, index: {} }}",
-                    l.axis, l.index
-                )
-            })
-            .collect();
-        binf.push(format!("split_lines: vec![{}]", ls.join(", ")));
-    }
-    if let Some(s) = bin.slope {
-        binf.push(format!(
-            "slope: Some(BinSlope {{ angle_deg: {:?}, dir: SlopeDir::{:?} }})",
-            s.angle_deg, s.dir
-        ));
-    }
-    f.push(format!(
-        "bins: vec![LogicalBin {{ {}, ..Default::default() }}]",
-        binf.join(", ")
-    ));
-
-    if p.height_units != d.height_units {
-        f.push(format!("height_units: {}", p.height_units));
-    }
-    for (name, v, dv) in [
-        ("wall_thickness", p.wall_thickness, d.wall_thickness),
-        (
-            "cavity_corner_radius",
-            p.cavity_corner_radius,
-            d.cavity_corner_radius,
-        ),
-        ("floor_fillet", p.floor_fillet, d.floor_fillet),
-    ] {
-        if v != dv {
-            f.push(format!("{name}: {v:?}"));
-        }
-    }
-    if p.magnet_holes {
-        f.push("magnet_holes: true".into());
-    }
-    if p.screw_holes {
-        f.push("screw_holes: true".into());
-    }
-    if p.mode != d.mode {
-        f.push(format!("mode: Mode::{:?}", p.mode));
-    }
-    if !p.open_edges.is_empty() {
-        f.push(format!("open_edges: {}", edge_list(&p.open_edges)));
-    }
-    if !p.divider_edges.is_empty() {
-        f.push(format!("divider_edges: {}", edge_list(&p.divider_edges)));
-    }
-    if !p.inner_walls.is_empty() {
-        let ws: Vec<String> = p
-            .inner_walls
-            .iter()
-            .map(|w| {
-                let h = match w.height {
-                    Some(h) => format!("Some({h:?})"),
-                    None => "None".into(),
-                };
-                format!(
-                    "InnerWall {{ x1: {:?}, y1: {:?}, x2: {:?}, y2: {:?}, width: {:?}, height: {h} }}",
-                    w.x1, w.y1, w.x2, w.y2, w.width
-                )
-            })
-            .collect();
-        f.push(format!("inner_walls: vec![{}]", ws.join(", ")));
-    }
-
-    let head = format!("Params {{ {}, ..Params::default() }}", f.join(", "));
+    let head = c.params.rust_literal();
     if c.opts.split == Split::Flood {
         let pieces: Vec<String> = c.pieces.iter().map(|p| cell_list(p)).collect();
-        return format!("{head}\n     pieces: vec![{}]", pieces.join(", "));
+        return format!(
+            "{head}
+     pieces: vec![{}]",
+            pieces.join(", ")
+        );
     }
     head
 }

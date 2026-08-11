@@ -151,6 +151,129 @@ impl Default for Params {
 }
 
 impl Params {
+    /// This `Params` written as the Rust literal that rebuilds it, with every
+    /// field left at its default omitted.
+    ///
+    /// The point is that a bin someone is looking at can be turned into a test
+    /// without transcribing it. The fuzzer's repro printer emits exactly this --
+    /// it calls this function -- so a bin exported from the debugger and a case
+    /// the fuzzer shrank arrive in one format, and either can be pasted straight
+    /// into a `#[test]`.
+    pub fn rust_literal(&self) -> String {
+        fn cell_list(cells: &[GridCell]) -> String {
+            let cs: Vec<String> = cells
+                .iter()
+                .map(|c| format!("GridCell {{ x: {}, y: {} }}", c.x, c.y))
+                .collect();
+            format!("vec![{}]", cs.join(", "))
+        }
+        fn edge_list(edges: &[GridEdge]) -> String {
+            let es: Vec<String> = edges
+                .iter()
+                .map(|e| {
+                    format!(
+                        "GridEdge {{ x: {}, y: {}, orientation: Orientation::{:?} }}",
+                        e.x, e.y, e.orientation
+                    )
+                })
+                .collect();
+            format!("vec![{}]", es.join(", "))
+        }
+
+        let d = Params::default();
+        let mut f: Vec<String> = Vec::new();
+
+        let bins: Vec<String> = self
+            .bins
+            .iter()
+            .map(|bin| {
+                let mut binf: Vec<String> = vec![format!("cells: {}", cell_list(&bin.cells))];
+                if !bin.split_lines.is_empty() {
+                    let ls: Vec<String> = bin
+                        .split_lines
+                        .iter()
+                        .map(|l| {
+                            format!(
+                                "SplitLine {{ axis: Axis::{:?}, index: {} }}",
+                                l.axis, l.index
+                            )
+                        })
+                        .collect();
+                    binf.push(format!("split_lines: vec![{}]", ls.join(", ")));
+                }
+                if let Some(s) = bin.slope {
+                    binf.push(format!(
+                        "slope: Some(BinSlope {{ angle_deg: {:?}, dir: SlopeDir::{:?} }})",
+                        s.angle_deg, s.dir
+                    ));
+                }
+                format!("LogicalBin {{ {}, ..Default::default() }}", binf.join(", "))
+            })
+            .collect();
+        f.push(format!("bins: vec![{}]", bins.join(", ")));
+
+        if self.height_units != d.height_units {
+            f.push(format!("height_units: {}", self.height_units));
+        }
+        for (name, v, dv) in [
+            ("wall_thickness", self.wall_thickness, d.wall_thickness),
+            (
+                "cavity_corner_radius",
+                self.cavity_corner_radius,
+                d.cavity_corner_radius,
+            ),
+            ("floor_fillet", self.floor_fillet, d.floor_fillet),
+        ] {
+            if v != dv {
+                f.push(format!("{name}: {v:?}"));
+            }
+        }
+        if self.magnet_holes {
+            f.push("magnet_holes: true".into());
+        }
+        if self.screw_holes {
+            f.push("screw_holes: true".into());
+        }
+        if self.mode != d.mode {
+            f.push(format!("mode: Mode::{:?}", self.mode));
+        }
+        if !self.open_edges.is_empty() {
+            f.push(format!("open_edges: {}", edge_list(&self.open_edges)));
+        }
+        if !self.divider_edges.is_empty() {
+            f.push(format!("divider_edges: {}", edge_list(&self.divider_edges)));
+        }
+        if !self.inner_walls.is_empty() {
+            let ws: Vec<String> = self
+                .inner_walls
+                .iter()
+                .map(|w| {
+                    let h = match w.height {
+                        Some(h) => format!("Some({h:?})"),
+                        None => "None".into(),
+                    };
+                    format!(
+                        "InnerWall {{ x1: {:?}, y1: {:?}, x2: {:?}, y2: {:?}, width: {:?}, \
+                         height: {h} }}",
+                        w.x1, w.y1, w.x2, w.y2, w.width
+                    )
+                })
+                .collect();
+            f.push(format!("inner_walls: vec![{}]", ws.join(", ")));
+        }
+
+        let out = format!("Params {{ {}, ..Params::default() }}", f.join(", "));
+        // The whole value of this string is that it pastes into a test and
+        // compiles. A literal that lost its `bins` or its default tail still
+        // looks like a config in a bug report and fails only for whoever tries
+        // to use it, long after the bin it described is gone.
+        assert!(
+            out.starts_with("Params { bins: vec![") && out.ends_with(", ..Params::default() }"),
+            "exported config is not a complete Params literal: {out}"
+        );
+        out
+    }
+
     pub fn rect(gx: u32, gy: u32) -> Params {
         Params {
             bins: vec![LogicalBin::rect(gx, gy)],
@@ -1704,6 +1827,9 @@ fn plan_piece(
             for (cl, mut islands, banded) in entries {
                 let mut loop_fr = fr;
                 clamp(&cl.segs, true, &mut loop_fr);
+                // A radius wider than the compartment is not a fillet the model
+                // may ask for -- the rolling ball does not fit.
+                loop_fr = loop_fr.min(max_inward_radius(&cl.segs));
                 if !cl.touched() && sharp_kills(&cl.segs) {
                     loop_fr = 0.0;
                 }
@@ -2316,6 +2442,105 @@ fn blendable_segs(shape: &[Seg], allow: &[bool]) -> Vec<bool> {
         }
     }
     keep
+}
+
+/// The largest rolling-ball radius the inside of `segs` can carry.
+///
+/// A ball of radius `r` rolling along the boundary touches the floor `r` from
+/// it, so across a passage `w` wide the touchdowns from the two sides cross as
+/// soon as `r > w / 2` and the filleted floor's own boundary self-intersects --
+/// which the kernel can only report after building the whole blend, as
+/// `face N's boundary crosses itself`. The radius is impossible, so the model
+/// should never ask for it.
+///
+/// `w` is measured by casting a ray *inward* from points along the boundary and
+/// taking the first crossing: that is the width through the **interior**, which
+/// is what the ball has to fit in. Taking the distance between nearby segments
+/// instead would clamp on a thin finger of material -- its two sides are close,
+/// but the ball rolls around the outside of it and nothing is in its way.
+///
+/// Sampling can only miss a narrow spot, never invent one, so the bound errs
+/// towards leaving the radius alone. It is an upper bound and not a guarantee:
+/// a passage that narrows between samples still gets through.
+fn max_inward_radius(segs: &[Seg]) -> f32 {
+    const STEP: f32 = 0.5;
+    const ARC_CHORDS: usize = 8;
+    const EPS: f32 = 1e-3;
+
+    // The inward direction is read off the winding, so a loop that encloses
+    // nothing does not merely give a poor bound -- it has no inside, and every
+    // ray cast here would be pointing at a side picked by the sign of noise.
+    let area = loop_area(segs);
+    assert!(
+        area != 0.0,
+        "fillet width: a cavity loop of {} segment(s) encloses no area, so it has no interior \
+         for a ball to roll in",
+        segs.len()
+    );
+    let ccw = area > 0.0;
+    // One polyline for the whole loop, so a ray is tested against every part of
+    // the boundary including the segment it started from.
+    let mut poly: Vec<Vec2> = Vec::new();
+    for s in segs {
+        match *s {
+            Seg::Line { a, .. } => poly.push(a),
+            Seg::Arc {
+                center,
+                radius,
+                a0,
+                a1,
+                ..
+            } => {
+                for i in 0..ARC_CHORDS {
+                    let t = a0 + (a1 - a0) * (i as f32 / ARC_CHORDS as f32);
+                    poly.push(center + Vec2::new(t.cos(), t.sin()) * radius);
+                }
+            }
+        }
+    }
+    let n = poly.len();
+    if n < 3 {
+        return f32::INFINITY;
+    }
+
+    let mut best = f32::INFINITY;
+    for i in 0..n {
+        let (p0, p1) = (poly[i], poly[(i + 1) % n]);
+        let d = p1 - p0;
+        let len = d.length();
+        if len < EPS {
+            continue;
+        }
+        let t = d / len;
+        // Interior is to the left of travel on a counter-clockwise loop.
+        let inward = if ccw {
+            Vec2::new(-t.y, t.x)
+        } else {
+            Vec2::new(t.y, -t.x)
+        };
+        let steps = ((len / STEP).floor() as usize).max(1);
+        for k in 0..steps {
+            let p = p0 + d * ((k as f32 + 0.5) / steps as f32);
+            for j in 0..n {
+                if j == i {
+                    continue;
+                }
+                let (q0, q1) = (poly[j], poly[(j + 1) % n]);
+                let e = q1 - q0;
+                let denom = inward.x * (-e.y) - inward.y * (-e.x);
+                if denom.abs() < 1e-12 {
+                    continue;
+                }
+                let rhs = q0 - p;
+                let s = (rhs.x * (-e.y) - rhs.y * (-e.x)) / denom;
+                let u = (inward.x * rhs.y - inward.y * rhs.x) / denom;
+                if s > EPS && (0.0..=1.0).contains(&u) && s < best {
+                    best = s;
+                }
+            }
+        }
+    }
+    best / 2.0
 }
 
 fn is_convex_arc(shape: &[Seg], s: &Seg) -> bool {

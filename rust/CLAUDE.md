@@ -178,23 +178,120 @@ profiles use; `Share(1, 2)` is `fuzz_stripped_polyominoes`.
 
 | profile | what it varies | status at the default seed |
 | --- | --- | --- |
-| `fuzz_inner_walls` | freeform walls on a fixed 2×2 | **red 66/150** — refused fillets |
+| `fuzz_inner_walls` | freeform walls on a fixed 2×2 | **red 23/150** — 6 defects |
 | `fuzz_tidy_inner_walls` | tidy walls, up to 3 so they cross | green |
 | `fuzz_wall_openings` | `open_edges` + `divider_edges` on rectangles | green |
 | `fuzz_openings_and_inner_walls` | both of the above at once | **red 1/150** — `OPENING_LOSES_FILLET` |
 | `fuzz_bin_shapes` | polyominoes, flood-fill pieces | green |
 | `fuzz_split_pieces` | polyominoes, `SplitLine`s + `partition_cells` | **red 1/120** — `TRIM_SECTION_CURVE` |
-| `fuzz_stripped_polyominoes` | polyominoes with **half** the perimeter wall opened | **red 90/150** — refused fillets |
-| `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | **red 127/400** — 3 defects |
+| `fuzz_stripped_polyominoes` | polyominoes with **half** the perimeter wall opened | **red 31/150** — 7 defects |
+| `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | **red 20/400** — 6 defects |
 
 Every one of those reds was already failing before; it was on a `known` list, or behind the
 `require_blends` opt-out, or both. Nothing here is a regression, and the counts are the backlog.
 
-Almost all of it is **one defect**: a blend chain terminating where no face reaches the point it
-lands on, diagnosed under `fillet.rs` below and needing a runout that ends inside a face. The
-edge-keyed `move_vertex` fix moved two of these counts *up* slightly (62→66, 124→127), which is the
-expected shape of a correctness fix here: a handful of cases used to scrape through on two faces
-disagreeing about an edge in a way that happened to weld anyway, and they now refuse honestly.
+**A refused fillet now says why.** `BlendReport::refusal` carries the message
+`fillet_edges_with` returned for the whole set, and the fuzzer prints it. Without it the profiles
+reported only "N were refused" for every cause at once: `fillet_best_effort` throws that message
+away and salvages subsets, and the subsets fail for reasons of their own (an artificially cut chain
+always terminates somewhere), so the one message naming the defect was the one nothing kept. The
+"distinct defects" counts jumped when this landed — 90/150 went from 1 defect to 4 — because the
+same cases now separate by cause instead of collapsing onto one string. That is the backlog
+becoming legible, not growing.
+
+**A blend chain now always ends somewhere.** Terminating where the face it lands on cannot take
+the curve used to be almost the whole backlog; two capabilities retired most of it, and what they
+cost is the *quality* of the end, never a refusal. `plan_runout_end` tries the three ends in order:
+`Absorb` folds the trim curve into a neighbour's loop, `Cap` closes it against the pair of
+neighbours either side of the corner, and `Flat` -- new, and always available -- stops the blend in
+its own last cross section. The three worst profiles went 26/55/26 to 23/31/20 across the two.
+
+- **a chain terminating on an arc** is supported. A cylindrical blend rolls the ball along a
+  straight axis, so a plane cuts it in an ellipse; a torus blend rolls it around a circle, and a
+  plane's section of a torus is a quartic — which is why the runout refused every one of them. A
+  plane **parallel to the torus axis** is the exception, and it is the case the model produces:
+  fixing the minor angle `t` fixes the ring radius `major + minor·cos t`, and the plane meets that
+  ring where `cos u = offset / rad`, which is exactly `Curve::TorusSection`. `runout_torus` reads
+  the section's parameter range straight off the two touchdowns, because a tangent circle of a
+  torus blend is a circle of **constant minor angle**: running one out to the plane changes `u` and
+  leaves `t` alone. Three things it has to get right, each of which was a bug first. The ring radius
+  is **signed** — on a spindle torus (`minor > major`, every corner blend tighter than its own
+  corner) it goes negative past the axis, and reading a touchdown's minor angle off the unsigned
+  radius puts it half a turn from where it is, the same distinction `Surface::signed_distance`
+  makes. `branch` picks which of the plane's two crossings the blend runs into, and the nearer one
+  measured around the axis is always the one on the blend's own side of the plane normal (for `u_v`
+  and `u_p` in `(0, π)`, `|wrap(u_v - u_p)| <= |wrap(u_v + u_p)|` reduces to `u_v <= π`), with the
+  direction the chain was heading breaking the tie when the ball centre sits square in the plane.
+  And a torus blend's tangent curves are **circles**, so moving a touchdown moves it *along* its own
+  circle: `respan` moves the parameter range with it, keeping the sweep's direction and taking only
+  its magnitude from the new endpoints. Without that the edge is emitted over the arc the blend used
+  to span and misses its own vertex by however far the touchdown ran — `audit` reported it as
+  `EdgeVertexGeometry`, 4.15 mm out.
+- **the blend reaches past the terminating face's edges** is no longer a refusal; those ends go
+  flat. The trim curve crossing a real edge of the solid and being split between two non-coplanar
+  faces is still unbuilt, and it is still the better end where it applies — the `fuzz_params_broad`
+  case is a partial-height inner wall clipped by the bin's perimeter, whose terminating face is the
+  wall's *end cap*, 4.006 mm wide after the clip against a retreat of 5.74, with the wall's own
+  **side** face past that edge. Whatever does it has to decide per *edge*, not per face, or the two
+  faces sharing an edge disagree and the seam opens.
+- **three candidate terminating faces** goes flat too. **Relaxing the cap to allow them was tried
+  and changed nothing**, which is worth knowing before trying it again: a cap is one planar face
+  carried on `fa_side`'s surface, so it needs the two neighbours *either side of the corner*
+  coplanar, not every candidate, and `cap_at` states that requirement itself rather than leaning on
+  the coplanar-absorb branch to have guaranteed it. The cases fail earlier than that, in `pick` —
+  the corner offers more than one candidate across `fa`'s edge or across `fb`'s, so which face the
+  blend runs into is genuinely undecided. That is the question to answer, not the cap's plane.
+- **a floor whose boundary self-intersects** (x7 of `fuzz_inner_walls`, x1 of `fuzz_params_broad`,
+  down from 13) — the fillet is wider than the compartment, so the touchdowns from the two sides
+  cross. `max_inward_radius` now bounds what `plan_piece` asks for: a ball of radius `r` touches
+  down `r` from the wall, so across a passage `w` wide it needs `r <= w / 2`, and `w` is measured
+  by casting a ray **inward** from points along the loop and taking the first crossing. Inward
+  matters -- the distance between two nearby segments would clamp on a thin finger of material,
+  whose sides are close but which the ball simply rolls around the outside of. The bound samples,
+  so it can only miss a narrow spot, never invent one; what is left is passages that narrow between
+  samples, or a self-intersection with a cause other than a straight passage's width.
+- **an opening costing a compartment its floor fillet** (x7 of `fuzz_params_broad`, x1 of
+  `fuzz_openings_and_inner_walls`) — model-side, and the one class here that `FILLET_FAILED` cannot
+  see; `opening_keeps_the_fillet` is what does.
+- four manifold panics and one `TRIM_SECTION_CURVE`, all undiagnosed.
+
+**The outline's seams are not geometry, and the fillet had to stop believing they were.** This is
+what took the three worst profiles from 52/126/90 to 31/26/55, and the case that showed why is a
+one-cell bin with one open edge. `split_outline_at` cuts the outline wherever the peg profile or an
+opening needs a point, and every cut runs the wall's full height, so a flat wall reaches the fillet
+as a row of narrow bands — faces 25, 26 and 27 of that bin are one plane, `y = 0.25`, facing the
+same way, with face 26 a 1.55 mm sliver between the other two. A runout retreating 2.4 mm along the
+top of that wall has to cross two of them, and every mechanism it has works within one face, so it
+refused.
+
+`Solid::merge_coplanar_faces` fuses neighbouring faces on one plane facing one way, then
+`fuse_collinear_edges` fuses the collinear edge pieces the seams left along their tops. Both keep
+vertex and edge numbering, so the blend edge ids the caller resolved before the merge stay valid,
+and both hold back the blended edges themselves. It is a simplification of the B-rep rather than a
+change to it: the solid occupies the same space with fewer faces describing the same surface, which
+is also why nothing downstream needed touching.
+
+Three things it turned up, each worth keeping in mind for any similar pass:
+
+- **Coplanarity is not transitive in `f32`, and the union-find treats it as if it were.** A row of
+  bands is grown one neighbour at a time, so the far members can drift off the plane the merged
+  face carries. The assertion that every member lies on the representative's plane caught exactly
+  that — and it was the *bound* that was wrong, not the merge: two faces 73 mm apart whose normals
+  agree to 2.6e-6 rad are 1.9e-4 mm out of each other's plane with nothing wrong at all. The
+  allowance carries the lever arm now, `SAME_PLANE_DIST + |Δorigin| * SAME_PLANE_SIN`.
+- **Collinear is not enough to fuse two edges at a vertex; the run has to pass *through* it.** Two
+  edges leaving one vertex in the same direction lie on top of one another, and fusing those
+  describes a span neither covers. That one showed up as two vertices in one weld cell.
+- **`Builder::resume` indexed only the vertices of the faces it was rebuilding.** Fusing edges
+  leaves the dissolved junctions on no face at all, so a later `vertex()` at one of those points
+  minted a second id for it. It indexes the whole array now, which the builder had already cloned
+  — a fix that stands on its own, since nothing guaranteed an untouched face's vertex was indexed
+  either.
+
+Two single-case panics are newly *reachable* because bins that used to refuse their fillets now
+build them: `edge 314 used fwd=2 bwd=2` in `fuzz_stripped_polyominoes` and a `build_half_edges`
+same-direction assertion in `fuzz_inner_walls`. Neither is a merge defect as far as the merge's own
+assertions can tell, and both are undiagnosed.
 
 **Wall openings were never fuzzed before.** `open_edges` flows to `layout::effective_walls` and an
 opening deletes the wall the floor fillet was blending against — the runout case. The profile drew
@@ -272,7 +369,8 @@ Three things had to change, and only the first is the model:
   Dropping the *loop* was what cost a 2×2 all 8 of its blends for one open edge.
 - **`fillet.rs` can cap a runout.** `RunoutEnd` is now `Absorb` (the original: one face beyond the
   chain owns the corner, so trimming its two edges back to the tangent points and splicing the trim
-  curve between them closes the gap) or `Cap`. A chain dying on an opening's mouth has no face to
+  curve between them closes the gap), `Cap`, or `Flat` (see "a chain that can end nowhere ends flat"
+  below). A chain dying on an opening's mouth has no face to
   absorb the curve — on a 2×2 opened at `(0,0,H)` the runout lands at `(40.775, 0.25, 9.425)`, above
   the lip at `z=8.2` and inside the open span, on no face at all — so one is emitted: a planar cap
   bounded by the end ellipse and the two stubs between the tangent points and the corner. The
@@ -295,10 +393,83 @@ Three things had to change, and only the first is the model:
   not the chord's, because on a semicircle the chord midpoint is the circle's centre and every
   normal taken there is meaningless. That one cost `fillet_cylinder_top_is_watertight`.
 
-Still unsupported, and still the reason a chain may not end just anywhere: a runout onto a
-**cylinder** (`runout face N is not planar`) would need a blend-cylinder ∩ corner-cylinder section
-curve, a quartic for perpendicular axes and outside the analytic curve set; and a chain may not end
-*on* an arc, because the runout does not do torus blends.
+**Two blends of one chain have to agree, exactly, on the vertex they share.** Each derived the
+meeting point from its own faces' normals there. Along a tangent-continuous chain those normals are
+equal in exact arithmetic and differ in the last bits in `f32`, which put the two answers ~2e-4 mm
+apart — four times `topo`'s weld quantum — so the builder interned two vertices and the face both
+blends border was left with an open loop (`face 49: loop not closed`). No weld tolerance fixes it:
+the gap is real, and loosening the quantum to cover it would weld things that are genuinely
+distinct. `reconcile_shared_ends` derives the ball centre and the two touchdowns **once per
+vertex** and hands them to both blends. It leans on a chain running along the boundary of one face,
+so the two edges at a shared vertex have exactly one face in common: that one names one touchdown
+and the two tangent neighbours, which share a normal there, name the other.
+
+The bound is an **angle**, `MAX_JOIN_KINK`, not a distance: a kink of `d` radians moves the ball
+centre by about `r * d`, so a fixed distance would tighten with the radius exactly where the blend
+has most room to absorb the error. Half a degree sits two orders above `f32` noise at the model's
+scale and two orders below the turn any real corner makes. It is not a formality — the drawer bin's
+generated dividers meet the cavity with a 0.13° kink, which is 5.4e-3 mm of disagreement and far
+past anything float noise explains, and `a_drawer_bin_partitioned_into_compartments_is_watertight`
+is what says so.
+
+**The arc where two blend faces meet takes its plane from the touchdowns, not from the edge.**
+`connect_arc` rolled it about the blended edge's tangent at the vertex. Two edges of one chain agree
+on that tangent only to float noise, and 8e-5 rad over a 2.4 mm radius already moves the arc's
+midpoint past the weld quantum — so the shared edge interned twice and each blend face was left
+holding one of them (`edge N used fwd=1 bwd=0`). Both touchdowns are a radius from the centre, so
+the two of them and the centre fix the plane exactly; the edge tangent now only chooses the sweep's
+sign, which is a binary call nowhere near flipping.
+
+**Absorbing a runout is about the terminating face's edges, not its area.** `plan_runout_end`
+returned `Absorb` for a lone candidate without checking it could take the curve. Absorbing works by
+retreating that face's two edges at the corner back to the tangent points, so it is available
+exactly when those points still lie *on* those edges — which is what `absorb_fits` asks. Past an
+edge's far end the face has run out before the blend did, and splicing there emits a loop that
+doubles back over ground the blend never covered; the model reported that 4 mm to 7 mm downstream as
+a loop that does not close. A partial-height inner wall meeting the bin's perimeter is the case that
+makes the difference: the corner sits exactly on the wall's top, so the tangent point up the
+perimeter stands above the wall's side face altogether.
+
+Gating this on `planar_face_contains` was tried before and is **not** the same question — it
+refuses `partial_wall_one_end_on_boundary_is_watertight`, whose runout lands *on* its face's
+boundary rather than strictly inside it and absorbs perfectly well. Fit is about the edges.
+`absorb_fits` turns those cases into a cap where the neighbours allow one and an honest, named
+refusal where they do not; it does not yet turn them into geometry, because `cap_at` draws its two
+neighbours from the candidate set and at a partial-height wall's top they are coplanar with the
+blended faces and excluded from it. That is the next step, and it is the same missing capability as
+the overshoot above.
+
+**A chain that can end nowhere ends flat.** `RunoutEnd::Flat` is the third end, tried after
+`Absorb` and `Cap` and never unavailable: the blend simply stops where the chain stopped, closed by
+a planar face in its own last cross section. That plane always exists — the ball's two touchdowns
+and the corner they retreat from are three points of the plane the connect arc already lies in,
+whatever the blend was rolling along — and its normal is oriented by the direction the chain was
+heading, so the material it closes lies behind it. It is a commercial modeller's flat-ended fillet,
+and it looks worse than folding the curve into a neighbour, which is exactly why it is last.
+
+It reuses the cap's three-edge loop (two stubs and the arc) and nothing else, because a flat end
+trims *nothing*: the tangent points and the connect arc stay as the blend built them. What is new is
+that an edge at the corner decides for itself whether it is involved. `Runout::on_edge` retreats an
+edge only when a touchdown actually lands **on that edge**, strictly between the corner and the far
+end; every other edge keeps the corner, and the blended face's loop gets a straight stub from its
+touchdown to the corner instead. That test is a property of the edge, so the face that retreats and
+the face across it that splits still agree on the point, and the stub is checked against the face's
+own surface before it is emitted — it is only a straight line inside a curved face because the
+touchdown and the corner share a ruling of it.
+
+The case that forced it, and the regression test that pins it
+(`an_opening_into_a_reentrant_corner_keeps_every_blend`): an L-shaped bin opened onto its reentrant
+corner. The cavity's rounded corner there is an arc, so the floor fillet is a torus; the wall that
+arc rolls against tapers from `wall_thickness` to **zero** where the opened cavity meets the
+outline, so at the corner the cavity wall and the bin's outer surface meet in a knife edge. There is
+0.6 mm of face for a 2.45 mm blend to run out along, the plane past that edge bounds nothing, and
+extending the blend surface any further leaves the material entirely. Nothing can take the curve;
+the flat end stops it. All ten of that bin's blends were refused before.
+
+Still unsupported: a runout onto a **cylinder** (`runout face N is not planar`) would need a
+blend-cylinder ∩ corner-cylinder section curve, a quartic for perpendicular axes and outside the
+analytic curve set; and a torus runout onto a plane **not parallel to the torus axis**, which is the
+quartic again.
 
 `fuzz_split_pieces` asserts what "split" is supposed to mean rather than only that each piece is
 sound:
@@ -322,7 +493,8 @@ vertex pair stands 0.5 mm apart, because the row's cut face is subdivided differ
 pieces to meeting exactly.
 
 **Blends are observable now.** `program::run_reporting` returns a `BlendReport`
-(`requested` / `unresolved` / `dropped`) beside the solid, and `gridfinity::try_build_reporting` /
+(`requested` / `unresolved` / `dropped` / `refusal`) beside the solid, and
+`gridfinity::try_build_reporting` /
 `build_bin_solid_reporting` pass it through; `run` and `build_bin_solid` are wrappers, so no
 existing caller changed. Without it a regression that stops rounding corners near an opening or an
 inner wall passes every gate — the solid is still manifold, still audits clean, still tessellates
@@ -601,6 +773,21 @@ middle of a 1x3 and `shrink` could delete any cell, so either could hand the mod
 connected bin, which `AGENTS.md` puts out of scope. It changed no counts, but the repros it prints
 are trustworthy now, and were not before.
 
+**A bin in the debugger can be handed over as a test.** `Params::rust_literal` prints a `Params`
+as the Rust literal that rebuilds it, omitting every field still at its default, and
+`gridfinity-gui`'s **Copy config** button puts that on the clipboard (and optionally in a file)
+together with the `BlendReport` for the same bin — how many blends were requested, how many landed,
+and, when one did not, the kernel's own refusal message. The counts alone do not name a defect;
+that message does, and it is otherwise only visible from inside `fillet_best_effort`.
+
+`tests/fuzz.rs`'s `repro` calls the same function, so a bin someone exported by hand and a case the
+shrinker found arrive in **one** format and either pastes straight into a `#[test]`. Keep it that
+way: a second printer is a second format to recognise, and the two drift the moment a field is
+added to `Params`. `an_exported_config_names_every_field_it_changed` is the guard — it asserts every
+non-default field reaches the string and that a default `Params` mentions none of them, because a
+field added to `Params` and not to the printer fails silently and lands on whoever tries to use the
+export months later.
+
 **`gridfinity-gui`'s `broken()` is coupled to the model's failure surface.** Its three
 failure-path tests need a configuration that genuinely fails, and every fix here retires one, so it
 has been re-pointed twice. It also needs a **hard** failure: `build_bin` only catches `Err` and
@@ -772,11 +959,13 @@ also made it **faster than before the bug was known**: a 32x32 build went 19.4 �
   become `Torus` blends; adjacent faces are trimmed back to the exact tangent curves and quarter-
   circle connect arcs join neighbouring blends. A vertex with **two** blended edges continues the
   chain; a vertex with **one** is a *runout* — the chain terminates against a third face, and the
-  blend is trimmed by it instead of closed off: tangent curves extend to meet the plane, the exact
-  cylinder/plane intersection (a `Curve::Ellipse`) becomes the trim curve, and it is spliced into
-  the runout face's loop where its sharp corner was. The runout face is found by adjacency,
-  skipping faces coplanar with the blended pair (a coplanar neighbour continues the surface rather
-  than terminating the blend). Three or more blended edges at a vertex still needs a spherical
+  blend is trimmed by it instead of closed off: tangent curves extend to meet the plane and the
+  exact section of the blend surface by that plane becomes the trim curve, spliced into the runout
+  face's loop where its sharp corner was. The section is a `Curve::Ellipse` for a cylindrical blend
+  and a `Curve::TorusSection` for a torus blend against a plane parallel to its axis. The runout
+  face is found by adjacency, skipping faces coplanar with the blended pair (a coplanar neighbour
+  continues the surface rather than terminating the blend); where no face can take the curve at all
+  the blend is closed by a flat face in its own last cross section instead. Three or more blended edges at a vertex still needs a spherical
   corner patch → `Err`. The partial-height inner wall's top ramp is built this way. The rebuild is
   **local**: an edge changes if it is blended or if either endpoint moves, a face changes if it
   names such an edge, and everything else is re-filed verbatim through `Builder::resume`/

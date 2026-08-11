@@ -237,6 +237,11 @@ pub struct BlendReport {
     pub requested: usize,
     pub unresolved: usize,
     pub dropped: Vec<EdgeId>,
+    /// Why the whole set could not be filleted at once, when it could not. A
+    /// count of dropped edges says a blend was refused but not what refused it,
+    /// and the salvage that follows only ever reports subsets, so without this
+    /// the one message that names the defect is the one nothing keeps.
+    pub refusal: Option<String>,
 }
 
 impl BlendReport {
@@ -481,9 +486,10 @@ pub fn run_reporting(
 
     let mut solid = b.build_unvalidated();
     if !blends.is_empty() {
-        let (blended, dropped) = fillet::fillet_best_effort(&solid, &blends)?;
+        let (blended, dropped, refusal) = fillet::fillet_best_effort(&solid, &blends)?;
         solid = blended;
         report.dropped = dropped;
+        report.refusal = refusal;
     }
     if !chamfers.is_empty() {
         solid = chamfer_edges(&solid, &chamfers)?;
