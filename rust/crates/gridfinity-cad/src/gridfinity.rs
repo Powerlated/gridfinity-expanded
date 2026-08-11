@@ -839,53 +839,81 @@ impl OuterLoops {
         OuterLoops { loops, consumed }
     }
 
-    fn pinch(&self, s: Vec2, d: Vec2) -> Option<(usize, Vec2)> {
+    /// Where the cavity wall `seg` leaves the bin's outline, nearest the end of
+    /// it that meets the open run.
+    ///
+    /// This used to cast a ray from the run's endpoint along the *direction* of
+    /// the adjacent segment, which only exists if that segment is straight. At
+    /// a reentrant corner it is the concave fillet arc, and there was nothing
+    /// to cast along -- yet the arc does cross the outline, so intersecting the
+    /// segment itself finds the pinch where casting could not. On a straight
+    /// neighbour the two agree exactly: the ray and the segment are the same
+    /// line, and the hit is the same point.
+    fn pinch_seg(&self, seg: &Seg, at_end: bool) -> Option<(usize, Vec2)> {
+        let from = if at_end { seg.end() } else { seg.start() };
+        let reach = reach_seg(seg, at_end, PINCH_REACH);
         let mut best: Option<(usize, Vec2, f32)> = None;
         for (li, pieces) in self.loops.iter().enumerate() {
             for pc in pieces {
-                let Seg::Line { a, b } = pc.seg else { continue };
-                let e = b - a;
-                let den = d.x * e.y - d.y * e.x;
-                if den.abs() < 1e-6 {
-                    continue;
-                }
-                let t = ((a.x - s.x) * e.y - (a.y - s.y) * e.x) / den;
-                let u = ((a.x - s.x) * d.y - (a.y - s.y) * d.x) / den;
-                let len = e.length();
-                if !(-W_EPS..=1.0 + W_EPS / len).contains(&(u))
-                    || !(-0.5..=PEG_TANGENT + 0.6).contains(&t)
-                {
-                    continue;
-                }
-                if best.map_or(true, |(_, _, bt)| t.abs() < bt.abs()) {
-                    best = Some((li, s + d * t, t));
+                for p in crate::kernel::region2d::seg_seg_points(&reach, &pc.seg) {
+                    let d = (p - from).length();
+                    if d <= PINCH_REACH && best.is_none_or(|(_, _, bd)| d < bd) {
+                        best = Some((li, p, d));
+                    }
                 }
             }
         }
         best.map(|(li, p, _)| (li, p))
     }
 
+    /// Cut the outer loop at `p` so a walk can start or stop there.
+    ///
+    /// The pinch can land on a rounded corner as readily as on a straight run --
+    /// a notch's outer fillet is exactly where a cavity wall that falls short of
+    /// the outline meets it -- so an arc piece splits the same way a line does.
     fn split_at(&mut self, li: usize, p: Vec2, peg_splits: &mut HashMap<GridEdge, Vec<f32>>) {
         let pieces = &mut self.loops[li];
         for i in 0..pieces.len() {
-            let Seg::Line { a, b } = pieces[i].seg else {
-                continue;
-            };
-            if v2_eq(a, p) || v2_eq(b, p) {
-                let d = b - a;
-                let t = (p - a).dot(d) / d.length_squared();
-                if (-0.1..=1.1).contains(&t) && (a + d * t - p).length() < W_EPS {
+            let pc = pieces[i];
+            if v2_eq(pc.seg.start(), p) || v2_eq(pc.seg.end(), p) {
+                if crate::kernel::region2d::point_seg_distance(p, &pc.seg) < W_EPS {
                     return;
                 }
                 continue;
             }
-            let d = b - a;
-            let t = (p - a).dot(d) / d.length_squared();
-            if !(0.0..=1.0).contains(&t) || (a + d * t - p).length() > W_EPS {
+            if crate::kernel::region2d::point_seg_distance(p, &pc.seg) > W_EPS {
                 continue;
             }
-            let pc = pieces[i];
-            if pc.shared {
+            let (lo, hi) = match pc.seg {
+                Seg::Line { a, b } => (Seg::Line { a, b: p }, Seg::Line { a: p, b }),
+                Seg::Arc {
+                    a,
+                    b,
+                    center,
+                    radius,
+                    a0,
+                    a1,
+                } => {
+                    let mut t = (p.y - center.y).atan2(p.x - center.x);
+                    let (amin, amax) = (a0.min(a1), a0.max(a1));
+                    while t < amin - 1e-4 {
+                        t += std::f32::consts::TAU;
+                    }
+                    while t > amax + 1e-4 {
+                        t -= std::f32::consts::TAU;
+                    }
+                    if t <= amin + 1e-4 || t >= amax - 1e-4 {
+                        return;
+                    }
+                    (
+                        Seg::Arc { a, b: p, center, radius, a0, a1: t },
+                        Seg::Arc { a: p, b, center, radius, a0: t, a1 },
+                    )
+                }
+            };
+            // A peg's top ring welds to the wall's bottom ring along a shared
+            // straight run, so only a line's split has a station to record.
+            if pc.shared && matches!(pc.seg, Seg::Line { .. }) {
                 if let Some(e) = pc.edge {
                     let station = match e.orientation {
                         Orientation::H => p.x,
@@ -894,22 +922,13 @@ impl OuterLoops {
                     peg_splits.entry(e).or_default().push(station);
                 }
             }
-            pieces[i] = OuterPiece {
-                seg: Seg::Line { a, b: p },
-                ..pc
-            };
-            pieces.insert(
-                i + 1,
-                OuterPiece {
-                    seg: Seg::Line { a: p, b },
-                    ..pc
-                },
-            );
+            pieces[i] = OuterPiece { seg: lo, ..pc };
+            pieces.insert(i + 1, OuterPiece { seg: hi, ..pc });
             let was = self.consumed[li][i];
             self.consumed[li].insert(i + 1, was);
             return;
         }
-        panic!("open-face pinch point {p:?} not on any straight outer piece");
+        panic!("open-face pinch point {p:?} is not on the outer loop");
     }
 
     fn consume_walk(&mut self, li: usize, from: Vec2, to: Vec2) -> Vec<Seg> {
@@ -1026,35 +1045,25 @@ fn resolve_open_runs(
             j += 1;
         }
         let (prev_seg, _) = *out.last().expect("run preceded by a segment");
-        let Seg::Line { a: pa, b: pb } = prev_seg else {
-            panic!("open-run neighbour must be straight (got an arc before the run)");
-        };
-        let d_prev = (pa - pb).normalize();
         let (li_s, p_s) = o
-            .pinch(pb, d_prev)
-            .unwrap_or_else(|| panic!("no pinch for run start at {pb:?}"));
+            .pinch_seg(&prev_seg, true)
+            .unwrap_or_else(|| panic!("no pinch for run start at {:?}", prev_seg.end()));
         o.split_at(li_s, p_s, peg_splits);
 
         let next_seg = if j < n { segs[j] } else { out[0].0 };
-        let Seg::Line { a: na, b: nb } = next_seg else {
-            panic!("open-run neighbour must be straight (got an arc after the run)");
-        };
-        let d_next = (nb - na).normalize();
         let (li_e, p_e) = o
-            .pinch(na, d_next)
-            .unwrap_or_else(|| panic!("no pinch for run end at {na:?}"));
+            .pinch_seg(&next_seg, false)
+            .unwrap_or_else(|| panic!("no pinch for run end at {:?}", next_seg.start()));
         assert_eq!(li_s, li_e, "open run spans two outer loops");
         o.split_at(li_e, p_e, peg_splits);
 
-        if let Some((Seg::Line { b, .. }, _)) = out.last_mut() {
-            *b = p_s;
+        if let Some((sg, _)) = out.last_mut() {
+            truncate_seg(sg, true, p_s);
         }
         if j < n {
-            if let Seg::Line { a, .. } = &mut segs[j] {
-                *a = p_e;
-            }
-        } else if let (Seg::Line { a, .. }, _) = &mut out[0] {
-            *a = p_e;
+            truncate_seg(&mut segs[j], false, p_e);
+        } else {
+            truncate_seg(&mut out[0].0, false, p_e);
         }
         for pc in o.consume_walk(li_s, p_s, p_e) {
             out.push((pc, true));
@@ -1063,6 +1072,88 @@ fn resolve_open_runs(
     }
     let (segs, coincident) = out.into_iter().unzip();
     CavityLoop { segs, coincident }
+}
+
+/// How far past its own end a cavity wall may be followed to find the outline.
+/// The wall can fall either side of it: an open span runs the cavity out to the
+/// pitch line, *past* the boundary, while a wall meeting a rounded notch corner
+/// stops short of it.
+const PINCH_REACH: f32 = PEG_TANGENT + 0.6;
+
+/// `seg` continued by `reach` beyond one end, so an intersection sweep can find
+/// the outline whether the wall overshoots it or falls short.
+fn reach_seg(seg: &Seg, at_end: bool, reach: f32) -> Seg {
+    match *seg {
+        Seg::Line { a, b } => {
+            let d = (b - a).normalize_or_zero() * reach;
+            if at_end {
+                Seg::Line { a, b: b + d }
+            } else {
+                Seg::Line { a: a - d, b }
+            }
+        }
+        Seg::Arc {
+            a,
+            b,
+            center,
+            radius,
+            a0,
+            a1,
+        } => {
+            let step = (reach / radius.max(1e-6)) * if a1 >= a0 { 1.0 } else { -1.0 };
+            let at = |t: f32| center + Vec2::new(t.cos(), t.sin()) * radius;
+            if at_end {
+                let t = a1 + step;
+                Seg::Arc { a, b: at(t), center, radius, a0, a1: t }
+            } else {
+                let t = a0 - step;
+                Seg::Arc { a: at(t), b, center, radius, a0: t, a1 }
+            }
+        }
+    }
+}
+
+/// Pull one end of a segment back to `p`, which must lie on it. An arc carries
+/// its parameter range beside its endpoints, so moving the point without moving
+/// the angle would leave the two disagreeing about where the arc stops.
+fn truncate_seg(seg: &mut Seg, at_end: bool, p: Vec2) {
+    match seg {
+        Seg::Line { a, b } => {
+            if at_end {
+                *b = p;
+            } else {
+                *a = p;
+            }
+        }
+        Seg::Arc {
+            a,
+            b,
+            center,
+            a0,
+            a1,
+            ..
+        } => {
+            // The point may sit beyond the stored range -- `reach_seg` looks
+            // past the end -- so the angle is unwrapped to the nearer side of
+            // it rather than clamped into it.
+            let raw = (p.y - center.y).atan2(p.x - center.x);
+            let near = if at_end { *a1 } else { *a0 };
+            let mut t = raw;
+            while t - near > std::f32::consts::PI {
+                t -= std::f32::consts::TAU;
+            }
+            while near - t > std::f32::consts::PI {
+                t += std::f32::consts::TAU;
+            }
+            if at_end {
+                *b = p;
+                *a1 = t;
+            } else {
+                *a = p;
+                *a0 = t;
+            }
+        }
+    }
 }
 
 fn chain_fragments(mut frags: Vec<Vec<Seg>>) -> Vec<Vec<Seg>> {

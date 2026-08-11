@@ -291,9 +291,9 @@ free-form-wall tessellation leaks, and 15 sloped audit failures.
 
 Defects this rewrite found, all pre-existing and none diagnosed:
 
-- **An opening whose run abuts a reentrant fillet panics the open-run planner** — `open-run
-  neighbour must be straight (got an arc before/after the run)`, 7/150 on L-shaped bins, plus a
-  rarer `no pinch for run start`. `resolve_open_runs` casts a ray from the run's endpoint along the
+- **An opening whose run abuts a reentrant fillet panics the open-run planner** — *fixed*, see the
+  pinch note below. It was `open-run neighbour must be straight (got an arc before/after the run)`,
+  7/150 on L-shaped bins, plus a rarer `no pinch for run start`. `resolve_open_runs` casts a ray from the run's endpoint along the
   *direction of the adjacent straight segment* to pinch against the outer loop, then truncates that
   segment to the hit. At a reentrant corner the adjacent cavity segment is the concave fillet arc,
   and there is no line to cast along or to truncate. This is why the two asserting opening profiles
@@ -324,6 +324,22 @@ Defects this rewrite found, all pre-existing and none diagnosed:
   builds its `Vec` by iterating a `HashMap`, and `TessLeak`'s `Debug` carries `faces: [..]`, so the
   message a case fails with is hash-ordered. The gating profiles are stable across five runs.
 
+**The pinch follows the cavity wall itself, not a ray along it.** `resolve_open_runs` used to cast
+from the run's endpoint along the *direction* of the adjacent segment, which only exists if that
+segment is straight; at a reentrant corner it is the concave fillet arc and there was nothing to
+cast along. `pinch_seg` intersects the neighbouring segment with the outline instead
+(`region2d::seg_seg_points`, now public), which finds the crossing an arc genuinely has — on a 3-cell
+L the fillet arc meets the outline at (125.75, 42.6) — and agrees exactly with the ray on a straight
+neighbour, since there the ray and the segment are the same line. Three pieces make it general:
+`reach_seg` continues the segment `PINCH_REACH` past its own end, because a wall can fall either
+side of the boundary (an open span runs out *past* it to the pitch line, while a wall meeting a
+rounded notch corner stops *short*); `truncate_seg` moves an arc's parameter range with its
+endpoint, or the two disagree about where the arc stops; and `split_at` splits an outer **arc**
+piece, since a notch's outer fillet is exactly where a short wall meets the outline. Only a line's
+split records a `peg_splits` station — a peg's top ring welds along a straight shared run, so an arc
+has none. This took `fuzz_stripped_polyominoes` 66/150 → 57/150 and retired both `arc before/after
+the run` classes.
+
 **`fuzz_stripped_polyominoes` reports rather than gates, and it found four undiagnosed classes on
 its first run.** Half a complex polyomino's perimeter is the first thing to reach openings meeting a
 reentrant corner in quantity: 66/150 cases fail, 42 of them the two documented open-run panics
@@ -331,9 +347,16 @@ reentrant corner in quantity: 66/150 cases fail, 42 of them the two documented o
 reentrant corner is where the floor fillet legitimately degrades -- so what it holds is that the bin
 builds, stays manifold, audits clean and tessellates without leaks. The rest:
 
-- **21 cases hand the triangulator a face whose loops do not tile**, in two shapes: a boundary edge
-  in 2 triangles where 1 is wanted, and an interior edge in 4 where 2 are wanted. The same assert as
-  `CROSSING_WALL_TILING`, reached through openings rather than crossing walls.
+- **28 cases hand the triangulator a face whose loops do not tile** (21 before the pinch fix, which
+  carried nine previously-panicking cases far enough to reach this instead). The same assert as
+  `CROSSING_WALL_TILING`, reached through openings rather than crossing walls. Characterised on a
+  **one-cell** bin at `height_units: 1`, `cavity_corner_radius: 4.0` with one open edge: the face is
+  the outer wall band at the opening, between the peg top and the floor, and its loop is
+  `(124.55, 4.75) → (122.0, 4.75) → (122.0, 8.2) → (121.55, 8.2) → (124.55, 8.2)`. That fourth point
+  is a **spur** — the loop runs 0.45 mm left along z=8.2 and then straight back over itself — so the
+  loop is not simple and no triangulation of it can tile. The defect is in whoever authored that
+  loop, which is what the `triangulate` assert has always said; where the 0.45 comes from is not yet
+  known.
 - **2 cases leave an edge unpaired** (`used fwd=0 bwd=1`).
 - **1 case builds a `Plane` from a zero-length normal.** That one is now caught where it is made
   rather than four layers downstream: `Surface::plane` asserts its normal is finite and non-zero,

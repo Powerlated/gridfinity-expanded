@@ -374,7 +374,10 @@ fn circle_circle_pts(c0: Vec2, r0: f32, c1: Vec2, r1: f32) -> Vec<Vec2> {
     vec![base + perp * h, base - perp * h]
 }
 
-fn seg_seg_points(p: &Seg, q: &Seg) -> Vec<Vec2> {
+/// Every point the two segments actually share, each lying on both of them.
+/// Exposed because the open-run planner has to find where a cavity wall leaves
+/// the bin's outline, and that wall may be an arc.
+pub fn seg_seg_points(p: &Seg, q: &Seg) -> Vec<Vec2> {
     perf::count(perf::Metric::SegSegPoints);
     let raw = match (*p, *q) {
         (Seg::Line { a, b }, Seg::Line { a: c, b: d }) => {
