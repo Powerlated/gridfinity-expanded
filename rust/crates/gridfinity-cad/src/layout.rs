@@ -1,4 +1,4 @@
-use crate::kernel::hash::FxHashSet;
+use crate::kernel::hash::{FxHashMap, FxHashSet};
 
 pub const PITCH: i32 = 42;
 
@@ -182,6 +182,132 @@ pub fn sort_edges(edges: &mut [GridEdge]) {
     edges.sort_by(|a, b| (a.orientation, a.x, a.y).cmp(&(b.orientation, b.x, b.y)));
 }
 
+/// The compartments a piece's dividers cut its cells into: the connected
+/// components of `cells` under *adjacent, and the edge between them carries no
+/// divider*.
+///
+/// One compartment is one cavity. `gridfinity::plan_cavity` reaches the same
+/// partition only indirectly -- it subtracts a `wall_thickness` strip per
+/// divider and lets `trace_rects` fall apart into whatever pieces that leaves --
+/// so the partition exists there as an output of a rectilinear boolean rather
+/// than as something the model states. A cavity authored as a boundary walk
+/// needs it stated: the walk runs per compartment, before any geometry exists.
+///
+/// Cells are returned sorted within a component and components in the order of
+/// their least cell, so the partition is a function of the input alone.
+pub fn compartments(cells: &[GridCell], dividers: &FxHashSet<GridEdge>) -> Vec<Vec<GridCell>> {
+    let set = cell_set(cells);
+    assert_eq!(
+        set.len(),
+        cells.len(),
+        "a piece's cells are distinct (got {} cells over {} positions)",
+        cells.len(),
+        set.len()
+    );
+    let mut ordered: Vec<GridCell> = cells.to_vec();
+    ordered.sort_unstable_by_key(|c| (c.x, c.y));
+
+    // (neighbour, the cell edge shared with it)
+    let across = |c: GridCell| {
+        [
+            (
+                GridCell { x: c.x - 1, y: c.y },
+                GridEdge {
+                    x: c.x,
+                    y: c.y,
+                    orientation: Orientation::V,
+                },
+            ),
+            (
+                GridCell { x: c.x + 1, y: c.y },
+                GridEdge {
+                    x: c.x + 1,
+                    y: c.y,
+                    orientation: Orientation::V,
+                },
+            ),
+            (
+                GridCell { x: c.x, y: c.y - 1 },
+                GridEdge {
+                    x: c.x,
+                    y: c.y,
+                    orientation: Orientation::H,
+                },
+            ),
+            (
+                GridCell { x: c.x, y: c.y + 1 },
+                GridEdge {
+                    x: c.x,
+                    y: c.y + 1,
+                    orientation: Orientation::H,
+                },
+            ),
+        ]
+    };
+    let joined = |c: GridCell, n: GridCell, e: GridEdge| {
+        set.contains(&n) && !dividers.contains(&e) && c != n
+    };
+
+    let mut of: FxHashMap<GridCell, usize> = FxHashMap::default();
+    let mut out: Vec<Vec<GridCell>> = Vec::new();
+    for &seed in &ordered {
+        if of.contains_key(&seed) {
+            continue;
+        }
+        let ci = out.len();
+        let mut comp = vec![seed];
+        of.insert(seed, ci);
+        let mut stack = vec![seed];
+        while let Some(c) = stack.pop() {
+            for (n, e) in across(c) {
+                if !joined(c, n, e) || of.contains_key(&n) {
+                    continue;
+                }
+                of.insert(n, ci);
+                comp.push(n);
+                stack.push(n);
+            }
+        }
+        comp.sort_unstable_by_key(|c| (c.x, c.y));
+        out.push(comp);
+    }
+
+    // It partitions: every cell lands in exactly one component, and no component
+    // is empty. `of` is keyed by cell, so the count is the whole statement.
+    assert_eq!(
+        of.len(),
+        cells.len(),
+        "the compartments cover {} of the piece's {} cells",
+        of.len(),
+        cells.len()
+    );
+    assert_eq!(
+        out.iter().map(|c| c.len()).sum::<usize>(),
+        cells.len(),
+        "the compartments overlap: {} cells across {} distinct",
+        out.iter().map(|c| c.len()).sum::<usize>(),
+        cells.len()
+    );
+    assert!(
+        out.iter().all(|c| !c.is_empty()),
+        "a compartment came back with no cells"
+    );
+    // They are maximal: an undivided adjacency never crosses two of them.
+    for &c in &ordered {
+        for (n, e) in across(c) {
+            if joined(c, n, e) {
+                assert_eq!(
+                    of[&c], of[&n],
+                    "cells {c:?} and {n:?} are adjacent across the undivided edge {e:?} \
+                     yet landed in compartments {} and {}",
+                    of[&c], of[&n]
+                );
+            }
+        }
+    }
+    out
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct EffectiveWalls {
     pub walled: FxHashSet<GridEdge>,
@@ -357,6 +483,41 @@ mod tests {
         assert_eq!(f.width_cells, 2);
         assert_eq!(f.depth_cells, 2);
         assert_eq!(f.mm(), (84.0, 84.0));
+    }
+
+    /// The two readings a divider can have. Cutting *every* internal adjacency
+    /// isolates each cell; cutting one that a path goes around changes nothing,
+    /// which is why the compartments are components rather than a per-edge
+    /// count. The bijection with `trace_rects`'s output is asserted in
+    /// `gridfinity::plan_piece` on every bin the suite builds.
+    #[test]
+    fn a_divider_makes_a_compartment_only_where_it_separates() {
+        let block = cells(&[(0, 0), (1, 0), (0, 1), (1, 1)]);
+        let all: FxHashSet<GridEdge> = internal_edges(&block).iter().copied().collect();
+        assert_eq!(all.len(), 4);
+        assert_eq!(compartments(&block, &all).len(), 4);
+
+        let one: FxHashSet<GridEdge> = [GridEdge {
+            x: 1,
+            y: 0,
+            orientation: Orientation::V,
+        }]
+        .into_iter()
+        .collect();
+        let comps = compartments(&block, &one);
+        assert_eq!(comps.len(), 1, "the ring routes around a single divider");
+        assert_eq!(comps[0].len(), 4);
+
+        let column: FxHashSet<GridEdge> = all
+            .iter()
+            .copied()
+            .filter(|e| e.orientation == Orientation::V)
+            .collect();
+        assert_eq!(column.len(), 2);
+        let comps = compartments(&block, &column);
+        assert_eq!(comps.len(), 2);
+        assert_eq!(comps[0], cells(&[(0, 0), (0, 1)]));
+        assert_eq!(comps[1], cells(&[(1, 0), (1, 1)]));
     }
 
     #[test]

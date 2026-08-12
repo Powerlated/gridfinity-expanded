@@ -704,6 +704,29 @@ Per corner the radius is chosen by the pair of edges meeting there: both walled 
 reentrant; both open → the profile's, `OUTER_R` convex / square reentrant; walled against divider →
 square. Only **walled against open** needs the line-against-outline crossing, and only there.
 
+**The compartment the walk runs over is `layout::compartments`, and it provably matches the
+tracer's.** `plan_cavity` never names a compartment: it subtracts a strip per divider and per walled
+edge, hands the lot to `trace_rects`, and the compartments are whatever that falls apart into. The
+walk cannot work that way — it needs the partition *before* any geometry exists — so `compartments`
+states it combinatorially instead: the connected components of the piece's cells under *adjacent,
+and the edge between them carries no divider*. Note it is components and not a per-edge count, which
+`a_divider_makes_a_compartment_only_where_it_separates` is what says: a divider a path routes around
+separates nothing.
+
+`assert_traced_loops_are_the_compartments` holds the two together on every bin the suite builds,
+mapping each traced outer loop to a compartment through `loop_interior_cell` — read off the first
+edge's midpoint and the inward side exactly, no epsilon, since `trace_rects` traces
+material-on-the-left and rectilinear. Injectivity is unconditional. The **counts** match only while
+`2·(HALF_TOL + wt) < GRID_PITCH`, and that bound is the whole argument: under it a compartment
+always keeps a `pitch − 2·(HALF_TOL + wt)` square at each cell's centre (so it yields a loop) and
+every undivided adjacency keeps a passage that wide (so it yields only one), while every divided one
+is covered by a full-pitch strip of width `wt` (so two compartments never merge). Above it a bin's
+walls are thicker than its cells and a compartment may be starved to nothing or pinched in two;
+neither is a defect, so the equality is guarded rather than asserted flat.
+
+That assert is the gate for step 2 replacing `plan_cavity`: it says the partition the walk will run
+over is the one the model builds today. It fires nowhere across all eight profiles.
+
 This replaced a ray-cast pinch: cast from the run's endpoint along the *direction* of the adjacent
 cavity segment, truncate it to the hit, walk the outline between the two hits, then rebuild the wall
 from whatever the walk left and chain the fragments into loops. It needed the neighbour to be

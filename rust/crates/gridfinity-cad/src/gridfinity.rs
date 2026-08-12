@@ -1558,6 +1558,99 @@ fn plan_cavity(
     (pos, neg)
 }
 
+/// A cell of the compartment a traced cavity loop bounds.
+///
+/// `trace_rects` traces material-on-the-left, so the inward side of an outer
+/// loop is the left of travel; the loop is rectilinear, so one coordinate of the
+/// first edge's midpoint is constant and names a rect boundary while the other
+/// runs strictly between two of them. The cell is read off exactly rather than
+/// by nudging inward and flooring: along the normal, a boundary lying *on* a
+/// pitch line belongs to the cell the material is on, which is what
+/// `ceil(u) - 1` says on the negative side and `floor(u)` on the positive one.
+/// Along the edge the midpoint may still land on a pitch line, and then either
+/// neighbouring cell is a correct answer -- the region runs continuously across
+/// that line, so both cells carry it and both are in the same compartment.
+fn loop_interior_cell(lp: &TracedLoop) -> GridCell {
+    assert!(
+        lp.pts.len() >= 4,
+        "a traced rectilinear loop has at least four points, got {}",
+        lp.pts.len()
+    );
+    let (a, b) = (lp.pts[0], lp.pts[1]);
+    let d = b - a;
+    assert!(
+        (d.x == 0.0) != (d.y == 0.0),
+        "a traced loop's edge is axis aligned and non-degenerate, got {a:?} -> {b:?}"
+    );
+    let m = (a + b) * 0.5;
+    let n = Vec2::new(-d.y, d.x);
+    let below = |v: f32| (v / GRID_PITCH).floor() as i32;
+    let above = |v: f32| (v / GRID_PITCH).ceil() as i32 - 1;
+    if d.y == 0.0 {
+        GridCell {
+            x: below(m.x),
+            y: if n.y > 0.0 { below(m.y) } else { above(m.y) },
+        }
+    } else {
+        GridCell {
+            x: if n.x > 0.0 { below(m.x) } else { above(m.x) },
+            y: below(m.y),
+        }
+    }
+}
+
+/// The traced cavity outers are exactly the piece's compartments, one apiece.
+///
+/// `plan_cavity` never names a compartment: it subtracts a strip per divider and
+/// per walled edge and hands the lot to `trace_rects`, and the compartments are
+/// whatever that falls apart into. `layout::compartments` states the same
+/// partition combinatorially, and the cavity walk that replaces the tracer will
+/// run off *that*, so the two have to agree before anything is moved onto it.
+///
+/// Injectivity holds unconditionally. The count matches whenever a cell is wider
+/// than the two strips that can eat into it, `2 * (HALF_TOL + wt) < GRID_PITCH`:
+/// below that bound a compartment can be starved to nothing (no loop at all) or
+/// pinched in two (two loops for one compartment), and neither is a defect --
+/// it is a bin whose walls are thicker than its cells.
+fn assert_traced_loops_are_the_compartments(
+    outers: &[&TracedLoop],
+    cells: &[GridCell],
+    walls: &EffectiveWalls,
+    wt: f32,
+) {
+    let comps = crate::layout::compartments(cells, &walls.dividers);
+    let mut of: HashMap<GridCell, usize> = HashMap::new();
+    for (i, comp) in comps.iter().enumerate() {
+        for &c in comp {
+            of.insert(c, i);
+        }
+    }
+    let mut claimed: Vec<Option<usize>> = vec![None; comps.len()];
+    for (li, lp) in outers.iter().enumerate() {
+        let c = loop_interior_cell(lp);
+        let ci = *of.get(&c).unwrap_or_else(|| {
+            panic!("traced cavity loop {li} lies over cell {c:?}, which is not one of the piece's")
+        });
+        assert!(
+            claimed[ci].is_none(),
+            "traced cavity loops {} and {li} both bound compartment {ci}",
+            claimed[ci].expect("the slot was just found occupied")
+        );
+        claimed[ci] = Some(li);
+    }
+    if 2.0 * (HALF_TOL + wt) < GRID_PITCH {
+        assert_eq!(
+            outers.len(),
+            comps.len(),
+            "{} traced cavity loops for {} compartments, at a wall of {wt} mm that leaves \
+             {} mm of cell between two strips",
+            outers.len(),
+            comps.len(),
+            GRID_PITCH - 2.0 * (HALF_TOL + wt)
+        );
+    }
+}
+
 fn plan_piece(
     p: &Params,
     cells: &[GridCell],
@@ -1634,6 +1727,7 @@ fn plan_piece(
     }
 
     let outers_traced: Vec<&TracedLoop> = traced.iter().filter(|l| !l.is_hole()).collect();
+    assert_traced_loops_are_the_compartments(&outers_traced, cells, &walls, wt);
     let holes_of = |ol: &TracedLoop| -> Vec<&TracedLoop> {
         traced
             .iter()
