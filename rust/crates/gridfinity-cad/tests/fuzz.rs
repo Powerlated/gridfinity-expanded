@@ -10,6 +10,7 @@ use gridfinity_cad::gridfinity::{
     self, BinSlope, GRID_PITCH, InnerWall, LogicalBin, Mode, Params, SlopeDir, rect_cells,
 };
 use gridfinity_cad::kernel::geom::Surface;
+use gridfinity_cad::kernel::program::BlendReport;
 use gridfinity_cad::kernel::mesh::Mesh;
 use gridfinity_cad::kernel::tess::tessellate;
 use gridfinity_cad::layout::{
@@ -706,7 +707,18 @@ fn floor_fillet_coverage(solid: &Solid) -> (usize, usize) {
 ///
 /// A bin with no wall left standing is exempt: there is nothing for a floor
 /// fillet to roll against.
-fn opening_keeps_the_fillet(c: &Case, opened: &Solid) -> Result<(), String> {
+///
+/// The report is compared as well as the solid, because `is_clean()` is
+/// **vacuously true at zero requested**: a change that stops `plan_piece`
+/// asking for the fillet altogether scores better on `FILLET_FAILED` than one
+/// that asks and is refused, so tuning the model against that gate alone
+/// rewards deleting the blend request. `made()` is what a user would see, and
+/// it may not fall to nothing on a bin whose closed build rounds anything.
+fn opening_keeps_the_fillet(
+    c: &Case,
+    opened: &Solid,
+    opened_blends: &BlendReport,
+) -> Result<(), String> {
     if c.params.open_edges.is_empty() {
         return Ok(());
     }
@@ -721,9 +733,20 @@ fn opening_keeps_the_fillet(c: &Case, opened: &Solid) -> Result<(), String> {
     }
     let mut closed = c.params.clone();
     closed.open_edges.clear();
-    let Ok(before) = gridfinity::try_build(&closed) else {
+    let Ok((before, before_blends)) = gridfinity::try_build_reporting(&closed) else {
         return Ok(());
     };
+    if before_blends.made() > 0 && opened_blends.made() == 0 {
+        return Err(format!(
+            "{OPENING_LOSES_FILLET}: {} opening(s) left the bin asking for {} blend(s) where \
+             the same bin closed asks for {} and lands {}, though {} wall(s) still stand",
+            c.params.open_edges.len(),
+            opened_blends.requested,
+            before_blends.requested,
+            before_blends.made(),
+            walls.walled.len()
+        ));
+    }
     let (was_floors, was_sharp) = floor_fillet_coverage(&before);
     let (now_floors, now_sharp) = floor_fillet_coverage(opened);
     if now_sharp <= was_sharp {
@@ -788,7 +811,7 @@ fn check(c: &Case) -> Result<(), String> {
             ));
         }
 
-        opening_keeps_the_fillet(c, &whole)?;
+        opening_keeps_the_fillet(c, &whole, &blends)?;
 
         if pieces.is_empty() {
             return Ok(());

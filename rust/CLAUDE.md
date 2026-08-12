@@ -181,11 +181,11 @@ profiles use; `Share(1, 2)` is `fuzz_stripped_polyominoes`.
 | `fuzz_inner_walls` | freeform walls on a fixed 2×2 | **red 23/150** — 6 defects |
 | `fuzz_tidy_inner_walls` | tidy walls, up to 3 so they cross | green |
 | `fuzz_wall_openings` | `open_edges` + `divider_edges` on rectangles | green |
-| `fuzz_openings_and_inner_walls` | both of the above at once | **red 1/150** — `OPENING_LOSES_FILLET` |
+| `fuzz_openings_and_inner_walls` | both of the above at once | **red 6/150** — `OPENING_LOSES_FILLET` |
 | `fuzz_bin_shapes` | polyominoes, flood-fill pieces | green |
 | `fuzz_split_pieces` | polyominoes, `SplitLine`s + `partition_cells` | **red 1/120** — `TRIM_SECTION_CURVE` |
 | `fuzz_stripped_polyominoes` | polyominoes with **half** the perimeter wall opened | **red 31/150** — 7 defects |
-| `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | **red 20/400** — 6 defects |
+| `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | **red 24/400** — 7 defects |
 
 Every one of those reds was already failing before; it was on a `known` list, or behind the
 `require_blends` opt-out, or both. Nothing here is a regression, and the counts are the backlog.
@@ -353,6 +353,20 @@ struggles rather than only on rectangles; it runs on every profile now, not just
 `a_cavity_floor_is_rounded_exactly_when_the_model_filleted_it` pins the predicate against a 2×2 with
 and without a divider and with `floor_fillet` on and off — both of its failure modes (finding no
 floor, and calling every floor rounded) are otherwise silent passes.
+
+**It compares the report too, because `is_clean()` is vacuously true at zero requested.** A change
+that stops `plan_piece` asking for the fillet at all scores *better* on `FILLET_FAILED` than one
+that asks and is refused — 0 requested / 0 dropped is a clean report — so tuning `plan_cavity`
+against that gate alone rewards deleting the blend request. That is not hypothetical: a cavity
+change aimed at reentrant notches took `fuzz_stripped_polyominoes` 31/150 → 26/150 while taking one
+5-cell bin from 13 requested / 2 refused to **0 requested**, and every gate called it an
+improvement. So `opening_keeps_the_fillet` now also fails when `made()` falls to nothing on a bin
+whose closed build lands anything. It is deliberately the crudest possible form of the question —
+`before.made() > 0 && after.made() == 0` — because the geometric per-compartment check is the
+precise one and this only has to close the floor under it. It cost `fuzz_openings_and_inner_walls`
+1/150 → **6/150** and `fuzz_params_broad` 20/400 → **24/400**, all of them pre-existing and none
+previously visible; the worst reads *0 blend(s) where the same bin closed asks for 38 and lands 38*.
+The clean profiles stayed clean, `fuzz_wall_openings` included.
 
 That is fixed. **`fuzz_wall_openings` is clean at six seeds** (default, 1, 7, 13, 42, 99) and at
 `FUZZ_CASES=600`, under the per-compartment check and with a refused fillet failing — which is the
