@@ -10,7 +10,7 @@ use crate::kernel::rectregion::{
 };
 use crate::kernel::region2d::{
     chain_loops, loops_within, point_seg_distance, presplit_regions, region_difference,
-    region_intersection, split_regions,
+    region_intersection, seg_seg_points, split_regions,
 };
 use crate::kernel::sketch::{
     Aabb, Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop, segs_bbox,
@@ -2802,13 +2802,29 @@ fn blendable_segs(shape: &[Seg], allow: &[bool]) -> Vec<bool> {
 /// instead would clamp on a thin finger of material -- its two sides are close,
 /// but the ball rolls around the outside of it and nothing is in its way.
 ///
+/// The ray decides **which** boundary is across the passage; the width itself is
+/// then the distance from the sample to that whole segment, not the length of
+/// the ray. The two differ whenever the ray leaves at anything but a right angle
+/// to what it hits, and the difference is one-sided in the wrong direction: the
+/// case that found this fires a ray off a wall finger's tip that is tilted 2°
+/// against the cavity wall it crosses to, measuring a 3.0496 mm gap as 3.0518
+/// and passing a 1.5259 mm radius where 1.5248 fits. Halving the distance to the
+/// segment is exact for the disc that touches both, which is what a rolling ball
+/// in the passage is.
+///
+/// Samples are the true segments, arcs included, never a chord approximation:
+/// both endpoints of every segment plus interior points about `STEP` apart. The
+/// endpoints matter -- a rounded finger tip's nearest point to the wall opposite
+/// is the corner where its end cap meets its side, and interior sampling walks
+/// straight past it.
+///
 /// Sampling can only miss a narrow spot, never invent one, so the bound errs
 /// towards leaving the radius alone. It is an upper bound and not a guarantee:
 /// a passage that narrows between samples still gets through.
 fn max_inward_radius(segs: &[Seg]) -> f32 {
     const STEP: f32 = 0.5;
-    const ARC_CHORDS: usize = 8;
     const EPS: f32 = 1e-3;
+    const REACH: f32 = 1e3;
 
     // The inward direction is read off the winding, so a loop that encloses
     // nothing does not merely give a poor bound -- it has no inside, and every
@@ -2821,69 +2837,82 @@ fn max_inward_radius(segs: &[Seg]) -> f32 {
         segs.len()
     );
     let ccw = area > 0.0;
-    // One polyline for the whole loop, so a ray is tested against every part of
-    // the boundary including the segment it started from.
-    let mut poly: Vec<Vec2> = Vec::new();
-    for s in segs {
-        match *s {
-            Seg::Line { a, .. } => poly.push(a),
-            Seg::Arc {
-                center,
-                radius,
-                a0,
-                a1,
-                ..
-            } => {
-                for i in 0..ARC_CHORDS {
-                    let t = a0 + (a1 - a0) * (i as f32 / ARC_CHORDS as f32);
-                    poly.push(center + Vec2::new(t.cos(), t.sin()) * radius);
-                }
-            }
-        }
-    }
-    let n = poly.len();
-    if n < 3 {
+    if segs.len() < 2 {
         return f32::INFINITY;
     }
 
     let mut best = f32::INFINITY;
-    for i in 0..n {
-        let (p0, p1) = (poly[i], poly[(i + 1) % n]);
-        let d = p1 - p0;
-        let len = d.length();
-        if len < EPS {
-            continue;
-        }
-        let t = d / len;
-        // Interior is to the left of travel on a counter-clockwise loop.
-        let inward = if ccw {
-            Vec2::new(-t.y, t.x)
-        } else {
-            Vec2::new(t.y, -t.x)
-        };
-        let steps = ((len / STEP).floor() as usize).max(1);
-        for k in 0..steps {
-            let p = p0 + d * ((k as f32 + 0.5) / steps as f32);
-            for j in 0..n {
-                if j == i {
+    for s in segs {
+        for (p, along) in seg_samples(s, STEP) {
+            // Interior is to the left of travel on a counter-clockwise loop.
+            let inward = if ccw {
+                Vec2::new(-along.y, along.x)
+            } else {
+                Vec2::new(along.y, -along.x)
+            };
+            let ray = Seg::Line {
+                a: p,
+                b: p + inward * REACH,
+            };
+            for other in segs {
+                if !seg_seg_points(&ray, other)
+                    .iter()
+                    .any(|hit| (*hit - p).length() > EPS)
+                {
                     continue;
                 }
-                let (q0, q1) = (poly[j], poly[(j + 1) % n]);
-                let e = q1 - q0;
-                let denom = inward.x * (-e.y) - inward.y * (-e.x);
-                if denom.abs() < 1e-12 {
-                    continue;
-                }
-                let rhs = q0 - p;
-                let s = (rhs.x * (-e.y) - rhs.y * (-e.x)) / denom;
-                let u = (inward.x * rhs.y - inward.y * rhs.x) / denom;
-                if s > EPS && (0.0..=1.0).contains(&u) && s < best {
-                    best = s;
+                let d = point_seg_distance(p, other);
+                if d > EPS && d < best {
+                    best = d;
                 }
             }
         }
     }
     best / 2.0
+}
+
+/// Points along `s`, each with the unit direction the segment travels there:
+/// both endpoints and interior points no more than `step` apart, taken on the
+/// true line or the true circle so neither the point nor the tangent is ever
+/// read off a chord. A degenerate segment yields nothing.
+fn seg_samples(s: &Seg, step: f32) -> Vec<(Vec2, Vec2)> {
+    let mut out = Vec::new();
+    let (len, at): (f32, Box<dyn Fn(f32) -> (Vec2, Vec2)>) = match *s {
+        Seg::Line { a, b } => {
+            let d = b - a;
+            let len = d.length();
+            let t = d / len.max(f32::MIN_POSITIVE);
+            (len, Box::new(move |u| (a + d * u, t)))
+        }
+        Seg::Arc {
+            center,
+            radius,
+            a0,
+            a1,
+            ..
+        } => {
+            let sweep = a1 - a0;
+            (
+                sweep.abs() * radius,
+                Box::new(move |u| {
+                    let ang = a0 + sweep * u;
+                    let radial = Vec2::new(ang.cos(), ang.sin());
+                    (
+                        center + radial * radius,
+                        Vec2::new(-radial.y, radial.x) * sweep.signum(),
+                    )
+                }),
+            )
+        }
+    };
+    if !(len > 0.0) {
+        return out;
+    }
+    let n = (len / step).ceil() as usize;
+    for k in 0..=n {
+        out.push(at(k as f32 / n as f32));
+    }
+    out
 }
 
 fn is_convex_arc(shape: &[Seg], s: &Seg) -> bool {
