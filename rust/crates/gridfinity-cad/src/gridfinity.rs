@@ -801,6 +801,21 @@ fn author_outer_loop(
         let end = to + d1 * PEG_TANGENT + n1 * ins_next;
         let both_std = is_std && (ins_next - HALF_TOL).abs() < 1e-6;
         let same_side = walled(&s.edge) == walled(&s_next.edge);
+        // Rounding a reentrant corner is a property of the *wall* that turns it,
+        // so it takes a wall on both edges. The arc is struck about a centre
+        // `OUTER_R` inside each inset line, which puts it `OUTER_R - ins` past
+        // both **pitch** lines, out over a cell the bin does not occupy -- the
+        // overhang `carve_to_cells` reaches for with `REENTRANT_FILLET_OVERHANG`.
+        // That bulge is legitimate only as the outside of a wall.
+        //
+        // Open one of the two edges and `same_side` already squares the corner.
+        // Open *both* and `same_side` held, so the corner was still rounded --
+        // while the cavity, which subtracts no strip for an open edge, ran out
+        // only as far as the pitch lines. `cavity & outline` then clipped away
+        // every other scrap of wall and left the bulge standing alone: a
+        // 2.154 mm curved triangle rising 19.8 mm from the floor, unattached
+        // above it, in the middle of the doorway the two openings made.
+        let corner_walled = walled(&s.edge) && walled(&s_next.edge);
         if cross.abs() < 0.5 {
             pieces.push(OuterPiece {
                 seg: Seg::Line { a: start, b: end },
@@ -826,11 +841,26 @@ fn author_outer_loop(
                 edge: None,
             });
             shared.corners.insert(s.to);
-        } else if cross < 0.0 && both_std && same_side {
+        } else if cross < 0.0 && both_std && same_side && corner_walled {
             let q = mm(s.to) + nrm * ins + n1 * ins_next;
             let center = q - nrm * OUTER_R - n1 * OUTER_R;
             let t1 = center + nrm * OUTER_R;
             let t2 = center + n1 * OUTER_R;
+            // The tangent points stand `OUTER_R - ins` beyond the pitch corner
+            // along each axis, and the arc between them stays nearer than that,
+            // so this is the whole of the bulge. `carve_to_cells` claims exactly
+            // `REENTRANT_FILLET_OVERHANG` of the empty cell to keep it; if the
+            // arc ever reached further, a split would shave the excess off and
+            // lose it from every piece.
+            assert!(
+                OUTER_R - ins <= REENTRANT_FILLET_OVERHANG
+                    && OUTER_R - ins_next <= REENTRANT_FILLET_OVERHANG,
+                "a reentrant fillet overhangs the pitch corner by {} x {} mm, past the {} mm \
+                 `carve_to_cells` reserves in the empty cell",
+                OUTER_R - ins,
+                OUTER_R - ins_next,
+                REENTRANT_FILLET_OVERHANG
+            );
             let a0 = f32::atan2(t1.y - center.y, t1.x - center.x);
             let a1 = f32::atan2(t2.y - center.y, t2.x - center.x);
             let (a0, a1) = short_arc(a0, a1);

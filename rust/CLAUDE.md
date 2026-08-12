@@ -184,7 +184,7 @@ profiles use; `Share(1, 2)` is `fuzz_stripped_polyominoes`.
 | `fuzz_openings_and_inner_walls` | both of the above at once | **red 6/150** — `OPENING_LOSES_FILLET` |
 | `fuzz_bin_shapes` | polyominoes, flood-fill pieces | green |
 | `fuzz_split_pieces` | polyominoes, `SplitLine`s + `partition_cells` | **red 1/120** — `TRIM_SECTION_CURVE` |
-| `fuzz_stripped_polyominoes` | polyominoes with **half** the perimeter wall opened | **red 31/150** — 7 defects |
+| `fuzz_stripped_polyominoes` | polyominoes with **half** the perimeter wall opened | **red 15/150** — 4 defects |
 | `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | **red 24/400** — 7 defects |
 
 Every one of those reds was already failing before; it was on a `known` list, or behind the
@@ -594,6 +594,30 @@ Defects this rewrite found, all pre-existing and none diagnosed:
   group between runs, moving counts (13 vs 14 distinct defects at 2000 cases). `tessellation_leaks`
   builds its `Vec` by iterating a `HashMap`, and `TessLeak`'s `Debug` carries `faces: [..]`, so the
   message a case fails with is hash-ordered. The gating profiles are stable across five runs.
+
+**Rounding a reentrant corner takes a wall on both of its edges.** The arc is struck about a centre
+`OUTER_R` inside each inset line, so it stands `OUTER_R - HALF_TOL` = 3.5 mm past both **pitch**
+lines, out over a cell the bin does not occupy — the overhang `carve_to_cells` reserves with
+`REENTRANT_FILLET_OVERHANG`. That bulge is the outside of the wall that turns the corner, and it is
+legitimate only as such.
+
+`same_side` in `author_outer_loop` already squared the corner when *one* of the two edges was open.
+When **both** were open it held (both unwalled), so the corner was still rounded — while the cavity,
+which subtracts no wall strip for an open edge, ran out only as far as the pitch lines.
+`cavity ∩ outline` then clipped away every other scrap of wall and left the bulge standing on its
+own: measured on an L at stock params, a curved triangle with 2.154 mm legs and 1.66 mm² of section,
+rising 19.8 mm from the floor to the rim with nothing attached to it above `floor_z`. It reads as
+one connected component only because it merges into the solid base below the floor, which is why a
+shell-count check walks straight past it. The guard is `corner_walled` now.
+
+This was chosen over trimming the bulge with the cavity, which produces the same voided corner but
+has to re-derive the blend chain around it — built naively it zeroed one 5-cell bin's fillet
+outright (13 requested → 0). Squaring costs nothing downstream because it changes the *sketch* the
+boolean consumes, not the boolean. The rounding guarantee it gives up — a sharp outer corner pokes
+through the cavity arc once `fr > wall_thickness · (2 + √2)` — cannot bind here: that failure is the
+rim strip between the two arcs self-intersecting, and where both edges are open there is no rim
+strip. `fuzz_stripped_polyominoes` went **31/150 → 15/150**, 7 → 4 defects, retiring every
+`FILLET_FAILED` class it had; the four that remain are all manifold panics. No other profile moved.
 
 **An opening is a boolean, not a walk.** `plan_cavity` subtracts a wall strip for every *walled*
 edge and none for an open one, so an opened cavity already runs out past the outline to the pitch

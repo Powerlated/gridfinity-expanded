@@ -134,6 +134,11 @@ STL is the only wired export format.
 carved as cannot meet the tilted floor; the walls are dropped and the bin builds without them. See
 `rust/CLAUDE.md`.
 
+**A reentrant corner is rounded only when both its edges are walled.** Open both and the corner
+squares: the outer fillet's arc stands 3.5 mm past both pitch lines, and with no wall there to be
+the outside of, it was left standing alone as a 2.15 mm fin the full height of the bin. See
+`rust/CLAUDE.md`.
+
 **A wall opening whose run reaches a reentrant corner builds, and keeps its floor fillet.** It used
 to panic in the open-run planner, which needed a straight perimeter run to pinch against; an opening
 is a boolean now and needs none. The fillet was the second half of it: the cavity's rounded corner
