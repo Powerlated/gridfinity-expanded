@@ -1671,12 +1671,30 @@ fn plan_piece(
         (shapes, Vec::new())
     };
     let mut opened: Vec<Vec<Seg>> = Vec::new();
+    // The standing wall's inner boundary, gathered as the cavities are clipped.
+    //
+    // A clipped cavity loop is made of exactly two kinds of run: the ones lying
+    // *on* the outline, which are the openings and bound no material at all, and
+    // the ones a wall still stands against. The second kind, reversed so it
+    // winds as a hole, is the whole of the wall's inner boundary -- there is
+    // nothing else between the cavity and the outline.
+    let mut wall_inner: Vec<Seg> = Vec::new();
     for (oi, ol) in outers_traced.iter().enumerate() {
         let shape = shapes[oi].clone();
         let cls = if openish {
             let cls = clip_cavity_to_outline(&shape, &outline);
             if cls.iter().any(|c| c.touched()) {
                 opened.push(shape.clone());
+                // Every loop this shape clipped into, not just the touched ones:
+                // the whole shape is what leaves the wall, so a sub-loop that
+                // happens to fall clear of the outline is an ordinary hole in it.
+                for cl in &cls {
+                    for (i, sg) in cl.segs.iter().enumerate() {
+                        if !cl.coincident[i] {
+                            wall_inner.push(sg.reversed());
+                        }
+                    }
+                }
             }
             cls
         } else {
@@ -1904,18 +1922,53 @@ fn plan_piece(
     // of it. A compartment that keeps all its walls is left solid here and
     // carved by its own cavity stack, exactly as before.
     let wall_loops = if openish {
-        // One compartment at a time. Taken together the raw shapes are not a
-        // region a difference can subtract -- each runs out to the pitch line
-        // at its openings, so two compartments facing the same empty cell
-        // overlap out there -- and clipping them first only trades that for a
-        // pair of long runs coincident with the outline, which the sweep
-        // resolves to nothing at all. Unioning them first is worse still: it
-        // merges the compartments the divider between them is supposed to keep
-        // apart. Subtracting one at a time asks the boolean for none of it.
-        let mut w = outline.clone();
-        for shape in &opened {
-            w = region_difference(&w, &[shape.clone()]);
+        // The standing wall is **authored, not differenced**.
+        //
+        // Its outer boundary is the outline wherever no opening replaced it,
+        // and its inner boundary is `wall_inner` -- each opened compartment's
+        // wall-facing runs, reversed. Those are the only two kinds of boundary
+        // material has here, so the wall is exactly their union, and the two
+        // sets meet precisely where a cavity leaves the outline.
+        //
+        // `presplit_regions` is what makes the outer half a per-segment test
+        // rather than a sweep: it gave the outline and the compartment shapes
+        // one segmentation, so every outline segment lies wholly inside or
+        // wholly outside each shape and its midpoint decides the whole segment.
+        //
+        // This replaces `outline - shape` folded over the compartments one at a
+        // time. That fold was forced: the raw shapes overlap out past the
+        // outline wherever two compartments face the same empty cell, so they
+        // could not be subtracted together, and they could not be clipped first
+        // either, because a clipped shape's long runs coincident with the
+        // outline resolve to nothing. Containment per segment asks the boolean
+        // for none of it -- overlap is harmless, since a segment swallowed twice
+        // is still just swallowed -- and it cannot lose a run to a coincidence,
+        // because coincident runs are exactly the ones `wall_inner` drops on
+        // purpose.
+        let mut frags: Vec<(Seg, ())> = Vec::new();
+        for sg in outline.iter().flatten() {
+            if !opened.iter().any(|sh| point_in_segs(seg_mid(sg), sh)) {
+                frags.push((*sg, ()));
+            }
         }
+        frags.extend(wall_inner.iter().map(|s| (*s, ())));
+        let n_frags = frags.len();
+        let chained = chain_loops(frags);
+        // `chain_loops` drops a chain it cannot close, so a boundary that does
+        // not partition into loops would leave the wall quietly missing a piece
+        // rather than failing. Every fragment belongs to exactly one closed
+        // loop, and that is the whole claim being made here.
+        let kept: usize = chained.iter().map(|l| l.len()).sum();
+        assert_eq!(
+            kept, n_frags,
+            "{tag}: the standing wall's boundary is {n_frags} segment(s) but chained into \
+             {} closed loop(s) covering only {kept} of them",
+            chained.len()
+        );
+        let w: Vec<Vec<Seg>> = chained
+            .into_iter()
+            .map(|l| l.into_iter().map(|(s, _)| s).collect())
+            .collect();
         let w = drop_degenerate(w);
         for p in w.iter().flatten().map(|sg| sg.start()) {
             o.split_outline_at(p, &mut peg_splits, &mut peg_arcs);

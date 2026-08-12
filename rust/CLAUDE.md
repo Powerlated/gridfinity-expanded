@@ -619,18 +619,31 @@ rim strip between the two arcs self-intersecting, and where both edges are open 
 strip. `fuzz_stripped_polyominoes` went **31/150 → 15/150**, 7 → 4 defects, retiring every
 `FILLET_FAILED` class it had; the four that remain are all manifold panics. No other profile moved.
 
-**An opening is a boolean, not a walk.** `plan_cavity` subtracts a wall strip for every *walled*
-edge and none for an open one, so an opened cavity already runs out past the outline to the pitch
-line. Intersecting it with the outline is therefore the whole of what an opening means, and the
-standing wall is the same pair of regions the other way round:
+**An opening is a boolean for the cavity and a walk for the wall.** `plan_cavity` subtracts a wall
+strip for every *walled* edge and none for an open one, so an opened cavity already runs out past
+the outline to the pitch line. Intersecting it with the outline is the whole of what an opening
+means to the cavity:
 
 ```
-cavity = shape ∩ outline          wall = outline − opened_cavities
+cavity = shape ∩ outline
+wall   = outline where no cavity replaced it  ∪  reversed(cavity runs that keep a wall)
 ```
 
 `clip_cavity_to_outline` marks a resulting run `coincident` when its midpoint lies on the outline —
-that is a span with no wall — and `region_difference` returns the wall already wound
-material-on-the-left, so `outward` follows the loop's area sign and nothing has to be chained.
+that is a span with no wall. Those runs bound no material and are exactly what the wall's authored
+boundary leaves out; everything else about the wall follows from the two halves above, chained.
+
+The overshoot is load-bearing and must stay. It is what keeps the cavity and the outline
+**transverse**, so `cavity ∩ outline` is a proper crossing rather than a coincidence. Authoring the
+cavity to abut the outline instead — a `HALF_TOL` strip at open edges, `OUTER_R` on the corners that
+land on the profile — was tried and is *not* a simplification: the intersection then takes A's copy
+of every coincident run, which is `trace_rects`' copy, while the base below `floor_z` uses
+`author_outer_loop`'s, and the two are the same circle split at different stations (the outline
+carries peg-weld splits at `PEG_TANGENT`, the traced loop does not). The corner arc interns twice and
+the solid opens along it — `fully_open_1x1_bin_is_watertight`, `edge 61 used fwd=0 bwd=1`, a
+`radius 3.75` circle at the outline's own corner centre. Abutting is only correct if the coincident
+runs are taken *from the outline* rather than re-authored, which is a bigger change than the boolean
+it removes.
 
 This replaced a ray-cast pinch: cast from the run's endpoint along the *direction* of the adjacent
 cavity segment, truncate it to the hit, walk the outline between the two hits, then rebuild the wall
@@ -653,13 +666,28 @@ Three things it does not get for free, and all three were manifold errors first:
   wall. Without it the base emits one long edge across a span the floor and the wall above have
   already divided (`edge 240 used fwd=0 bwd=1`). That split is also where `peg_splits` stations come
   from, so the peg profile still welds to the wall's bottom ring.
-- **The wall subtracts one compartment at a time.** The opened cavities are not a region a single
-  difference can take: each runs out past the outline to the pitch line at its own openings, so two
-  compartments facing the same empty cell overlap out there. Clipping them to the outline first only
-  trades that for a pair of long runs coincident with the outline, which the sweep resolves to
-  nothing at all; unioning them first is worse, merging the compartments the divider between them is
-  supposed to keep apart. Folding the loop `w = region_difference(&w, &[shape])` asks the boolean for
-  none of it.
+- **The wall is authored, not differenced.** Material here has exactly two kinds of boundary: the
+  outline wherever no opening replaced it, and each opened compartment's wall-facing cavity runs,
+  reversed so they wind as holes. The wall is their union, and the two sets meet precisely where a
+  cavity leaves the outline, so `chain_loops` closes them with no synthetic cap and no sweep.
+  `presplit_regions` is what makes the outer half a per-segment midpoint test rather than a boolean:
+  it gives the outline and the compartment shapes one segmentation, so every outline segment lies
+  wholly inside or wholly outside each shape.
+
+  This replaced `w = region_difference(&w, &[shape])` folded over the compartments one at a time,
+  and the fold was forced from both sides. The opened cavities are not a region a single difference
+  can take — each runs out past the outline to the pitch line at its own openings, so two
+  compartments facing the same empty cell overlap out there — and clipping them to the outline first
+  only trades that for a pair of long runs coincident with the outline, which the sweep resolves to
+  nothing at all. Unioning them first is worse, merging the compartments the divider between them is
+  supposed to keep apart. Containment per segment asks the boolean for none of it: overlap is
+  harmless, because a segment swallowed twice is still just swallowed, and a coincidence cannot
+  swallow a run by accident, because coincident runs are exactly the ones the inner half drops on
+  purpose. All eight profiles are byte-identical across it, ~1300 cases.
+
+  `chain_loops` **drops a chain it cannot close**, so the count is asserted: every fragment belongs
+  to exactly one closed loop. Without that a boundary that failed to partition would leave the wall
+  quietly missing a piece rather than failing.
 
 **`fuzz_stripped_polyominoes` found four undiagnosed classes on its first run and now gates at
 0/150.** Half a complex polyomino's perimeter is the first thing to reach openings meeting a
