@@ -727,6 +727,30 @@ neither is a defect, so the equality is guarded rather than asserted flat.
 That assert is the gate for step 2 replacing `plan_cavity`: it says the partition the walk will run
 over is the one the model builds today. It fires nowhere across all eight profiles.
 
+**Where two dividers meet at a compartment's reentrant corner, the tracer leaves a staircase, and
+the walk is what closes it.** A divider's subtraction rect spans exactly one cell edge and reaches
+`wall_thickness / 2` either side of it, so at a lattice point where two dividers meet, neither rect
+covers the quadrant diagonally opposite — the cavity keeps a `wt/2 × wt/2` tab of the junction that
+should be material. Measured on a 2×2 at `wt = 1.2` with cell (1,1) divided off, the L-shaped
+compartment traces
+
+```
+… (82.55, 41.4) (42.0, 41.4) (42.0, 42.0) (41.4, 42.0) (41.4, 82.55) …
+```
+
+— two reentrant corners and a convex one where there should be a single reentrant corner at
+`(41.4, 41.4)`, which is what `q = c + nrm·ins + n1·ins_next` gives for two edges inset `wt/2`. The
+walk gets that corner right by construction, and gets a corner the floor fillet can actually roll
+around instead of a 0.6 mm step.
+
+Patching the tracer instead is the trap: extending each divider rect by `wt/2` at both ends (the
+trick `src/lib/project/walls.ts` uses, where the band is reserved by construction) removes the
+staircase but bites a `wt × wt/2` tooth out of any compartment a divider merely ends inside — the
+extension is only sound where *another* divider or a walled edge continues at that lattice point,
+which is the walk's corner classification done in the wrong place. There is no test on this; the
+lib gate is green and the profiles are at their documented counts, because the tab is small enough
+to build.
+
 This replaced a ray-cast pinch: cast from the run's endpoint along the *direction* of the adjacent
 cavity segment, truncate it to the hit, walk the outline between the two hits, then rebuild the wall
 from whatever the walk left and chain the fragments into loops. It needed the neighbour to be
