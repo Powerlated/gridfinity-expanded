@@ -751,6 +751,48 @@ which is the walk's corner classification done in the wrong place. There is no t
 lib gate is green and the profiles are at their documented counts, because the tab is small enough
 to build.
 
+**The walk is built and it agrees with the tracer, corner for corner, on 1588 swept compartments.**
+`compartment_corners` is the walk: `cavity_inset` per edge (`HALF_TOL + wt` walled, `wt/2` at a
+divider, 0 at an opening) and one corner per turn at `c + nrm·ins + n1·ins_next`. Where the boundary
+does **not** turn there is still a corner to emit whenever the inset changes — a wall meeting an
+opening, or a wall meeting a divider, along one straight run. Those two inset lines are parallel and
+never meet, so the run contributes *two* corners and the boundary jogs across at the lattice point.
+That case is why `shape_loop` cannot be handed the job as it stands: its one-corner-per-point
+construction interpolates a diagonal ramp between two parallel inset lines instead of a right-angled
+step. A collinear pair at one inset contributes no corner, which is `merge_collinear`.
+
+`the_walk_reproduces_the_tracer_except_where_a_divider_meets_a_notch` sweeps every subset of six
+shapes' internal edges as dividers, perimeter closed and fully open, at `wt` 1.2 and 2.6, and pairs
+each compartment's walk against the traced loop over it. **All 2724 disagreements are one predicate**
+— a divider cutting the cell that holds one of the tracer's rectangle-shaped fixups — and the
+filter for it is derived from `plan_cavity`'s own emit condition rather than fitted to the failures,
+which is what makes 2724 excluded / 1588 exact a characterisation and not a tuned threshold. Two
+elementary amounts, both the reentrant corner patch:
+
+```
+t·(t − wt/2)     the patch with a divider along one of its two sides
+(t − wt/2)²      the patch with a divider along both
+```
+
+The patch is a full `t × t` square subtracted at a piece's reentrant corner, and it exists because
+the two wall strips there meet only at a point — the V wall holds the NW quadrant, the H wall the
+SE, and the patch is the SW square that joins them. It is the tracer's way of producing the corner
+the walk gets for free. Where a divider already covers part of that square, the rest of it is a lump
+of material hanging into the compartment: `1.45 × 0.85` at the default wall.
+`a_divider_junction_and_a_divider_by_a_notch_walk_to_a_single_corner` pins what the walk gives
+instead, in both cases, as explicit corner lists.
+
+**A divider finger is the thing the walk cannot express, and it is why nothing is wired in yet.** A
+divider whose two cells stay in one compartment — the ring routing around it, which is exactly
+`partial_divider_finger_is_watertight`'s 2×2 with one divider — separates nothing, so it lies on no
+compartment boundary and the walk never sees it, while `plan_cavity` still subtracts its strip and
+the model builds the wall stub the user asked for. Measured: the walk returns 6577.211 mm² against
+the tracer's 6528.55, and the 48.661 mm² between them is exactly the strip, `1.2 × (42 − HALF_TOL −
+1.2)`. A boundary walk over *cells* cannot describe a slot that stops inside one, so replacing
+`plan_cavity` needs a decision first — carry fingers as their own islands the way `InnerWall`
+already is, or extend the walk with an excursion into each finger — and it is a question about what
+the model is, not a detail of the port.
+
 This replaced a ray-cast pinch: cast from the run's endpoint along the *direction* of the adjacent
 cavity segment, truncate it to the hit, walk the outline between the two hits, then rebuild the wall
 from whatever the walk left and chain the fragments into loops. It needed the neighbour to be

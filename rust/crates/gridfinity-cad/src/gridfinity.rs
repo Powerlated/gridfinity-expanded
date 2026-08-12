@@ -904,6 +904,92 @@ fn author_outer_loop(
     pieces
 }
 
+/// How far one compartment's cavity stands in from a boundary edge's pitch line.
+///
+/// Three cases and no fourth: a wall's own thickness plus the bin's tolerance
+/// where a wall stands, half a divider's thickness where the compartment is
+/// divided from its neighbour, and nothing at all at an opening, where the
+/// cavity runs out to the pitch line and is pulled back by the outline instead.
+///
+/// A compartment boundary edge is a piece perimeter edge or a divider and can be
+/// nothing else -- two cells the piece holds either side of an undivided edge
+/// are the same compartment by construction -- so the three cases are a
+/// partition, which is what the `else` asserts rather than assumes.
+fn cavity_inset(walls: &EffectiveWalls, wt: f32, e: &GridEdge) -> f32 {
+    if walls.dividers.contains(e) {
+        wt / 2.0
+    } else if walls.walled.contains(e) {
+        HALF_TOL + wt
+    } else {
+        assert!(
+            walls.open.contains(e),
+            "compartment boundary edge {e:?} is neither divider, wall nor opening"
+        );
+        0.0
+    }
+}
+
+/// One compartment's cavity boundary, as the rectilinear loop of corners its own
+/// edges put it through.
+///
+/// Each edge contributes a line at its own inset, and each corner is where the
+/// two inset lines either side of it meet -- `c + nrm·ins + n1·ins_next`, the
+/// `q` of the corner construction, which for two axis-aligned edges is just one
+/// coordinate from each. That is the whole of it where the boundary turns.
+///
+/// Where the boundary *does not* turn there is still a corner to emit whenever
+/// the inset changes: a wall meeting an opening, or a wall meeting a divider,
+/// along one straight run. The two inset lines are then parallel and never meet,
+/// so the boundary steps across at the lattice point and the run contributes
+/// **two** corners rather than one. A collinear pair at one inset contributes
+/// none, which is the collinear merge `trace_rects` does with `merge_collinear`.
+///
+/// This is `plan_cavity` + `trace_rects` said directly, and over 1588 swept
+/// compartments it is the same answer corner for corner. The two disagree only
+/// where a divider meets one of the tracer's rectangle-shaped fixups -- a
+/// junction between two dividers, or the reentrant corner patch -- and neither
+/// case is one the walk has to reproduce; see
+/// `the_walk_reproduces_the_tracer_except_where_a_divider_meets_a_notch` for the
+/// enumeration and `CLAUDE.md` for what each is.
+fn compartment_corners(steps: &[Step], inset: &dyn Fn(&GridEdge) -> f32) -> Vec<Vec2> {
+    let n = steps.len();
+    assert!(
+        n >= 4,
+        "a compartment's boundary loop turns at least four times, got {n} step(s)"
+    );
+    let mut pts: Vec<Vec2> = Vec::with_capacity(n);
+    for k in 0..n {
+        let s = &steps[k];
+        let s_next = &steps[(k + 1) % n];
+        let d = dirv(s.dir());
+        let d1 = dirv(s_next.dir());
+        let nrm = left_of(s.dir());
+        let n1 = left_of(s_next.dir());
+        let ins = inset(&s.edge);
+        let ins_next = inset(&s_next.edge);
+        let c = mm(s.to);
+        // A cell region's boundary turns by a right angle or not at all; a
+        // reversal would need a spike of zero width, which no set of cells has.
+        assert!(
+            d.dot(d1) > -0.5,
+            "the boundary reverses at {c:?}: {d:?} then {d1:?}"
+        );
+        let cross = d.x * d1.y - d.y * d1.x;
+        if cross.abs() > 0.5 {
+            pts.push(c + nrm * ins + n1 * ins_next);
+        } else if (ins - ins_next).abs() > W_EPS {
+            pts.push(c + nrm * ins);
+            pts.push(c + n1 * ins_next);
+        }
+    }
+    assert!(
+        pts.len() >= 4,
+        "a compartment's cavity loop has at least four corners, got {}",
+        pts.len()
+    );
+    pts
+}
+
 fn short_arc(a0: f32, a1: f32) -> (f32, f32) {
     let mut d = a1 - a0;
     while d > PI {
@@ -3211,4 +3297,359 @@ fn build_baseplate(p: &Params) -> Solid {
         planar(&mut b, 0.0, false, bt, outer_bot);
     }
     b.build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::{effective_walls, internal_edges, perimeter_edges};
+
+    fn cells(coords: &[(i32, i32)]) -> Vec<GridCell> {
+        coords.iter().map(|&(x, y)| GridCell { x, y }).collect()
+    }
+
+    fn area(pts: &[Vec2]) -> f32 {
+        let n = pts.len();
+        (0..n)
+            .map(|i| {
+                let (a, b) = (pts[i], pts[(i + 1) % n]);
+                a.x * b.y - b.x * a.y
+            })
+            .sum::<f32>()
+            * 0.5
+    }
+
+    /// A cyclic point sequence in a canonical rotation, so two tracings of one
+    /// loop compare regardless of where each of them chose to start.
+    fn rotated(pts: &[Vec2]) -> Vec<Vec2> {
+        let n = pts.len();
+        let first = (0..n)
+            .min_by(|&i, &j| {
+                (pts[i].x, pts[i].y)
+                    .partial_cmp(&(pts[j].x, pts[j].y))
+                    .expect("traced corners are finite")
+            })
+            .expect("a non-empty loop");
+        (0..n).map(|i| pts[(first + i) % n]).collect()
+    }
+
+    fn same_loop(a: &[Vec2], b: &[Vec2]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        let (a, b) = (rotated(a), rotated(b));
+        a.iter().zip(&b).all(|(p, q)| (*p - *q).length() < 1e-3)
+    }
+
+    /// The cells holding a reentrant corner patch of `plan_cavity`'s that a
+    /// divider also cuts. The patch is the `t x t` square in the quadrant
+    /// diagonally opposite the absent one, so the two edges of *that* cell
+    /// meeting at the lattice point are the ones a divider would overlap.
+    /// Mirrors `plan_cavity`'s own condition for emitting the patch.
+    fn patched_cells(cells: &[GridCell], walls: &EffectiveWalls) -> HashSet<GridCell> {
+        let set: HashSet<GridCell> = cells.iter().copied().collect();
+        let mut out: HashSet<GridCell> = HashSet::new();
+        let mut lattice: HashSet<(i32, i32)> = HashSet::new();
+        for c in cells {
+            for l in [
+                (c.x, c.y),
+                (c.x + 1, c.y),
+                (c.x, c.y + 1),
+                (c.x + 1, c.y + 1),
+            ] {
+                if !lattice.insert(l) {
+                    continue;
+                }
+                let absent: Vec<(i32, i32)> = [(-1, -1), (0, -1), (-1, 0), (0, 0)]
+                    .iter()
+                    .filter(|(qx, qy)| {
+                        !set.contains(&GridCell {
+                            x: l.0 + qx,
+                            y: l.1 + qy,
+                        })
+                    })
+                    .copied()
+                    .collect();
+                if absent.len() != 1 {
+                    continue;
+                }
+                let (qx, qy) = absent[0];
+                let walled = |e: GridEdge| walls.walled.contains(&e);
+                if !walled(GridEdge {
+                    x: l.0,
+                    y: l.1 + qy,
+                    orientation: Orientation::V,
+                }) || !walled(GridEdge {
+                    x: l.0 + qx,
+                    y: l.1,
+                    orientation: Orientation::H,
+                }) {
+                    continue;
+                }
+                let opp = GridCell {
+                    x: l.0 + (-1 - qx),
+                    y: l.1 + (-1 - qy),
+                };
+                let touches = [
+                    GridEdge {
+                        x: l.0,
+                        y: opp.y,
+                        orientation: Orientation::V,
+                    },
+                    GridEdge {
+                        x: opp.x,
+                        y: l.1,
+                        orientation: Orientation::H,
+                    },
+                ];
+                if touches.iter().any(|e| walls.dividers.contains(e)) {
+                    out.insert(opp);
+                }
+            }
+        }
+        out
+    }
+
+    /// Reentrant corners of a compartment where *both* edges are dividers. Each
+    /// one is a `wt/2` square of the divider junction that `trace_rects` leaves
+    /// in the cavity and the walk does not.
+    fn divider_junctions(steps: &[Step], walls: &EffectiveWalls) -> usize {
+        let n = steps.len();
+        (0..n)
+            .filter(|&k| {
+                let (s, s1) = (&steps[k], &steps[(k + 1) % n]);
+                let (d, d1) = (dirv(s.dir()), dirv(s1.dir()));
+                d.x * d1.y - d.y * d1.x < -0.5
+                    && walls.dividers.contains(&s.edge)
+                    && walls.dividers.contains(&s1.edge)
+            })
+            .count()
+    }
+
+    /// What the walk gives at the two places the tracer does something else, at
+    /// the default wall (`t = 1.45`, half a divider `0.6`).
+    ///
+    /// A divider junction: cell (1,1) divided off a 2x2 leaves an L whose
+    /// reentrant corner is `(41.4, 41.4)`, where the two divider inset lines
+    /// meet. The tracer puts three corners there -- `(42, 41.4) (42, 42)
+    /// (41.4, 42)` -- keeping a `0.6 x 0.6` square of the junction as cavity.
+    ///
+    /// A divider by a notch: the L piece divided across its own arm leaves a 2x1
+    /// whose north side steps from the walled inset to the divider's, and the
+    /// step belongs at the lattice point. The tracer additionally carves the
+    /// reentrant corner patch, which by then is `1.45 x 0.85` of material
+    /// hanging into this compartment below the divider.
+    #[test]
+    fn a_divider_junction_and_a_divider_by_a_notch_walk_to_a_single_corner() {
+        let wt = 1.2f32;
+        let walk = |piece: &[GridCell], dividers: &[GridEdge], comp: usize| -> Vec<Vec2> {
+            let walls = effective_walls(piece, piece, &[], dividers);
+            let comps = crate::layout::compartments(piece, &walls.dividers);
+            let steps = boundary_steps(&comps[comp]);
+            assert_eq!(steps.len(), 1, "the compartment has one boundary loop");
+            compartment_corners(&steps[0], &|e| cavity_inset(&walls, wt, e))
+        };
+        let close = |a: &[Vec2], b: &[(f32, f32)]| {
+            assert!(
+                same_loop(
+                    a,
+                    &b.iter().map(|&(x, y)| Vec2::new(x, y)).collect::<Vec<_>>()
+                ),
+                "{a:?}"
+            );
+        };
+
+        let block = cells(&[(0, 0), (1, 0), (0, 1), (1, 1)]);
+        let junction = [
+            GridEdge {
+                x: 1,
+                y: 1,
+                orientation: Orientation::V,
+            },
+            GridEdge {
+                x: 1,
+                y: 1,
+                orientation: Orientation::H,
+            },
+        ];
+        close(
+            &walk(&block, &junction, 0),
+            &[
+                (1.45, 1.45),
+                (82.55, 1.45),
+                (82.55, 41.4),
+                (41.4, 41.4),
+                (41.4, 82.55),
+                (1.45, 82.55),
+            ],
+        );
+
+        let ell = cells(&[(0, 0), (1, 0), (0, 1)]);
+        let across = [GridEdge {
+            x: 0,
+            y: 1,
+            orientation: Orientation::H,
+        }];
+        close(
+            &walk(&ell, &across, 0),
+            &[
+                (1.45, 1.45),
+                (82.55, 1.45),
+                (82.55, 40.55),
+                (42.0, 40.55),
+                (42.0, 41.4),
+                (1.45, 41.4),
+            ],
+        );
+    }
+
+    /// The walk reproduces the tracer, corner for corner, and where it does not
+    /// the whole of the difference is the divider junction: one `wt/2` square of
+    /// material the tracer hands to the cavity, per reentrant corner between two
+    /// dividers. Equality of *areas* is what says the difference is only that --
+    /// a walk that agreed on the junction count while misplacing an edge would
+    /// pass a point-count check and fail this.
+    ///
+    /// Swept over every subset of each shape's internal edges as dividers, with
+    /// the perimeter closed and fully open, at a thin and a thick wall.
+    ///
+    /// **Divider fingers are excluded, and they are the reason the walk is not
+    /// yet wired in.** A divider whose two cells stay in one compartment -- the
+    /// ring routing around it, as in `partial_divider_finger_is_watertight` --
+    /// separates nothing, so it is on no compartment's boundary and the walk
+    /// cannot see it, while `plan_cavity` still subtracts its strip and the
+    /// model builds the wall stub the user asked for. Measured on a 2x2 at
+    /// `wt = 1.2` with one divider: the walk returns 6577.211 mm^2 against the
+    /// tracer's 6528.55, and the 48.661 mm^2 between them is exactly the strip,
+    /// `1.2 x (42 - HALF_TOL - 1.2)`. A boundary walk over cells cannot express
+    /// a slot that does not reach a cell boundary; see `CLAUDE.md`.
+    #[test]
+    fn the_walk_reproduces_the_tracer_except_where_a_divider_meets_a_notch() {
+        let shapes = [
+            cells(&[(0, 0)]),
+            cells(&[(0, 0), (1, 0)]),
+            cells(&[(0, 0), (1, 0), (0, 1), (1, 1)]),
+            cells(&[(0, 0), (1, 0), (0, 1)]),
+            cells(&[(0, 0), (1, 0), (2, 0), (1, 1)]),
+            cells(&[
+                (0, 0),
+                (1, 0),
+                (2, 0),
+                (0, 1),
+                (2, 1),
+                (0, 2),
+                (1, 2),
+                (2, 2),
+            ]),
+        ];
+        let mut compared = 0usize;
+        let mut junctions = 0usize;
+        let mut fingered = 0usize;
+        let mut patched = 0usize;
+        let mut mismatches: Vec<String> = Vec::new();
+        for shape in &shapes {
+            let internal = internal_edges(shape);
+            assert!(internal.len() <= 8, "the subset sweep stays small");
+            for mask in 0..(1u32 << internal.len()) {
+                let dividers: Vec<GridEdge> = internal
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| mask & (1 << i) != 0)
+                    .map(|(_, e)| *e)
+                    .collect();
+                for open in [Vec::new(), perimeter_edges(shape)] {
+                    for wt in [1.2f32, 2.6] {
+                        let walls = effective_walls(shape, shape, &open, &dividers);
+                        let comps = crate::layout::compartments(shape, &walls.dividers);
+                        let (pos, neg) = plan_cavity(shape, &walls, wt);
+                        let traced = trace_rects(&pos, &neg);
+                        let ins = |e: &GridEdge| cavity_inset(&walls, wt, e);
+                        // Two tracings of one compartment need not report the
+                        // same cell of it, so the loops are paired by which
+                        // compartment their cell lands in, not by the cell.
+                        let mut of: HashMap<GridCell, usize> = HashMap::new();
+                        for (i, comp) in comps.iter().enumerate() {
+                            for &c in comp {
+                                of.insert(c, i);
+                            }
+                        }
+                        // A divider that separates nothing is a *finger*, and
+                        // the walk cannot see it at all -- see the sweep's own
+                        // doc comment. Those masks are counted, not compared.
+                        if dividers.iter().any(|e| {
+                            let [a, b] = match e.orientation {
+                                Orientation::V => {
+                                    [GridCell { x: e.x - 1, y: e.y }, GridCell { x: e.x, y: e.y }]
+                                }
+                                Orientation::H => {
+                                    [GridCell { x: e.x, y: e.y - 1 }, GridCell { x: e.x, y: e.y }]
+                                }
+                            };
+                            of[&a] == of[&b]
+                        }) {
+                            fingered += 1;
+                            continue;
+                        }
+                        // The other artifact: `plan_cavity` subtracts a full
+                        // `t x t` patch at a piece's reentrant corner to join
+                        // the two wall strips, which otherwise meet at a point.
+                        // Where a divider runs along the cell holding that
+                        // patch, part of it is already wall and the rest is a
+                        // lump protruding into the cavity -- `t(t - wt/2)` for
+                        // one divider, `(t - wt/2)^2` for two. The walk gives
+                        // the corner its own edges imply and no lump; the
+                        // amounts are pinned by `a_divider_by_a_notch...`.
+                        let patched_at = patched_cells(shape, &walls);
+                        for (ci, comp) in comps.iter().enumerate() {
+                            if comp.iter().any(|c| patched_at.contains(c)) {
+                                patched += 1;
+                                continue;
+                            }
+                            let steps = boundary_steps(comp);
+                            let outer: Vec<&Vec<Step>> = steps
+                                .iter()
+                                .filter(|l| area(&compartment_corners(l, &ins)) > 0.0)
+                                .collect();
+                            assert_eq!(
+                                outer.len(),
+                                1,
+                                "a compartment walks into exactly one outer loop"
+                            );
+                            let walked = compartment_corners(outer[0], &ins);
+                            let found = traced
+                                .iter()
+                                .filter(|l| !l.is_hole())
+                                .find(|l| of[&loop_interior_cell(l)] == ci)
+                                .unwrap_or_else(|| {
+                                    panic!("no traced cavity loop over compartment {comp:?}")
+                                });
+                            let j = divider_junctions(outer[0], &walls);
+                            junctions += j;
+                            compared += 1;
+                            let square = (wt / 2.0) * (wt / 2.0);
+                            let diff = area(&walked) - (area(&found.pts) - j as f32 * square);
+                            if diff.abs() >= 1e-2 || (j == 0 && !same_loop(&walked, &found.pts)) {
+                                mismatches.push(format!(
+                                    "{diff:+.4} mm^2 j={j} wt={wt} open={} cells={comp:?} \
+                                     dividers={dividers:?}",
+                                    open.len()
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} of {compared} compartment(s) differ, first: {}",
+            mismatches.len(),
+            mismatches.first().map_or("", |m| m.as_str())
+        );
+        assert!(
+            compared > 1000 && junctions > 0 && fingered > 0 && patched > 0,
+            "the sweep compared {compared} compartment(s) over {junctions} divider junction(s), \
+             skipping {fingered} finger and {patched} patched compartment(s)"
+        );
+    }
 }
