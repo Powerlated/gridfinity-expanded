@@ -633,35 +633,52 @@ wall   = outline where no cavity replaced it  ∪  reversed(cavity runs that kee
 that is a span with no wall. Those runs bound no material and are exactly what the wall's authored
 boundary leaves out; everything else about the wall follows from the two halves above, chained.
 
-**The cavity's boolean cannot be authored away, and the reason is a line meeting an arc.** The
-overshoot is load-bearing: it is what keeps the cavity and the outline **transverse**, so
-`cavity ∩ outline` is a proper crossing. Authoring the cavity to abut instead — a `HALF_TOL` strip
-at open edges, the outline's radius on the corners that land on the profile — was built and does not
-work, and the case that kills it is the smallest one there is.
+**The cavity's boolean is a limit of `trace_rects`, not of authoring.** The overshoot keeps the
+cavity and the outline **transverse**, so `cavity ∩ outline` is a proper crossing, and that is why
+the boolean works. Authoring the cavity to abut instead — a `HALF_TOL` strip at open edges, the
+outline's radius on the corners landing on the profile — was built and fails, but the reason is
+narrower than it first looks and is worth stating exactly, because it names what a replacement has
+to do.
 
 Take a 1×1 with the north edge open. The cavity's east wall stands at `x = 40.55`; the outline's
-north-east corner is an `OUTER_R` arc about `(38, 38)`. Where a wall meets an opening *near a
-rounded corner*, the cavity's boundary has to step from the wall's inset onto the profile, and it
-does that where those two meet:
+north-east corner is an `OUTER_R` arc about `(38, 38)`. Where a wall meets an opening *near a rounded
+corner* the cavity has to step from the wall's inset onto the profile, and it does that where the
+two meet:
 
 ```
 (40.55 − 38)² + (y − 38)² = 3.75²   ⟹   y = 40.75
 ```
 
-The step belongs at `(40.55, 40.75)`, on the arc. `trace_rects` is rectilinear, so it puts the
-corner at `(40.55, 41.75)` — a millimetre north, **outside** the outline it is supposed to lie on,
-and the chain that should close against the profile has nothing to close against. Every wall/opening
-transition within `OUTER_R` of a bin corner is this case.
+The step belongs at `(40.55, 40.75)`, on the arc. `trace_rects` is **rectilinear** and puts the
+corner at `(40.55, 41.75)` — a millimetre north, outside the outline it is meant to lie on, so the
+chain has nothing to close against. Every wall/opening transition within `OUTER_R` of a bin corner
+is this case.
 
-So the transition point is a line/circle intersection. The kernel can solve one in closed form, but
-solving it here means hand-rolling the crossing that `region2d` already computes correctly and
-generally — the same solve, written twice, with the model's copy carrying no sweep to catch the
-cases a bin can actually produce. `cavity = shape ∩ outline` stays.
+That is a limit of the *tracer*, not of sketch construction: a line meeting a circle is closed form
+and the kernel solves it in several places already. **The cavity's perimeter can be authored — it
+just cannot come from the rectilinear engine.** Doing it means moving the perimeter onto a boundary
+walk like `author_outer_loop`'s, where each edge contributes a run at its own inset
+(`HALF_TOL + wall_thickness` walled, `HALF_TOL` open, `wall_thickness / 2` at a divider) and each
+corner is resolved by the pair of insets meeting there:
 
-The *wall* is a different question and the answer there is yes: material's boundary is the outline
-where no opening replaced it plus the cavity runs that keep a wall, and both come from a
-classifier — no crossing to solve, hence no boolean. That is the split to remember. **The opening
-path needs exactly one boolean, and it is the cavity's.**
+- **both walled** — the compartment's own radius, `rc` convex and `fr` reentrant, as today;
+- **both open** — the outline's radius, since the cavity *is* the profile there: `OUTER_R` convex,
+  square reentrant (see the `corner_walled` note above);
+- **mixed** — the step, terminated by intersecting the walled edge's inset line with the outline
+  loop. Usually that is the corner arc; where the wall is thick enough that the inset line clears
+  the arc's extent it is the straight run instead, so the query is *line against the outline*, not
+  line against a known arc.
+
+That last query is not the ray-cast pinch this section replaced, and the difference is the whole
+point: the pinch cast along *the direction of a neighbouring cavity segment*, so it needed that
+neighbour to be straight and failed at a reentrant corner where the neighbour is the concave fillet
+arc. Here the line is known before anything is cast — it is the wall's own inset — and only its
+first crossing with the outline is wanted. Well posed wherever a wall meets an opening.
+
+The *wall* needs none of this and is already authored: material's boundary is the outline where no
+opening replaced it plus the cavity runs that keep a wall, both from a classifier, no crossing to
+solve. **The opening path is down to one boolean, and it is the cavity's — pending the walk above,
+which is unbuilt.**
 
 This replaced a ray-cast pinch: cast from the run's endpoint along the *direction* of the adjacent
 cavity segment, truncate it to the hit, walk the outline between the two hits, then rebuild the wall
