@@ -26,6 +26,12 @@ React 19 + Vite 6 + TypeScript app generating printable Gridfinity STLs. "GUI" i
 
 TypeScript ESM, function components, two-space indent. `PascalCase.tsx`, `useName.ts`, camelCase helper exports. Shared contracts in `types.ts`, domain logic in `src/lib/`.
 
+**Say as much as possible in function doc comments, and say it as a transformation from input to output.** A doc comment names what the function is given, what it returns, and the rule connecting them — the shape of the data, the coordinate space it is in, the units, what the caller must have already established, and what is true of the result afterwards. Write it in the indicative about *this* function's mapping, not as a summary of the algorithm inside and not as advice to the reader; if the body changes but the mapping does not, the comment should not need touching. A function whose mapping cannot be stated that way is doing more than one thing and gets split until each part can be.
+
+**A file still carries one paragraph at the top**, describing what the file as a whole holds and how its functions fit together — the context that no single doc comment owns. A file that cannot be described in one paragraph is holding more than one thing and gets split.
+
+**Bodies carry no inline comments.** Rationale that belongs to a step rather than to the signature goes where it is enforced rather than merely stated: into an **assertion message**, which is the repo's preference over a comment anyway — an invariant stated in an `assert!` is checked, one stated in a comment is not — or, when it is a campaign finding rather than a local fact, into `AGENTS.md` or `rust/CLAUDE.md`. Never delete reasoning to satisfy any of this; relocate it. Files predating the current rule convert as they are next edited, not in sweeps of their own.
+
 Prefer Mantine controls/layout over custom UI. Cross-app control styling → `theme.ts`; global layout and library workarounds → `src/index.css`; SVG editor styles → `src/components/sidebar/editor.css`; Project-mode SVG styles → `src/components/project/project.css`. No fixed design constants in JSX unless data-driven.
 
 ## Rules that the source does not show

@@ -4,6 +4,8 @@ Guidance for Claude Code in this repo. Keep it current with the code. `../AGENTS
 
 **Write style — mandatory for all agents editing this file.** Terse, telegraphic, high-density. Fragments over sentences. Drop filler, hedging, connective prose. Keep every technical fact (names, paths, constants, measured numbers, test names); cut only the words around them. Contribute new facts in this same style.
 
+**Doc comments carry the information; bodies carry none** — see `../AGENTS.md`. Every fn gets a `///` stating its input→output mapping: argument spaces/units/preconditions, returned topology, what holds of the result. File keeps one paragraph at the top for what the doc comments don't own. No inline comments. In this crate an invariant goes to an assertion message before it goes to a doc comment: one stated in an `assert!` is checked, one stated in prose is not. A fn whose mapping won't state, or a file too big for one paragraph, is split.
+
 **Never launch subagents.** No Task/Agent tool, no fork, no spawning. All exploration and work inline with your own tools.
 
 ## Overview
@@ -29,7 +31,7 @@ Allowed, because at or after the tessellation boundary:
 - `Tessellation::welded_render_buffer` — the web app's single buffer for preview *and* STL. = `render_buffer` (position + analytic normal per vertex, unindexed) with positions snapped to the `weld_key` representative and weld-degenerate triangles dropped, so watertight under exact comparison like `to_mesh`. A *quantisation at the boundary*, not repair: nothing reads it back. The raw `render_buffer` (unwelded, per-face samples) must never be exported — it leaks.
 - Mesh-based *verification* in tests (`assert_watertight`, `signed_volume`): checking the analytic result, never producing it.
 
-Task that looks like it needs a prohibited op = missing analytic primitive or missing B-rep operator (e.g. blend runout in `fillet.rs`). **Stop and ask** — never a mesh fallback.
+Task that looks like it needs a prohibited op = missing analytic primitive or missing B-rep operator (e.g. blend runout in `fillet/`). **Stop and ask** — never a mesh fallback.
 
 ## Hard rule: assert everything, and pay for it at runtime
 
@@ -141,7 +143,7 @@ The generator and shrinker produce **edge-connected** bins only. `gen_small_rect
 Three things had to change for `fuzz_wall_openings` to go clean; only the first is the model:
 
 - **The blend request follows the wall, not the loop.** A touched cavity loop blends its non-coincident segments (the ones the outer walk did *not* replace, i.e. where a wall still stands), and `blendable_segs` drops one segment at each remaining sharp corner so the chain terminates there instead of continuing through a corner it has no tangent across. Dropping the *loop* cost a 2×2 all 8 blends for one open edge.
-- **`fillet.rs` can cap a runout** (`RunoutEnd::Cap`, below).
+- **`fillet/` can cap a runout** (`RunoutEnd::Cap`, below).
 - **The blend's side is decided locally.** `s` came from `face_centroid`, which means something only for a face whose centroid is inside it. An L-shaped cavity floor — or any floor with an opening's mouth in it — pulls the centroid far enough to flip the choice on *one* edge of a chain, landing its tangent points 2r from its neighbour's and tearing the loop open. Now from the direction fa's material lies in at that edge, `outward normal × edge tangent`, guaranteed by the orientation invariant. Two traps: `Curve::tangent` (new, closed-form for all four variants) differentiates in increasing `t` and an edge whose stored range runs *backwards* traverses `v0 → v1` the other way; and the reference point must be the **curve's** midpoint, not the chord's — on a semicircle the chord midpoint is the circle's centre and every normal there is meaningless. That one cost `fillet_cylinder_top_is_watertight`.
 
 `OPENING_LOSES_FILLET` survives only on `fuzz_openings_and_inner_walls` (0–2/150 across those seeds, where an inner wall's `island_clears` check zeroes the fillet, not the opening) and `fuzz_params_broad` (6/400).
@@ -407,7 +409,13 @@ Alternation is not the whole story — it holds just as well for a consistently-
 
 Features. Three primitives write into a shared `Builder`: `ring` (profile at a height), `wall_between` (side faces between two rings), `cap`/`loop_of` (planar caps). `extrude`/`prism`/`loft` wrap them. **Orientation convention:** author loops CCW; an `outward` flag says whether material is inside the loop (`true`) or it is a hole/cavity (`false`). `loft` turns arcs whose radius changes with height into `Cone` faces; a straight segment on a loft becomes a *slanted* `Plane`, its normal computed from the actual 3D quad, not assumed vertical.
 
-### `fillet.rs`
+### `fillet/`
+
+Eight files, one phase each; `fillet_edges_with` is the sequence and nothing else. `chain` — request → chains, terminating vertices, `salvage`. `corner` — rolling-ball solve + `reconcile_shared_ends`. `blend` — `Fillet`, cyl/torus surfaces, `connect_arc`, `circle_span`, and the per-corner build that runs each end out. `runout` — `RunoutEnd`/`Runout`, the Absorb→Cap→Flat ladder, `absorb_fits`. `section` — `runout_on`/`_cyl`/`_torus`, `respan`. `rebuild` — loop rewrite, blend faces, caps, `move_vertex`. `query` — `as_cyl`, `coplanar`, `across_at`, `dist_to_curve`. `mod` — the three public items and the three shared tolerances (`END_AGREE`, `ON_EDGE`, `MAX_JOIN_KINK`).
+
+`CurvEdge`, `as_plane`, `loop_edge_dir`, `emit_curv` moved to **`kernel/curvedge.rs`**; `chamfer.rs` carried byte-identical copies and uses them now.
+
+Split was behaviour-preserving by construction and verified as such: lib gate 212/212, and `fuzz_inner_walls` 23/150 · `fuzz_wall_openings` green · `fuzz_stripped_polyominoes` 15/150 · `fuzz_openings_and_inner_walls` 6/150, i.e. the table above unmoved in both directions. Hold any future move to that bar — a count that improves is as much a signal that the move was not a move as one that worsens.
 
 `fillet_edges(&solid, &[(EdgeId, r)])` — true rolling-ball edge blending as a B-rep operator. Plane/plane edges → `Cylinder` blends; plane/coaxial-cylinder circle edges → `Torus` blends. Adjacent faces trimmed back to exact tangent curves, quarter-circle connect arcs join neighbouring blends. A vertex with **two** blended edges continues the chain; **one** is a *runout* — chain terminates against a third face and the blend is trimmed by it: tangent curves extend to meet the plane and the exact section of the blend surface by that plane becomes the trim curve, spliced into the runout face's loop where its sharp corner was. Section is `Curve::Ellipse` for a cylindrical blend, `Curve::TorusSection` for a torus blend against a plane parallel to its axis. Runout face found by adjacency, skipping faces coplanar with the blended pair (a coplanar neighbour continues the surface rather than terminating the blend); where no face can take the curve the blend is closed flat. **Three or more blended edges at a vertex** needs a spherical corner patch → `Err`. The partial-height inner wall's top ramp is built this way.
 

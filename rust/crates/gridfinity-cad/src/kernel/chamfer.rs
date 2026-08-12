@@ -1,3 +1,14 @@
+//! Chamfering: the flat-faced sibling of `fillet`. Each requested edge is
+//! replaced by a plane standing off its two faces by the two given setbacks, the
+//! two faces retreat to where that plane meets them, and the faces around each
+//! end of the chain follow the corner to the setback point. It shares
+//! `CurvEdge`, `as_plane`, `loop_edge_dir` and `emit_curv` with the fillet, in
+//! `kernel::curvedge`; everything else here is its own, because a chamfer's
+//! corner geometry is the intersection of two offset planes rather than a rolling
+//! ball, and it has no runout to plan -- a flat face needs no face to run out
+//! onto.
+
+use crate::kernel::curvedge::{CurvEdge, as_plane, emit_curv, loop_edge_dir};
 use crate::kernel::geom::{Curve, Surface};
 use crate::kernel::math::Vec3;
 use crate::kernel::topo::{Builder, EdgeId, Loop, Solid};
@@ -16,13 +27,6 @@ struct Chamfer {
     surface: Surface,
     sense: bool,
     fwd_a: bool,
-}
-
-#[derive(Clone, Copy)]
-struct CurvEdge {
-    curve: Curve,
-    t0: f32,
-    t1: f32,
 }
 
 pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<Solid, String> {
@@ -325,17 +329,6 @@ fn edge_dir_of(solid: &Solid, e: EdgeId) -> Vec3 {
     }
 }
 
-fn loop_edge_dir(solid: &Solid, fid: usize, e: EdgeId) -> bool {
-    for lp in solid.face_loops(fid) {
-        for &(ee, f) in lp {
-            if ee == e {
-                return f;
-            }
-        }
-    }
-    true
-}
-
 fn face_centroid(solid: &Solid, fid: usize) -> Vec3 {
     let mut sum = Vec3::ZERO;
     let mut n = 0;
@@ -346,14 +339,6 @@ fn face_centroid(solid: &Solid, fid: usize) -> Vec3 {
         n += 1;
     }
     if n > 0 { sum / n as f32 } else { Vec3::ZERO }
-}
-
-fn as_plane(s: &Surface) -> Option<(Vec3, Vec3)> {
-    if let Surface::Plane { origin, normal, .. } = s {
-        Some((*origin, *normal))
-    } else {
-        None
-    }
 }
 
 fn intersect_lines(p0: Vec3, d0: Vec3, p1: Vec3, d1: Vec3) -> Option<Vec3> {
@@ -468,51 +453,6 @@ fn moved_vertex(
         }
     }
     fallback
-}
-
-fn emit_curv(b: &mut Builder, start: Vec3, end: Vec3, ce: CurvEdge) -> (EdgeId, bool) {
-    let vs = b.vertex(start);
-    let ve = b.vertex(end);
-    let forward = || {
-        let at_start = ce.curve.point(ce.t0);
-        (at_start - start).length() < (ce.curve.point(ce.t1) - start).length()
-    };
-    match ce.curve {
-        Curve::Line { .. } => b.line(vs, ve),
-        Curve::Circle {
-            center,
-            axis,
-            radius,
-            ref_dir,
-        } => {
-            let (t0, t1) = if forward() {
-                (ce.t0, ce.t1)
-            } else {
-                (ce.t1, ce.t0)
-            };
-            b.arc(vs, ve, center, axis, radius, ref_dir, t0, t1)
-        }
-        Curve::Ellipse {
-            center,
-            a: ea,
-            b: eb,
-        } => {
-            let (t0, t1) = if forward() {
-                (ce.t0, ce.t1)
-            } else {
-                (ce.t1, ce.t0)
-            };
-            b.ellipse(vs, ve, center, ea, eb, t0, t1)
-        }
-        Curve::TorusSection { .. } => {
-            let (t0, t1) = if forward() {
-                (ce.t0, ce.t1)
-            } else {
-                (ce.t1, ce.t0)
-            };
-            b.torus_section(vs, ve, ce.curve, t0, t1)
-        }
-    }
 }
 
 #[cfg(test)]

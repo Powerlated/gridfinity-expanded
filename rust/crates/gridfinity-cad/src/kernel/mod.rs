@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod build;
 pub mod chamfer;
+pub mod curvedge;
 pub mod fillet;
 pub mod geom;
 pub mod hash;
