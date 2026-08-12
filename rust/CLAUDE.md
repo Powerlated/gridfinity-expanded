@@ -184,8 +184,8 @@ profiles use; `Share(1, 2)` is `fuzz_stripped_polyominoes`.
 | `fuzz_openings_and_inner_walls` | both of the above at once | **red 6/150** — `OPENING_LOSES_FILLET` |
 | `fuzz_bin_shapes` | polyominoes, flood-fill pieces | green |
 | `fuzz_split_pieces` | polyominoes, `SplitLine`s + `partition_cells` | **red 1/120** — `TRIM_SECTION_CURVE` |
-| `fuzz_stripped_polyominoes` | polyominoes with **half** the perimeter wall opened | **red 15/150** — 4 defects |
-| `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | **red 24/400** — 7 defects |
+| `fuzz_stripped_polyominoes` | polyominoes with **half** the perimeter wall opened | **red 15/150** — 3 defects |
+| `fuzz_params_broad` | everything, incl. reentrant corners, slope and baseplate | **red 22/400** — 7 defects |
 
 Every one of those reds was already failing before; it was on a `known` list, or behind the
 `require_blends` opt-out, or both. Nothing here is a regression, and the counts are the backlog.
@@ -713,19 +713,13 @@ and the edge between them carries no divider*. Note it is components and not a p
 `a_divider_makes_a_compartment_only_where_it_separates` is what says: a divider a path routes around
 separates nothing.
 
-`assert_traced_loops_are_the_compartments` holds the two together on every bin the suite builds,
-mapping each traced outer loop to a compartment through `loop_interior_cell` — read off the first
-edge's midpoint and the inward side exactly, no epsilon, since `trace_rects` traces
-material-on-the-left and rectilinear. Injectivity is unconditional. The **counts** match only while
-`2·(HALF_TOL + wt) < GRID_PITCH`, and that bound is the whole argument: under it a compartment
-always keeps a `pitch − 2·(HALF_TOL + wt)` square at each cell's centre (so it yields a loop) and
-every undivided adjacency keeps a passage that wide (so it yields only one), while every divided one
-is covered by a full-pitch strip of width `wt` (so two compartments never merge). Above it a bin's
-walls are thicker than its cells and a compartment may be starved to nothing or pinched in two;
-neither is a defect, so the equality is guarded rather than asserted flat.
-
-That assert is the gate for step 2 replacing `plan_cavity`: it says the partition the walk will run
-over is the one the model builds today. It fires nowhere across all eight profiles.
+One compartment yields exactly one cavity loop while `2·(HALF_TOL + wt) < GRID_PITCH`, and that
+bound is the whole argument: under it a compartment always keeps a `pitch − 2·(HALF_TOL + wt)` square
+at each cell's centre (so it yields a loop) and every undivided adjacency keeps a passage that wide
+(so it yields only one), while every divided one is covered by a full-pitch strip of width `wt` (so
+two compartments never merge). Above it a bin's walls are thicker than its cells and a compartment
+may be starved to nothing or pinched in two; neither is a defect, which is why the sweep's count
+equality is guarded rather than asserted flat.
 
 **Where two dividers meet at a compartment's reentrant corner, the tracer leaves a staircase, and
 the walk is what closes it.** A divider's subtraction rect spans exactly one cell edge and reaches
@@ -751,7 +745,14 @@ which is the walk's corner classification done in the wrong place. There is no t
 lib gate is green and the profiles are at their documented counts, because the tab is small enough
 to build.
 
-**The walk is built and it agrees with the tracer, corner for corner, on 1588 swept compartments.**
+**The cavity is authored now. `plan_cavity` is `#[cfg(test)]`, kept only as the reference the walk
+is checked against.** `walked_cavity` is what `plan_piece` calls: one `compartment_cavity_corners`
+per compartment, each returning that compartment's outer loop and the holes inside it, paired by
+containment. Everything downstream is unchanged — the same `shape_cavity_loop` rounding, the same
+islands, and for an opened bin the same `clip_cavity_to_outline`, because an opening is still an
+inset of *nothing* and an opened cavity still runs out to the pitch line to be pulled back. That
+boolean is what the walk is working towards and it is still there.
+
 `compartment_corners` is the walk: `cavity_inset` per edge (`HALF_TOL + wt` walled, `wt/2` at a
 divider, 0 at an opening) and one corner per turn at `c + nrm·ins + n1·ins_next`. Where the boundary
 does **not** turn there is still a corner to emit whenever the inset changes — a wall meeting an
@@ -782,16 +783,35 @@ of material hanging into the compartment: `1.45 × 0.85` at the default wall.
 `a_divider_junction_and_a_divider_by_a_notch_walk_to_a_single_corner` pins what the walk gives
 instead, in both cases, as explicit corner lists.
 
-**A divider finger is the thing the walk cannot express, and it is why nothing is wired in yet.** A
-divider whose two cells stay in one compartment — the ring routing around it, which is exactly
-`partial_divider_finger_is_watertight`'s 2×2 with one divider — separates nothing, so it lies on no
-compartment boundary and the walk never sees it, while `plan_cavity` still subtracts its strip and
-the model builds the wall stub the user asked for. Measured: the walk returns 6577.211 mm² against
-the tracer's 6528.55, and the 48.661 mm² between them is exactly the strip, `1.2 × (42 − HALF_TOL −
-1.2)`. A boundary walk over *cells* cannot describe a slot that stops inside one, so replacing
-`plan_cavity` needs a decision first — carry fingers as their own islands the way `InnerWall`
-already is, or extend the walk with an excursion into each finger — and it is a question about what
-the model is, not a detail of the port.
+**A divider finger is subtracted after the walk, not walked.** A divider whose two cells stay in one
+compartment — the ring routing around it, which is exactly `partial_divider_finger_is_watertight`'s
+2×2 with one divider — separates nothing, so it lies on no compartment boundary and a walk over
+*cells* can never see it: it is a slot that stops inside a cell. It is real geometry, a wall stub
+reaching in from the perimeter, or a free-standing island when neither of its ends touches a wall,
+and dropping it costs exactly the strip — 48.661 mm² of a 2×2 at `wt = 1.2`, or `1.2 × (42 −
+HALF_TOL − 1.2)`.
+
+`finger_strips` collects them and `compartment_cavity_corners` takes them out with one
+`region_difference`. The split of labour is the point: the **perimeter** is authored, because that is
+where the insets differ edge to edge and where the corners have to land on the outline rather than on
+a lattice point — the thing a rectilinear tracer cannot do — while a **finger** is a plain rectangle
+in the middle of a cavity, nowhere near an arc, so it needs no case analysis at all. The strips are
+unioned through `trace_rects` before the difference: two dividers running end to end give two
+rectangles sharing a boundary run, and a region whose own loops touch is not an operand a sweep can
+classify — it left a 0.001 mm² sliver on 36 of the swept compartments.
+
+**What the change bought, measured against the profile table above.** `fuzz_wall_openings`,
+`fuzz_tidy_inner_walls` and `fuzz_bin_shapes` stay green; `fuzz_inner_walls` (23/150),
+`fuzz_openings_and_inner_walls` (6/150) and `fuzz_split_pieces` (1/120) are unmoved.
+`fuzz_params_broad` goes **24/400 → 22/400**, two `OPENING_LOSES_FILLET` cases, and
+`fuzz_stripped_polyominoes` retires its `edge 314 used fwd=2 bwd=2` manifold class outright — 4
+defects to 3, at the same 15/150, since that case now fails in an existing class instead. Its repro
+was a divider junction, so the staircase was costing a bin its manifoldness.
+
+One thing to know before touching the opened path: `opening_keeps_the_fillet` builds each bin twice,
+opened and closed, so the two builds have to come off the **same** cavity planner. Wiring only the
+closed path to the walk put `fuzz_wall_openings` at 20/150 immediately — not a defect in either path
+but the check correctly reporting that the closed build had got better and the opened one had not.
 
 This replaced a ray-cast pinch: cast from the run's endpoint along the *direction* of the adjacent
 cavity segment, truncate it to the hit, walk the outline between the two hits, then rebuild the wall

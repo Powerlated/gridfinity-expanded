@@ -173,7 +173,11 @@ pub fn trace_rects(pos: &[RectF], neg: &[RectF]) -> Vec<TracedLoop> {
         .collect()
 }
 
-fn merge_collinear(pts: &[Vec2]) -> Vec<Vec2> {
+/// Drop every point a straight run passes through, so a rectilinear loop carries
+/// a point only where it turns. A collinear point is not merely redundant: the
+/// corner-rounding pass reads a zero cross product as a *reentrant* corner and
+/// rounds it by the floor-fillet radius.
+pub fn merge_collinear(pts: &[Vec2]) -> Vec<Vec2> {
     let n = pts.len();
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
