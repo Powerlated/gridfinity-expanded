@@ -21,7 +21,7 @@ use gridfinity_cad::kernel::build::extrude;
 use gridfinity_cad::kernel::math::Vec3;
 use gridfinity_cad::kernel::sketch::Sketch;
 use gridfinity_cad::kernel::topo::Solid;
-use gridfinity_cad::tessellate;
+use gridfinity_cad::{tessellate, tessellate_shell};
 use std::sync::{Arc, Mutex};
 use viewport::{Camera, CameraExt, Gpu, Quality, Renderer};
 
@@ -145,6 +145,23 @@ fn build_scene_with(
     (verts, errors)
 }
 
+/// Everything the viewer uploads for one construction-debugger subset.
+///
+/// A subset is an open shell whenever the steps that would close it are rolled
+/// back -- which is the whole point of stepping through a construction -- so it
+/// goes through `tessellate_shell`. `tessellate` states a watertight
+/// postcondition it cannot hold here, and asserting it turned every rollback
+/// into an unwind out of `regenerate`.
+fn debug_view(debugger: &Debugger, solid: &Solid) -> (Vec<f32>, wireframe::Wireframe) {
+    let verts = flagged(&tessellate_shell(solid, PREVIEW_RES), false);
+    let mut wf = wireframe::Wireframe::default();
+    for (profile, plane) in debugger.sketch_planes() {
+        wf.add_sketch(profile, plane, PREVIEW_RES, wireframe::SKETCH_BLACK);
+    }
+    wf.add_brep_edges(solid, PREVIEW_RES, wireframe::EDGE_ORANGE);
+    (verts, wf)
+}
+
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
@@ -230,8 +247,15 @@ impl App {
             self.program_dirty = false;
         }
         let dbg_solid = self.debugger.build_solid();
+        let mut wf = wireframe::Wireframe::default();
         let (verts, errors) = match &dbg_solid {
-            Some(s) => (flagged(&tessellate(s, PREVIEW_RES), false), Vec::new()),
+            Some(s) => match catch(|| Ok(debug_view(&self.debugger, s))) {
+                Ok((v, w)) => {
+                    wf = w;
+                    (v, Vec::new())
+                }
+                Err(msg) => (Vec::new(), vec![BinError { bin: 0, msg }]),
+            },
             None => build_scene(&self.params),
         };
         self.errors = errors;
@@ -242,13 +266,9 @@ impl App {
         }
         self.tri_count = verts.len() / (3 * MESH_STRIDE);
 
-        let mut wf = wireframe::Wireframe::default();
-        if self.debugger.is_shown() {
+        if dbg_solid.is_none() && self.debugger.is_shown() {
             for (profile, plane) in self.debugger.sketch_planes() {
                 wf.add_sketch(profile, plane, PREVIEW_RES, wireframe::SKETCH_BLACK);
-            }
-            if let Some(s) = &dbg_solid {
-                wf.add_brep_edges(s, PREVIEW_RES, wireframe::EDGE_ORANGE);
             }
         }
         self.labels = wf.labels;

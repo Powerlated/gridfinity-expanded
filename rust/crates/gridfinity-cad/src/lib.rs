@@ -12,7 +12,7 @@ pub use kernel::audit::{
     AuditReport, Category, Defect, Severity, TessLeak, audit, tessellation_leaks,
 };
 pub use kernel::mesh::Mesh;
-pub use kernel::tess::{Tessellation, tessellate};
+pub use kernel::tess::{Tessellation, tessellate, tessellate_shell};
 pub use kernel::topo::Solid;
 
 #[cfg(test)]

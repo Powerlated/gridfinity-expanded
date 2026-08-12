@@ -134,8 +134,49 @@ pub fn tess_diag() -> [u64; 4] {
     ]
 }
 
+/// Triangles for a closed manifold solid.
+///
+/// Postcondition: the mesh is watertight -- every mesh edge carried once in
+/// each direction. That is a statement about a *closed* input, so a caller
+/// holding an intentionally open shell (the step-through debugger's partial
+/// subsets) wants `tessellate_shell`, which keeps the postcondition wherever it
+/// still applies rather than dropping it.
 pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
+    // The scope covers the leak audit as well as the triangulation, as it did
+    // when the two were one function -- the `Tessellate` row in `perf_report`
+    // has always been the checked cost.
     let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::Tessellate);
+    let out = tess_faces(solid, arc_segs_per_quarter);
+    let leaks = crate::kernel::audit::tessellation_leaks(&out);
+    assert!(
+        leaks.is_empty(),
+        "tessellation leaks {} edge(s), first {:?}",
+        leaks.len(),
+        leaks[0]
+    );
+    out
+}
+
+/// Triangles for a shell that may be open.
+///
+/// `program::run` emits partial open shells on purpose, and an open shell's
+/// mesh leaks along its boundary by construction -- a boundary edge is sampled
+/// by the one face that has it, so nothing pairs it. That is the input's
+/// property, not a defect, so the watertight postcondition does not apply.
+///
+/// It still applies whenever the shell *is* closed, and this asserts exactly
+/// that: an open shell is exempt, a closed one is held to the same mesh
+/// `tessellate` promises. A blanket "skip the check" entry point would let a
+/// closed solid through unchecked the moment a caller reached for it.
+pub fn tessellate_shell(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
+    if solid.validate_ignoring_unused_edges().is_ok() {
+        return tessellate(solid, arc_segs_per_quarter);
+    }
+    let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::Tessellate);
+    tess_faces(solid, arc_segs_per_quarter)
+}
+
+fn tess_faces(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
     let es = EdgeSamples::build(solid, arc_segs_per_quarter);
 
     let mut out = Tessellation::default();
@@ -288,12 +329,15 @@ pub fn tessellate(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
             out.tris.push(Tri { pos: p, nrm: nm });
         }
     }
-    let leaks = crate::kernel::audit::tessellation_leaks(&out);
-    assert!(
-        leaks.is_empty(),
-        "tessellation leaks {} edge(s), first {:?}",
-        leaks.len(),
-        leaks[0]
+    // `face_of_tri` is parallel to `tris` -- every triangle names the face it
+    // was emitted from, which is what lets a leak report name the faces meeting
+    // at the leaking edge.
+    assert_eq!(
+        out.face_of_tri.len(),
+        out.tris.len(),
+        "every triangle must name its face: {} triangles, {} face tags",
+        out.tris.len(),
+        out.face_of_tri.len()
     );
     out
 }
