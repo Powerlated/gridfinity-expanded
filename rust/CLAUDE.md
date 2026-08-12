@@ -680,6 +680,30 @@ opening replaced it plus the cavity runs that keep a wall, both from a classifie
 solve. **The opening path is down to one boolean, and it is the cavity's — pending the walk above,
 which is unbuilt.**
 
+The corner construction that walk needs is `author_outer_loop`'s, generalised off its two magic
+constants. For a 90° corner between step `s` at inset `ins` and `s_next` at `ins_next`, blended by
+radius `r`, with `c = mm(s.to)`, `d`/`d1` the two directions and `nrm`/`n1` their left normals:
+
+```
+convex     centre = c + nrm·(ins + r) + n1·(ins_next + r)
+           tangent on s      = c − d·(ins_next + r) + nrm·ins
+           tangent on s_next = c + d1·(ins + r)     + n1·ins_next
+
+reentrant  q      = c + nrm·ins + n1·ins_next
+           centre = q − nrm·r − n1·r
+           t1     = q − n1·r          t2 = q − nrm·r
+```
+
+`author_outer_loop` is exactly the case `ins = ins_next = HALF_TOL`, `r = OUTER_R`, where `ins + r`
+collapses to `PEG_TANGENT` — which is why that constant reads as a magic number there rather than as
+the sum it is. A square corner is `r = 0`, so the runs meet at `q`; note that even then the run is
+trimmed by `ins_next` along `d`, positively at a reentrant corner (where `n1 = +d`) and negatively at
+a convex one (`n1 = −d`), so the cavity legitimately runs *past* the lattice point into a notch.
+
+Per corner the radius is chosen by the pair of edges meeting there: both walled → `rc` convex / `fr`
+reentrant; both open → the profile's, `OUTER_R` convex / square reentrant; walled against divider →
+square. Only **walled against open** needs the line-against-outline crossing, and only there.
+
 This replaced a ray-cast pinch: cast from the run's endpoint along the *direction* of the adjacent
 cavity segment, truncate it to the hit, walk the outline between the two hits, then rebuild the wall
 from whatever the walk left and chain the fragments into loops. It needed the neighbour to be
