@@ -10,8 +10,8 @@ use gridfinity_cad::gridfinity::{
     self, BinSlope, GRID_PITCH, InnerWall, LogicalBin, Mode, Params, SlopeDir, rect_cells,
 };
 use gridfinity_cad::kernel::geom::Surface;
-use gridfinity_cad::kernel::program::BlendReport;
 use gridfinity_cad::kernel::mesh::Mesh;
+use gridfinity_cad::kernel::program::BlendReport;
 use gridfinity_cad::kernel::tess::tessellate;
 use gridfinity_cad::layout::{
     Axis, GridCell, GridEdge, Orientation, SplitLine, effective_walls, internal_edges,

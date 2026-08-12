@@ -945,6 +945,60 @@ mod tests {
     }
 
     #[test]
+    fn an_opening_beside_a_reentrant_corner_keeps_every_floor_fillet() {
+        // The cavity steps by the outline's own tolerance where an opened run
+        // meets the reentrant corner, leaving a run shorter than the fillet
+        // radius for the chain to end on. The flat end's stub covers the whole
+        // of that run, so the floor must hand it to the cap rather than walk out
+        // to the corner and back along it.
+        for (shape, open) in [
+            (
+                &[(0, 1), (0, 2), (1, 2)][..],
+                GridEdge {
+                    x: 1,
+                    y: 2,
+                    orientation: Orientation::H,
+                },
+            ),
+            (
+                &[(0, 0), (1, 0), (0, 1), (0, 2), (0, 3)][..],
+                GridEdge {
+                    x: 1,
+                    y: 1,
+                    orientation: Orientation::V,
+                },
+            ),
+        ] {
+            let p = gridfinity::Params {
+                bins: vec![LogicalBin {
+                    cells: cells(shape),
+                    ..Default::default()
+                }],
+                open_edges: vec![open],
+                ..gridfinity::Params::default()
+            };
+            let (solid, report) = gridfinity::try_build_reporting(&p)
+                .unwrap_or_else(|e| panic!("{shape:?} with {open:?}: {e}"));
+            solid
+                .validate()
+                .unwrap_or_else(|e| panic!("{shape:?}: {e}"));
+            assert!(
+                report.is_clean() && report.requested > 0,
+                "{shape:?} with {open:?} must ask for its floor fillets and land all of them: \
+                 {report:?}"
+            );
+            let tess = tessellate(&solid, 16);
+            let leaks = tessellation_leaks(&tess);
+            assert!(
+                leaks.is_empty(),
+                "{shape:?} with {open:?} leaks {} edge(s): {:?}",
+                leaks.len(),
+                &leaks[..leaks.len().min(2)]
+            );
+        }
+    }
+
+    #[test]
     fn carving_a_middle_cell_splits_the_rim_into_two_faces_not_a_hole() {
         carve_conserves_volume(
             &[(0, 0), (1, 0), (2, 0)],

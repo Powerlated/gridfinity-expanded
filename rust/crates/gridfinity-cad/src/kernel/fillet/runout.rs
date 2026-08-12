@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 
 use crate::kernel::curvedge::{CurvEdge, as_plane};
+use crate::kernel::geom::Curve;
 use crate::kernel::math::Vec3;
 use crate::kernel::topo::{Edge, EdgeFaces, EdgeId, Solid};
 
@@ -109,6 +110,70 @@ impl Runout {
             && fi != self.fa
             && fi != self.fb
     }
+
+    /// This flat end's touchdown on `fi`, and `None` when the end is not flat or
+    /// `fi` is not one of the two faces the blend rolls between. A flat end
+    /// closes the blend with a face of its own, and that face meets `fi` along
+    /// the stub from this point back to the corner.
+    pub fn flat_touchdown(&self, fi: usize) -> Option<Vec3> {
+        if !self.is_flat() {
+            return None;
+        }
+        if fi == self.fa {
+            Some(self.ta_p)
+        } else if fi == self.fb {
+            Some(self.tb_p)
+        } else {
+            None
+        }
+    }
+
+    /// The far end of `ed` when this flat end's stub on `fi` **swallows** it:
+    /// `ed` is a straight edge leaving the corner `v` along the stub and ending
+    /// before the touchdown does, so the whole of it lies inside the ground the
+    /// blend has already taken. `None` for every other edge, including one the
+    /// touchdown lands inside -- that one is retreated by `on_edge` instead.
+    ///
+    /// The face carrying the stub must drop a swallowed edge rather than emit
+    /// it: keeping it would walk the loop out to the corner and straight back
+    /// along the same line, which is a zero-width spur no face can be
+    /// triangulated from. The edge is not lost, because the flat end's own cap
+    /// lies in the plane the stub runs in and takes it instead -- which is why
+    /// this is a question about the **edge** and the touchdown alone, so the
+    /// face that drops it and the cap that picks it up decide identically.
+    pub fn swallowed(&self, fi: usize, ed: &Edge, solid: &Solid, v: usize) -> Option<Vec3> {
+        let t = self.flat_touchdown(fi)?;
+        swallowed_end(t, ed, solid, v)
+    }
+}
+
+/// The far end of `ed` when a stub from vertex `v` out to `t` covers the whole
+/// of it: `ed` must be straight, leave `v`, run within `ON_EDGE` of the stub's
+/// own line, head the same way along it, and stop before `t` does. `None`
+/// otherwise, so an edge merely near the stub, or one long enough to carry the
+/// touchdown itself, is left alone.
+pub(super) fn swallowed_end(t: Vec3, ed: &Edge, solid: &Solid, v: usize) -> Option<Vec3> {
+    if !matches!(ed.curve, Curve::Line { .. }) {
+        return None;
+    }
+    let far = if ed.v0 == v {
+        ed.v1
+    } else if ed.v1 == v {
+        ed.v0
+    } else {
+        return None;
+    };
+    let corner = solid.verts[v].point;
+    let (s, d) = (t - corner, solid.verts[far].point - corner);
+    let (sl, dl) = (s.length(), d.length());
+    if sl <= 0.0 || dl <= 0.0 || s.dot(d) <= 0.0 {
+        return None;
+    }
+    let off = (d - s * (d.dot(s) / (sl * sl))).length();
+    if off > ON_EDGE {
+        return None;
+    }
+    (s.dot(d) / (dl * dl) > 1.0 - 1e-4).then(|| solid.verts[far].point)
 }
 
 /// Chooses how the chain ending at vertex `v` along edge `e`, blended between

@@ -2219,7 +2219,8 @@ fn plan_piece(
         // loop, and that is the whole claim being made here.
         let kept: usize = chained.iter().map(|l| l.len()).sum();
         assert_eq!(
-            kept, n_frags,
+            kept,
+            n_frags,
             "{tag}: the standing wall's boundary is {n_frags} segment(s) but chained into \
              {} closed loop(s) covering only {kept} of them",
             chained.len()

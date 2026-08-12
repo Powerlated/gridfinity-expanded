@@ -19,7 +19,7 @@ use crate::kernel::topo::{Builder, EdgeFaces, EdgeId, Solid};
 
 use super::blend::Blends;
 use super::query::dist_to_curve;
-use super::runout::{RunoutEnd, Runouts};
+use super::runout::{self, RunoutEnd, Runouts};
 use super::{END_AGREE, ON_EDGE};
 
 pub(super) type VertexInfo = HashMap<usize, (Vec3, Vec3)>;
@@ -241,9 +241,18 @@ pub(super) fn runout_caps(
                 (Surface::plane(ro.corner, n), true)
             }
         };
-        let (va, vc, vb) = (b.vertex(ro.ta_p), b.vertex(ro.corner), b.vertex(ro.tb_p));
         let arc = emit_curv(b, ro.tb_p, ro.ta_p, ro.arc);
-        let mut lp = vec![b.line(va, vc), b.line(vc, vb), arc];
+        let mut lp = Vec::with_capacity(3);
+        let mut into_corner = swallowed_points(solid, v, ro.ta_p, &surface);
+        into_corner.reverse();
+        lp.extend(stub_through(b, &into_corner, ro.ta_p, ro.corner));
+        lp.extend(stub_through(
+            b,
+            &swallowed_points(solid, v, ro.tb_p, &surface),
+            ro.corner,
+            ro.tb_p,
+        ));
+        lp.push(arc);
         if arc_used.get(&v) == Some(&arc) {
             lp.reverse();
             for x in &mut lp {
@@ -252,6 +261,57 @@ pub(super) fn runout_caps(
         }
         b.face_from(surface, sense, &lp, &[]);
     }
+}
+
+/// The points along a flat end's stub from the corner `v` out to touchdown `t`
+/// where an edge of `solid` ends, in order of distance from the corner. These
+/// are the far ends of the edges the stub swallows, so the cap emitting the stub
+/// splits it there and picks each swallowed edge up under the id the face that
+/// dropped it already used. Asserts each lies on the cap's own plane, which it
+/// must, being collinear with two points that define it.
+fn swallowed_points(solid: &Solid, v: usize, t: Vec3, surface: &Surface) -> Vec<Vec3> {
+    let corner = solid.verts[v].point;
+    let mut ps: Vec<Vec3> = solid
+        .edges
+        .iter()
+        .filter_map(|ed| runout::swallowed_end(t, ed, solid, v))
+        .collect();
+    ps.sort_by(|a, c| {
+        (*a - corner)
+            .length()
+            .total_cmp(&(*c - corner).length())
+            .then_with(|| a.x.total_cmp(&c.x))
+            .then_with(|| a.y.total_cmp(&c.y))
+            .then_with(|| a.z.total_cmp(&c.z))
+    });
+    ps.dedup_by(|a, c| (*a - *c).length() <= END_AGREE);
+    for p in &ps {
+        let off = surface.signed_distance(*p).abs();
+        assert!(
+            off <= ON_EDGE,
+            "blend runout: the flat end's cap swallows an edge ending {off} off its own plane \
+             at {p:?}; the stub it splits runs in that plane by construction"
+        );
+    }
+    ps
+}
+
+/// The chain of lines from `from` to `to` through `mids`, interned into `b`.
+/// `mids` is in travel order, and a step shorter than `END_AGREE` is dropped
+/// rather than emitted as a zero-length edge.
+fn stub_through(b: &mut Builder, mids: &[Vec3], from: Vec3, to: Vec3) -> Vec<(EdgeId, bool)> {
+    let mut pts = vec![from];
+    pts.extend(mids.iter().copied());
+    pts.push(to);
+    let mut out = Vec::with_capacity(pts.len() - 1);
+    for w in pts.windows(2) {
+        if (w[1] - w[0]).length() <= END_AGREE {
+            continue;
+        }
+        let (vs, ve) = (b.vertex(w[0]), b.vertex(w[1]));
+        out.push(b.line(vs, ve));
+    }
+    out
 }
 
 struct Emitted {
@@ -317,11 +377,34 @@ fn rebuild_loop(
         }
     };
 
+    let swallowed_at = |e: EdgeId| -> Option<usize> {
+        let ed = solid.edges[e];
+        [ed.v0, ed.v1].into_iter().find(|&v| {
+            runouts
+                .get(&v)
+                .and_then(|ro| ro.swallowed(fi, &ed, solid, v))
+                .is_some()
+        })
+    };
+
     items.clear();
     items.reserve(lp.len());
+    let mut swallowed_first: Option<usize> = None;
     for &(e, fwd) in lp {
         let ed = solid.edges[e];
         let end_v = if fwd { ed.v1 } else { ed.v0 };
+        // The stub this face emits for a flat end already covers this edge, so
+        // emitting it as well would double the loop back along its own line.
+        // The corner it leaves becomes the previous piece's end, which is what
+        // makes the stub run from there rather than from the vertex the
+        // swallowed edge would have led to.
+        if let Some(corner_v) = swallowed_at(e) {
+            match items.last_mut() {
+                Some(prev) => prev.end_v = corner_v,
+                None => swallowed_first = Some(corner_v),
+            }
+            continue;
+        }
         if want.contains_key(&e) {
             let bld = &bm[&e];
             let side_a = ef[e][0] == fi;
@@ -428,6 +511,9 @@ fn rebuild_loop(
     }
 
     let n = items.len();
+    if let (Some(corner_v), Some(last)) = (swallowed_first, items.last_mut()) {
+        last.end_v = corner_v;
+    }
     out.reserve(n + 2);
     for i in 0..n {
         out.push(items[i].edge);

@@ -835,6 +835,32 @@ impl Builder {
     }
 
     fn intern_loop(&mut self, edges: &[(EdgeId, bool)]) -> u32 {
+        for k in 0..edges.len() {
+            let (d0, d1) = (edges[k], edges[(k + 1) % edges.len()]);
+            let (Curve::Line { .. }, Curve::Line { .. }) =
+                (self.edges[d0.0].curve, self.edges[d1.0].curve)
+            else {
+                continue;
+            };
+            let (a0, a1) = self.directed_ends(d0);
+            let (b0, b1) = self.directed_ends(d1);
+            let (u, v) = (
+                self.verts[a1].point - self.verts[a0].point,
+                self.verts[b1].point - self.verts[b0].point,
+            );
+            assert!(
+                u.cross(v).length() > 1e-9 * u.length() * v.length() || u.dot(v) >= 0.0,
+                "loop retraces itself between edge {} ({:?} -> {:?}) and edge {} ({:?} -> {:?}); \
+                 the two runs are collinear and opposed, so the loop encloses a zero-width spur \
+                 that no face can be triangulated from",
+                d0.0,
+                self.verts[a0].point,
+                self.verts[a1].point,
+                d1.0,
+                self.verts[b0].point,
+                self.verts[b1].point
+            );
+        }
         let lid = self.loops.len() as u32 - 1;
         self.loop_edges.extend_from_slice(edges);
         self.loops.push(self.loop_edges.len() as u32);

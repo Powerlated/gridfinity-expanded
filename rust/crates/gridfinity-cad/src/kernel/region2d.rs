@@ -639,6 +639,15 @@ pub fn chain_loops<T: Copy>(segs: Vec<(Seg, T)>) -> Vec<Vec<(Seg, T)>> {
                 (a.end() - b.start()).length() < EPS,
                 "chained loop {li} breaks between piece {k} and the next: {a:?} then {b:?}"
             );
+            if let (Seg::Line { a: a0, b: a1 }, Seg::Line { a: b0, b: b1 }) = (a, b) {
+                let (da, db) = (a1 - a0, b1 - b0);
+                assert!(
+                    da.x * db.y - da.y * db.x != 0.0 || da.dot(db) >= 0.0,
+                    "chained loop {li} doubles back along itself between piece {k} and the \
+                     next: {a:?} then {b:?}; the two runs overlap, so the loop encloses a \
+                     zero-width spur that no face can be triangulated from"
+                );
+            }
         }
     }
     out
