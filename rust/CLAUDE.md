@@ -633,17 +633,35 @@ wall   = outline where no cavity replaced it  ∪  reversed(cavity runs that kee
 that is a span with no wall. Those runs bound no material and are exactly what the wall's authored
 boundary leaves out; everything else about the wall follows from the two halves above, chained.
 
-The overshoot is load-bearing and must stay. It is what keeps the cavity and the outline
-**transverse**, so `cavity ∩ outline` is a proper crossing rather than a coincidence. Authoring the
-cavity to abut the outline instead — a `HALF_TOL` strip at open edges, `OUTER_R` on the corners that
-land on the profile — was tried and is *not* a simplification: the intersection then takes A's copy
-of every coincident run, which is `trace_rects`' copy, while the base below `floor_z` uses
-`author_outer_loop`'s, and the two are the same circle split at different stations (the outline
-carries peg-weld splits at `PEG_TANGENT`, the traced loop does not). The corner arc interns twice and
-the solid opens along it — `fully_open_1x1_bin_is_watertight`, `edge 61 used fwd=0 bwd=1`, a
-`radius 3.75` circle at the outline's own corner centre. Abutting is only correct if the coincident
-runs are taken *from the outline* rather than re-authored, which is a bigger change than the boolean
-it removes.
+**The cavity's boolean cannot be authored away, and the reason is a line meeting an arc.** The
+overshoot is load-bearing: it is what keeps the cavity and the outline **transverse**, so
+`cavity ∩ outline` is a proper crossing. Authoring the cavity to abut instead — a `HALF_TOL` strip
+at open edges, the outline's radius on the corners that land on the profile — was built and does not
+work, and the case that kills it is the smallest one there is.
+
+Take a 1×1 with the north edge open. The cavity's east wall stands at `x = 40.55`; the outline's
+north-east corner is an `OUTER_R` arc about `(38, 38)`. Where a wall meets an opening *near a
+rounded corner*, the cavity's boundary has to step from the wall's inset onto the profile, and it
+does that where those two meet:
+
+```
+(40.55 − 38)² + (y − 38)² = 3.75²   ⟹   y = 40.75
+```
+
+The step belongs at `(40.55, 40.75)`, on the arc. `trace_rects` is rectilinear, so it puts the
+corner at `(40.55, 41.75)` — a millimetre north, **outside** the outline it is supposed to lie on,
+and the chain that should close against the profile has nothing to close against. Every wall/opening
+transition within `OUTER_R` of a bin corner is this case.
+
+So the transition point is a line/circle intersection. The kernel can solve one in closed form, but
+solving it here means hand-rolling the crossing that `region2d` already computes correctly and
+generally — the same solve, written twice, with the model's copy carrying no sweep to catch the
+cases a bin can actually produce. `cavity = shape ∩ outline` stays.
+
+The *wall* is a different question and the answer there is yes: material's boundary is the outline
+where no opening replaced it plus the cavity runs that keep a wall, and both come from a
+classifier — no crossing to solve, hence no boolean. That is the split to remember. **The opening
+path needs exactly one boolean, and it is the cavity's.**
 
 This replaced a ray-cast pinch: cast from the run's endpoint along the *direction* of the adjacent
 cavity segment, truncate it to the hit, walk the outline between the two hits, then rebuild the wall
