@@ -107,6 +107,21 @@ pub(super) const MIN_SLOPE_SPAN: f32 = 1e-6;
 /// of one short run cannot consume the whole of it and meet.
 pub(super) const OPEN_CORNER_CLEARANCE: f32 = 0.35;
 
+/// The shortest a partial-height inner wall is built, in millimetres. A wall the
+/// user set to nothing still has to be a solid with a top face for the ramp to
+/// blend against; below this it is a sliver no chain can run out along.
+pub(super) const MIN_PARTIAL_WALL_HEIGHT: f32 = 0.5;
+
+/// The steepest floor slope the model builds, as a gradient rather than an
+/// angle. Past this the ramp is nearer a wall than a floor and the tilted plane
+/// meets the cavity's own walls at a grazing angle nothing prints.
+pub(super) const MAX_SLOPE_GRADIENT: f32 = 3.0;
+
+/// The four corners of a cell a fastener bore is sunk in, as signed unit offsets
+/// from the cell centre to be scaled by `FASTENER_INSET`.
+pub(super) const FASTENER_QUADRANTS: [(f32, f32); 4] =
+    [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)];
+
 /// The thinnest wall the model will build at all, in millimetres -- under half a
 /// typical 0.4 mm nozzle's bead either side of the cavity, so a thinner one is
 /// not a wall a printer can produce.
