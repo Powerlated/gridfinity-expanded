@@ -1,7 +1,8 @@
 use crate::kernel::hash::FxHashMap;
 use crate::kernel::math::Vec2;
 use crate::kernel::perf;
-use crate::kernel::sketch::{Aabb, Seg, loop_area, point_in_segs};
+use crate::kernel::round::seg_mid;
+use crate::kernel::sketch::{Aabb, COINCIDENT, Seg, loop_area, point_in_segs};
 
 const EPS: f32 = 1e-4;
 
@@ -9,8 +10,9 @@ const EPS: f32 = 1e-4;
 /// nearer than this to an end of the segment it lands on is dropped and the
 /// existing vertex stands in for it. It has to exceed `EPS` -- the distance
 /// `chain_loops` welds endpoints with -- or a split can leave a piece whose two
-/// ends weld to each other. It matches the 1e-3 `on_seg` accepts as "on".
-const SLIVER: f32 = 1e-3;
+/// ends weld to each other. It is `COINCIDENT`, the same figure `on_seg` accepts
+/// as "on" and every reader of a sweep's output treats as one point.
+const SLIVER: f32 = COINCIDENT;
 
 const _: () = assert!(
     SLIVER > EPS,
@@ -421,22 +423,6 @@ pub fn seg_seg_points(p: &Seg, q: &Seg) -> Vec<Vec2> {
     raw.into_iter()
         .filter(|&pt| on_seg(p, pt) && on_seg(q, pt))
         .collect()
-}
-
-fn seg_mid(seg: &Seg) -> Vec2 {
-    match *seg {
-        Seg::Line { a, b } => (a + b) * 0.5,
-        Seg::Arc {
-            center,
-            radius,
-            a0,
-            a1,
-            ..
-        } => {
-            let t = (a0 + a1) * 0.5;
-            center + Vec2::new(t.cos(), t.sin()) * radius
-        }
-    }
 }
 
 /// Cut `seg` at `cuts` and return the pieces, in order.

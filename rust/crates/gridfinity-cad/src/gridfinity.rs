@@ -6,14 +6,22 @@ use crate::kernel::program::{
     PlaneRef as PPlaneRef, Program,
 };
 use crate::kernel::rectregion::{
-    LoopStyle, RectF, TracedLoop, merge_collinear, shape_loop, trace_rects,
+    LoopStyle, RectF, TracedLoop, shape_loop, trace_rects,
 };
+use crate::kernel::fillet::feasible::{
+    MIN_TORUS_MAJOR, blend_radius_along, blendable_segs, island_clears, max_inward_radius,
+};
+use crate::kernel::nesting::stitch_loops_2d;
 use crate::kernel::region2d::{
-    chain_loops, loops_within, point_seg_distance, presplit_regions, region_difference,
-    region_intersection, seg_seg_points, split_regions,
+    chain_loops, point_seg_distance, presplit_regions, region_difference, region_intersection,
+    split_regions,
+};
+use crate::kernel::round::{
+    corners_of, drop_degenerate, has_sharp_corner, is_convex_arc, loop_of_points,
+    round_sharp_corners, seg_mid, short_arc, v2_eq,
 };
 use crate::kernel::sketch::{
-    Aabb, Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop, segs_bbox,
+    COINCIDENT, Seg, Sketch, ccw_segs, loop_area, point_in_segs, reverse_loop,
 };
 use crate::kernel::slab::{Op as SlabOp, Slab, SlabOpts, plan_bands};
 use crate::kernel::split::{Cut, Side, trim};
@@ -23,7 +31,6 @@ use crate::layout::{
     classify_edge_in, effective_walls, partition_cells,
 };
 use std::collections::{HashMap, HashSet};
-use std::f32::consts::PI;
 
 pub const GRID_PITCH: f32 = 42.0;
 pub const HEIGHT_PER_UNIT: f32 = 7.0;
@@ -598,24 +605,7 @@ fn buildable_floor_fillet(want: f32, cavity_depth: f32, rc: f32, sloped: bool) -
     fr.max(0.0)
 }
 
-/// A rolling-ball blend along an arc builds a torus whose major radius is the
-/// gap between the arc and the ball, so equal radii put the blend's centre on
-/// the arc's own axis and the torus degenerates to a ring -- which
-/// `build_torus_blend` asserts against. Every radius handed to `fillet_edges`
-/// keeps at least this much clearance from the arcs it rolls along.
-const MIN_TORUS_MAJOR: f32 = 0.1;
 
-/// `want`, pulled clear of `seg`'s own radius if a blend that size would
-/// degenerate on it. Returns something below 0.05 when no usable blend is left,
-/// which every caller reads as "leave this edge sharp".
-fn blend_radius_along(seg: &Seg, want: f32) -> f32 {
-    match *seg {
-        Seg::Arc { radius, .. } if (radius - want).abs() < MIN_TORUS_MAJOR => {
-            radius - MIN_TORUS_MAJOR
-        }
-        _ => want,
-    }
-}
 
 /// Cut one printable piece out of the finished bin: keep the material inside the
 /// vertical prism over the piece's cells. A piece is any connected polyomino, not
@@ -1108,7 +1098,7 @@ fn compartment_corners(steps: &[Step], inset: &dyn Fn(&GridEdge) -> f32) -> Vec<
         let cross = d.x * d1.y - d.y * d1.x;
         if cross.abs() > TURN_SIGN {
             pts.push(c + nrm * ins + n1 * ins_next);
-        } else if (ins - ins_next).abs() > W_EPS {
+        } else if (ins - ins_next).abs() > COINCIDENT {
             pts.push(c + nrm * ins);
             pts.push(c + n1 * ins_next);
         }
@@ -1121,16 +1111,6 @@ fn compartment_corners(steps: &[Step], inset: &dyn Fn(&GridEdge) -> f32) -> Vec<
     pts
 }
 
-fn loop_of_points(pts: &[Vec2]) -> Vec<Seg> {
-    let n = pts.len();
-    assert!(n >= 3, "a closed loop has at least three corners, got {n}");
-    (0..n)
-        .map(|i| Seg::Line {
-            a: pts[i],
-            b: pts[(i + 1) % n],
-        })
-        .collect()
-}
 
 /// The divider strips that stand *inside* one compartment: the dividers whose
 /// two cells the compartment keeps, so they separate nothing.
@@ -1172,31 +1152,6 @@ fn divider_strip(e: &GridEdge, wt: f32) -> RectF {
     }
 }
 
-/// A rectilinear seg loop read back as the corners it turns at.
-///
-/// A boolean cuts segments wherever the other operand crossed, so the run that
-/// arrives is subdivided; `merge_collinear` takes it back to one point per turn,
-/// which the corner-rounding pass requires -- it reads a collinear point as a
-/// reentrant corner and rounds it by the floor fillet.
-fn corners_of(segs: &[Seg]) -> Vec<Vec2> {
-    let pts: Vec<Vec2> = segs
-        .iter()
-        .map(|sg| {
-            assert!(
-                matches!(sg, Seg::Line { .. }),
-                "a compartment's rectilinear boundary is straight throughout, got {sg:?}"
-            );
-            sg.start()
-        })
-        .collect();
-    let mut kept: Vec<Vec2> = Vec::with_capacity(pts.len());
-    for (i, &p) in pts.iter().enumerate() {
-        if (p - pts[(i + pts.len() - 1) % pts.len()]).length() > W_EPS {
-            kept.push(p);
-        }
-    }
-    merge_collinear(&kept)
-}
 
 /// One compartment's cavity boundary, rectilinear and complete: the walk over
 /// its own edges, less the divider strips standing inside it.
@@ -1245,34 +1200,15 @@ fn compartment_cavity_corners(
     out
 }
 
-fn short_arc(a0: f32, a1: f32) -> (f32, f32) {
-    let mut d = a1 - a0;
-    while d > PI {
-        d -= 2.0 * PI;
-    }
-    while d < -PI {
-        d += 2.0 * PI;
-    }
-    (a0, a0 + d)
-}
 
-/// How near two points must be to count as the same point of a boundary, in
-/// millimetres. A boolean's cut points and an authored corner agree to a few
-/// ulps of a coordinate near 90 mm, three orders below this; two genuinely
-/// distinct features of a bin are never this close, the narrowest being the
-/// 0.25 mm `HALF_TOL` step where an opened cavity meets the outline.
-const W_EPS: f32 = 1e-3;
 
 /// How far, in radians, a point's angle about a circle's centre may sit outside
 /// an arc's stored range and still be a point of it -- and, equally, how near
 /// two cut angles must be to be one cut. At the profile's `OUTER_R` this is
-/// 3.8e-4 mm of arc, comfortably inside `W_EPS` so the angular and positional
+/// 3.8e-4 mm of arc, comfortably inside `COINCIDENT` so the angular and positional
 /// tests agree about which points coincide.
 const ARC_ENDPOINT_ANGLE: f32 = 1e-4;
 
-fn v2_eq(a: Vec2, b: Vec2) -> bool {
-    (a - b).length() < W_EPS
-}
 
 #[derive(Clone, Copy, Debug)]
 struct OpenSpan {
@@ -1311,7 +1247,7 @@ fn open_spans(cells: &[GridCell], walls: &EffectiveWalls) -> Vec<OpenSpan> {
 fn point_on_spans(spans: &[OpenSpan], pt: Vec2) -> bool {
     spans.iter().any(|s| {
         let (c, a) = if s.horiz { (pt.y, pt.x) } else { (pt.x, pt.y) };
-        (c - s.coord).abs() < W_EPS && a > s.lo - W_EPS && a < s.hi + W_EPS
+        (c - s.coord).abs() < COINCIDENT && a > s.lo - COINCIDENT && a < s.hi + COINCIDENT
     })
 }
 
@@ -1342,7 +1278,7 @@ impl OuterLoops {
         for li in 0..self.loops.len() {
             let hit = self.loops[li]
                 .iter()
-                .find(|pc| point_seg_distance(p, &pc.seg) < W_EPS);
+                .find(|pc| point_seg_distance(p, &pc.seg) < COINCIDENT);
             let Some(pc) = hit else { continue };
             if pc.shared && matches!(pc.seg, Seg::Arc { .. }) {
                 peg_arcs.push(p);
@@ -1362,12 +1298,12 @@ impl OuterLoops {
         for i in 0..pieces.len() {
             let pc = pieces[i];
             if v2_eq(pc.seg.start(), p) || v2_eq(pc.seg.end(), p) {
-                if crate::kernel::region2d::point_seg_distance(p, &pc.seg) < W_EPS {
+                if crate::kernel::region2d::point_seg_distance(p, &pc.seg) < COINCIDENT {
                     return;
                 }
                 continue;
             }
-            if crate::kernel::region2d::point_seg_distance(p, &pc.seg) > W_EPS {
+            if crate::kernel::region2d::point_seg_distance(p, &pc.seg) > COINCIDENT {
                 continue;
             }
             let (lo, hi) = match pc.seg {
@@ -1449,41 +1385,7 @@ impl CavityLoop {
     }
 }
 
-/// The mid-point of a segment, for asking which side of a boundary it is on.
-fn seg_mid(seg: &Seg) -> Vec2 {
-    match *seg {
-        Seg::Line { a, b } => (a + b) * 0.5,
-        Seg::Arc {
-            center,
-            radius,
-            a0,
-            a1,
-            ..
-        } => {
-            let t = (a0 + a1) * 0.5;
-            center + Vec2::new(t.cos(), t.sin()) * radius
-        }
-    }
-}
 
-/// Drop segments a boolean left with coincident endpoints.
-///
-/// A region sweep can cut a run twice at what is the same point in f32 and hand
-/// back a hair between the two cuts. The loop stays continuous without it --
-/// the neighbours already meet there -- and `build::wall_between` takes a
-/// segment's plane normal from the quad it sweeps, so a zero-length one gives a
-/// zero normal and no plane at all.
-fn drop_degenerate(loops: Vec<Vec<Seg>>) -> Vec<Vec<Seg>> {
-    loops
-        .into_iter()
-        .map(|l| {
-            l.into_iter()
-                .filter(|sg| (sg.end() - sg.start()).length() > W_EPS)
-                .collect::<Vec<Seg>>()
-        })
-        .filter(|l| l.len() >= 3)
-        .collect()
-}
 
 fn outline_region(o: &OuterLoops) -> Vec<Vec<Seg>> {
     o.loops
@@ -1496,7 +1398,7 @@ fn on_outline(outline: &[Vec<Seg>], p: Vec2) -> bool {
     outline
         .iter()
         .flatten()
-        .any(|sg| point_seg_distance(p, sg) < W_EPS)
+        .any(|sg| point_seg_distance(p, sg) < COINCIDENT)
 }
 
 /// Clip a cavity loop to the bin's outline, marking the runs that end up lying
@@ -1613,9 +1515,6 @@ fn inner_wall_quad(w: &InnerWall, r: f32) -> Option<Vec<Seg>> {
     Some(out)
 }
 
-fn island_clears(island: &[Seg], outer: &[Seg], needed: f32) -> bool {
-    needed <= 0.0 || !loops_within(island, outer, needed)
-}
 
 fn inner_wall_quad_in(w: &InnerWall, r: f32, outer: &[Seg]) -> Option<Vec<Seg>> {
     let sharp = inner_wall_quad(w, 0.0)?;
@@ -1642,7 +1541,7 @@ fn peg_seg_free(s: &Seg, c: GridCell, shared: &SharedWithPegs) -> bool {
     match *s {
         Seg::Line { a, b } => {
             let m = (a + b) * 0.5;
-            let horiz = (a.y - b.y).abs() < W_EPS;
+            let horiz = (a.y - b.y).abs() < COINCIDENT;
             let e = if horiz {
                 let y = if m.y < cy { c.y } else { c.y + 1 };
                 GridEdge {
@@ -1701,7 +1600,7 @@ fn split_peg_profile(
                 let (lo, hi) = (a0.min(a1), a0.max(a1));
                 let mut cuts: Vec<f32> = arc_points
                     .iter()
-                    .filter(|p| ((**p - center).length() - OUTER_R).abs() < W_EPS)
+                    .filter(|p| ((**p - center).length() - OUTER_R).abs() < COINCIDENT)
                     .map(|p| {
                         wrap_angle_into(
                             (p.y - center.y).atan2(p.x - center.x),
@@ -1749,7 +1648,7 @@ fn split_peg_profile(
             out.push(s);
             continue;
         };
-        let horiz = (a.y - b.y).abs() < W_EPS;
+        let horiz = (a.y - b.y).abs() < COINCIDENT;
         let e = if horiz {
             if a.y < cy { south } else { north }
         } else if a.x < cx {
@@ -1766,7 +1665,7 @@ fn split_peg_profile(
         let mut cuts: Vec<f32> = stations
             .iter()
             .copied()
-            .filter(|&t| (t - c0.min(c1)) > W_EPS && (c0.max(c1) - t) > W_EPS)
+            .filter(|&t| (t - c0.min(c1)) > COINCIDENT && (c0.max(c1) - t) > COINCIDENT)
             .collect();
         cuts.sort_by(|x, y| {
             if c1 > c0 {
@@ -1775,7 +1674,7 @@ fn split_peg_profile(
                 y.total_cmp(x)
             }
         });
-        cuts.dedup_by(|x, y| (*x - *y).abs() < W_EPS);
+        cuts.dedup_by(|x, y| (*x - *y).abs() < COINCIDENT);
         let mut prev = a;
         for t in cuts {
             let p = if horiz {
@@ -1812,7 +1711,7 @@ fn edge_inside_cell(set: &HashSet<GridCell>, e: &GridEdge) -> Option<GridCell> {
 
 fn contained_holes(all: &[TracedLoop], outer: &TracedLoop) -> Vec<TracedLoop> {
     all.iter()
-        .filter(|l| l.is_hole() && point_in_rect_loop(l.pts[0], outer))
+        .filter(|l| l.is_hole() && outer.contains(l.pts[0]))
         .cloned()
         .collect()
 }
@@ -2754,314 +2653,15 @@ fn shape_cavity_loop(lp: &TracedLoop, rc: f32, rf: f32) -> Vec<Seg> {
     }
 }
 
-fn seg_tangent(s: &Seg, end: bool) -> Vec2 {
-    match *s {
-        Seg::Line { a, b } => (b - a).normalize(),
-        Seg::Arc { a0, a1, .. } => {
-            let t = if end { a1 } else { a0 };
-            let dir = if a1 >= a0 { 1.0 } else { -1.0 };
-            Vec2::new(-t.sin(), t.cos()) * dir
-        }
-    }
-}
 
-const TANGENT_DOT: f32 = 0.9995;
 
-fn sharp_between(shape: &[Seg], i: usize, j: usize) -> bool {
-    seg_tangent(&shape[i], true).dot(seg_tangent(&shape[j], false)) < TANGENT_DOT
-}
 
-fn has_sharp_corner(shape: &[Seg]) -> bool {
-    let n = shape.len();
-    (0..n).any(|i| sharp_between(shape, i, (i + 1) % n))
-}
 
-/// Which of a loop's segments a rolling-ball blend may run along, given which
-/// ones the caller allows at all.
-///
-/// A blend chain has to stay tangent-continuous, because a vertex with two
-/// blended edges *continues* the chain and joining two blends that do not share
-/// a tangent there leaves a gap the size of the two radii. A sharp corner has to
-/// terminate the chain instead, which costs one of its two segments and turns
-/// the vertex into a runout `fillet.rs` can close off. It costs one segment, not
-/// the whole loop: an opening's pinch leaves sharp corners that used to delete
-/// every fillet on the compartment.
-fn blendable_segs(shape: &[Seg], allow: &[bool]) -> Vec<bool> {
-    let n = shape.len();
-    let mut keep = allow.to_vec();
-    for i in 0..n {
-        let j = (i + 1) % n;
-        if keep[i] && keep[j] && sharp_between(shape, i, j) {
-            keep[j] = false;
-        }
-    }
-    keep
-}
 
-/// The largest rolling-ball radius the inside of `segs` can carry.
-///
-/// A ball of radius `r` rolling along the boundary touches the floor `r` from
-/// it, so across a passage `w` wide the touchdowns from the two sides cross as
-/// soon as `r > w / 2` and the filleted floor's own boundary self-intersects --
-/// which the kernel can only report after building the whole blend, as
-/// `face N's boundary crosses itself`. The radius is impossible, so the model
-/// should never ask for it.
-///
-/// `w` is measured by casting a ray *inward* from points along the boundary and
-/// taking the first crossing: that is the width through the **interior**, which
-/// is what the ball has to fit in. Taking the distance between nearby segments
-/// instead would clamp on a thin finger of material -- its two sides are close,
-/// but the ball rolls around the outside of it and nothing is in its way.
-///
-/// The ray decides **which** boundary is across the passage; the width itself is
-/// then the distance from the sample to that whole segment, not the length of
-/// the ray. The two differ whenever the ray leaves at anything but a right angle
-/// to what it hits, and the difference is one-sided in the wrong direction: the
-/// case that found this fires a ray off a wall finger's tip that is tilted 2°
-/// against the cavity wall it crosses to, measuring a 3.0496 mm gap as 3.0518
-/// and passing a 1.5259 mm radius where 1.5248 fits. Halving the distance to the
-/// segment is exact for the disc that touches both, which is what a rolling ball
-/// in the passage is.
-///
-/// Samples are the true segments, arcs included, never a chord approximation:
-/// both endpoints of every segment plus interior points about `STEP` apart. The
-/// endpoints matter -- a rounded finger tip's nearest point to the wall opposite
-/// is the corner where its end cap meets its side, and interior sampling walks
-/// straight past it.
-///
-/// Sampling can only miss a narrow spot, never invent one, so the bound errs
-/// towards leaving the radius alone. It is an upper bound and not a guarantee:
-/// a passage that narrows between samples still gets through.
-fn max_inward_radius(segs: &[Seg]) -> f32 {
-    const STEP: f32 = 0.5;
-    const EPS: f32 = 1e-3;
-    const REACH: f32 = 1e3;
 
-    // The inward direction is read off the winding, so a loop that encloses
-    // nothing does not merely give a poor bound -- it has no inside, and every
-    // ray cast here would be pointing at a side picked by the sign of noise.
-    let area = loop_area(segs);
-    assert!(
-        area != 0.0,
-        "fillet width: a cavity loop of {} segment(s) encloses no area, so it has no interior \
-         for a ball to roll in",
-        segs.len()
-    );
-    let ccw = area > 0.0;
-    if segs.len() < 2 {
-        return f32::INFINITY;
-    }
 
-    let mut best = f32::INFINITY;
-    for s in segs {
-        for (p, along) in seg_samples(s, STEP) {
-            // Interior is to the left of travel on a counter-clockwise loop.
-            let inward = if ccw {
-                Vec2::new(-along.y, along.x)
-            } else {
-                Vec2::new(along.y, -along.x)
-            };
-            let ray = Seg::Line {
-                a: p,
-                b: p + inward * REACH,
-            };
-            for other in segs {
-                if !seg_seg_points(&ray, other)
-                    .iter()
-                    .any(|hit| (*hit - p).length() > EPS)
-                {
-                    continue;
-                }
-                let d = point_seg_distance(p, other);
-                if d > EPS && d < best {
-                    best = d;
-                }
-            }
-        }
-    }
-    best / 2.0
-}
 
-/// Points along `s`, each with the unit direction the segment travels there:
-/// both endpoints and interior points no more than `step` apart, taken on the
-/// true line or the true circle so neither the point nor the tangent is ever
-/// read off a chord. A degenerate segment yields nothing.
-fn seg_samples(s: &Seg, step: f32) -> Vec<(Vec2, Vec2)> {
-    let mut out = Vec::new();
-    let (len, at): (f32, Box<dyn Fn(f32) -> (Vec2, Vec2)>) = match *s {
-        Seg::Line { a, b } => {
-            let d = b - a;
-            let len = d.length();
-            if !(len > 0.0) {
-                return out;
-            }
-            let t = d / len;
-            (len, Box::new(move |u| (a + d * u, t)))
-        }
-        Seg::Arc {
-            center,
-            radius,
-            a0,
-            a1,
-            ..
-        } => {
-            let sweep = a1 - a0;
-            (
-                sweep.abs() * radius,
-                Box::new(move |u| {
-                    let ang = a0 + sweep * u;
-                    let radial = Vec2::new(ang.cos(), ang.sin());
-                    (
-                        center + radial * radius,
-                        Vec2::new(-radial.y, radial.x) * sweep.signum(),
-                    )
-                }),
-            )
-        }
-    };
-    if !(len > 0.0) {
-        return out;
-    }
-    let n = (len / step).ceil() as usize;
-    for k in 0..=n {
-        out.push(at(k as f32 / n as f32));
-    }
-    out
-}
 
-fn is_convex_arc(shape: &[Seg], s: &Seg) -> bool {
-    let ccw = loop_area(shape) > 0.0;
-    match s {
-        Seg::Arc { a0, a1, .. } => (a1 > a0) == ccw,
-        _ => false,
-    }
-}
-
-/// How far `|cos phi|` must fall below 1 for the turn between two runs to be a
-/// corner worth rounding. Below it the pair is collinear (`phi = 0`) or doubles
-/// back on itself (`phi = pi`), and neither admits an inscribed arc: the first
-/// has no corner, the second no interior. It also floors the half-angle tangent
-/// the trim divides by -- `tan(acos(1 - CORNER_TURNS) / 2)`, about 7.1e-4.
-const CORNER_TURNS: f32 = 1e-6;
-
-fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<Seg> {
-    let n = segs.len();
-    if n < 2 || (convex_r <= 0.0 && concave_r <= 0.0) {
-        return segs.to_vec();
-    }
-    let ccw = loop_area(segs) > 0.0;
-
-    let mut trim = vec![0.0f32; n];
-    let mut arc_r = vec![0.0f32; n];
-    let mut tan_half = vec![0.0f32; n];
-    for i in 0..n {
-        let (cur, next) = (&segs[i], &segs[(i + 1) % n]);
-        let (Seg::Line { .. }, Seg::Line { .. }) = (cur, next) else {
-            continue;
-        };
-        let d_in = seg_tangent(cur, true);
-        let d_out = seg_tangent(next, false);
-        let dot = d_in.dot(d_out).clamp(-1.0, 1.0);
-        if dot > 1.0 - CORNER_TURNS || dot < -1.0 + CORNER_TURNS {
-            continue;
-        }
-        let cross = d_in.x * d_out.y - d_in.y * d_out.x;
-        let r = if (cross > 0.0) == ccw {
-            convex_r
-        } else {
-            concave_r
-        };
-        if r <= 0.0 {
-            continue;
-        }
-        let phi = dot.acos();
-        tan_half[i] = (phi / 2.0).tan();
-        arc_r[i] = r;
-        trim[i] = r * tan_half[i];
-    }
-    const MIN_ARC_R: f32 = 0.1;
-    const USABLE: f32 = 0.98;
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for i in 0..n {
-            let Seg::Line { a, b } = segs[i] else {
-                continue;
-            };
-            let prev = (i + n - 1) % n;
-            let want = trim[prev] + trim[i];
-            let len = (b - a).length() * USABLE;
-            if want <= len || want <= 0.0 {
-                continue;
-            }
-            let k = len / want;
-            for idx in [prev, i] {
-                if trim[idx] > 0.0 {
-                    assert!(
-                        tan_half[idx] > 0.0,
-                        "a corner with a trim to shrink turns by more than CORNER_TURNS, so its \
-                         half-angle tangent is positive, got {} at corner {idx}",
-                        tan_half[idx]
-                    );
-                    trim[idx] *= k;
-                    arc_r[idx] = trim[idx] / tan_half[idx];
-                    changed = true;
-                }
-            }
-        }
-        for i in 0..n {
-            if arc_r[i] > 0.0 && arc_r[i] < MIN_ARC_R {
-                arc_r[i] = 0.0;
-                trim[i] = 0.0;
-                changed = true;
-            }
-        }
-    }
-
-    let mut out: Vec<Seg> = Vec::with_capacity(n * 2);
-    for i in 0..n {
-        let prev = (i + n - 1) % n;
-        let seg = segs[i];
-        let seg = match seg {
-            Seg::Line { a, b } => {
-                let d = (b - a).normalize_or_zero();
-                Seg::Line {
-                    a: a + d * trim[prev],
-                    b: b - d * trim[i],
-                }
-            }
-            other => other,
-        };
-        out.push(seg);
-        if trim[i] <= 0.0 || arc_r[i] <= 0.0 {
-            continue;
-        }
-        let v = segs[i].end();
-        let d_in = seg_tangent(&segs[i], true);
-        let d_out = seg_tangent(&segs[(i + 1) % n], false);
-        let cross = d_in.x * d_out.y - d_in.y * d_out.x;
-        let p_in = v - d_in * trim[i];
-        let p_out = v + d_out * trim[i];
-        let nrm = if cross > 0.0 {
-            Vec2::new(-d_in.y, d_in.x)
-        } else {
-            Vec2::new(d_in.y, -d_in.x)
-        };
-        let center = p_in + nrm * arc_r[i];
-        let a0 = f32::atan2(p_in.y - center.y, p_in.x - center.x);
-        let a1 = f32::atan2(p_out.y - center.y, p_out.x - center.x);
-        let (a0, a1) = short_arc(a0, a1);
-        out.push(Seg::Arc {
-            a: p_in,
-            b: p_out,
-            center,
-            radius: arc_r[i],
-            a0,
-            a1,
-        });
-    }
-    out
-}
 
 fn plan_cavity_flat(
     shape: &[Seg],
@@ -3221,138 +2821,8 @@ fn uphill_unit(dir: SlopeDir) -> (f32, f32) {
     }
 }
 
-fn point_in_rect_loop(pt: Vec2, lp: &TracedLoop) -> bool {
-    let n = lp.pts.len();
-    let mut inside = false;
-    for i in 0..n {
-        let a = lp.pts[i];
-        let b = lp.pts[(i + 1) % n];
-        if (a.y > pt.y) != (b.y > pt.y) {
-            let x = a.x + (pt.y - a.y) / (b.y - a.y) * (b.x - a.x);
-            if x > pt.x {
-                inside = !inside;
-            }
-        }
-    }
-    inside
-}
 
-fn stitch_loops_2d(free: Vec<Seg>) -> Vec<(Vec<Seg>, Vec<Vec<Seg>>)> {
-    let chained = chain_loops(free.into_iter().map(|s| (s, ())).collect());
-    let loops: Vec<Vec<Seg>> = chained
-        .into_iter()
-        .map(|lp| lp.into_iter().map(|(s, _)| s).collect())
-        .collect();
-    if loops.is_empty() {
-        return Vec::new();
-    }
-    let bbox: Vec<Aabb> = loops.iter().map(|l| segs_bbox(l)).collect();
-    let containers = containment(&loops, &bbox);
-    let depth = |i: usize| containers[i].len();
 
-    let mut out: Vec<(Vec<Seg>, Vec<Vec<Seg>>)> = Vec::new();
-    let mut out_idx: HashMap<usize, usize> = HashMap::new();
-    for (i, lp) in loops.iter().enumerate() {
-        if depth(i) % 2 == 0 {
-            out_idx.insert(i, out.len());
-            out.push((lp.clone(), Vec::new()));
-        }
-    }
-    for (i, lp) in loops.iter().enumerate() {
-        if depth(i) % 2 == 1 {
-            let owner = *containers[i]
-                .iter()
-                .filter(|&&j| depth(j) % 2 == 0)
-                .max_by_key(|&&j| depth(j))
-                .expect("hole loop without containing outer");
-            let slot = out_idx[&owner];
-            out[slot].1.push(lp.clone());
-        }
-    }
-    out
-}
-
-/// For every loop, the loops that contain it.
-///
-/// A bin's bridge underside stitches into one loop per cell, and every one of
-/// those has the same bounding-box area, so ordering candidates by area prunes
-/// nothing and the scan is quadratic in cells. Bucketing the boxes on a uniform
-/// grid keeps each query to its own neighbourhood; loops whose box spans an
-/// unreasonable share of the grid are held aside and tested every time, which
-/// bounds the insertion cost without losing candidates.
-fn containment(loops: &[Vec<Seg>], bbox: &[Aabb]) -> Vec<Vec<usize>> {
-    const MAX_CELLS: usize = 16;
-    let n = loops.len();
-    let all = bbox.iter().fold(Aabb::EMPTY, |a, b| a.union(*b));
-    let side = (all.max - all.min).max_element();
-    let k = (n as f32).sqrt().ceil().clamp(1.0, 256.0);
-    let inv = if side > 0.0 { k / side } else { 0.0 };
-    let (nx, ny) = (
-        (((all.max.x - all.min.x) * inv) as usize + 1).min(256),
-        (((all.max.y - all.min.y) * inv) as usize + 1).min(256),
-    );
-    let col = |x: f32| (((x - all.min.x) * inv).max(0.0) as usize).min(nx - 1);
-    let row = |y: f32| (((y - all.min.y) * inv).max(0.0) as usize).min(ny - 1);
-
-    let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); nx * ny];
-    let mut wide: Vec<u32> = Vec::new();
-    for (j, b) in bbox.iter().enumerate() {
-        let (i0, i1) = (col(b.min.x), col(b.max.x));
-        let (j0, j1) = (row(b.min.y), row(b.max.y));
-        if (i1 - i0 + 1) * (j1 - j0 + 1) > MAX_CELLS {
-            wide.push(j as u32);
-            continue;
-        }
-        for i in i0..=i1 {
-            for r in j0..=j1 {
-                buckets[i * ny + r].push(j as u32);
-            }
-        }
-    }
-
-    // A wide loop is tested by every query, and for a whole-bin outline that is
-    // hundreds of segments each time. Bucketing its segments by the rows they
-    // span leaves only the handful that can cross the query ray.
-    let rows: Vec<Vec<Vec<u32>>> = wide
-        .iter()
-        .map(|&j| {
-            let mut rs: Vec<Vec<u32>> = vec![Vec::new(); ny];
-            for (si, s) in loops[j as usize].iter().enumerate() {
-                let b = s.bbox();
-                for r in row(b.min.y)..=row(b.max.y) {
-                    rs[r].push(si as u32);
-                }
-            }
-            rs
-        })
-        .collect();
-
-    (0..n)
-        .map(|i| {
-            let pt = loops[i][0].start();
-            let mut out: Vec<usize> = buckets[col(pt.x) * ny + row(pt.y)]
-                .iter()
-                .map(|&j| j as usize)
-                .filter(|&j| j != i && bbox[j].contains(pt) && point_in_segs(pt, &loops[j]))
-                .collect();
-            for (w, &j) in wide.iter().enumerate() {
-                let j = j as usize;
-                if j == i || !bbox[j].contains(pt) {
-                    continue;
-                }
-                crate::kernel::perf::count(crate::kernel::perf::Metric::PointInSegs);
-                let hits: u32 = rows[w][row(pt.y)]
-                    .iter()
-                    .map(|&si| crate::kernel::sketch::seg_crossings(pt, &loops[j][si as usize]))
-                    .sum();
-                if hits % 2 == 1 {
-                    out.push(j);
-                }
-            }
-            out
-        })
-        .collect()
-}
 
 fn build_baseplate(p: &Params) -> Solid {
     let cells = p.all_cells();
@@ -3435,7 +2905,7 @@ fn build_baseplate(p: &Params) -> Solid {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{effective_walls, internal_edges, perimeter_edges};
+    use crate::layout::effective_walls;
 
     fn cells(coords: &[(i32, i32)]) -> Vec<GridCell> {
         coords.iter().map(|&(x, y)| GridCell { x, y }).collect()

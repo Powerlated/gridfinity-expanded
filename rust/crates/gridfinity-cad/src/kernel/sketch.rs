@@ -1,6 +1,14 @@
 use crate::kernel::math::Vec2;
 use std::f32::consts::PI;
 
+/// How near two points of a boundary must be to be the same point, in
+/// millimetres. It is the one tolerance every consumer of a loop has to agree
+/// on: `region2d`'s `on_seg` accepts a point this far from a segment as lying on
+/// it, `chain_loops` welds two chain ends this far apart, and a caller reading a
+/// sweep's output back -- dropping a hair, merging a subdivided run -- must use
+/// the same figure or it will keep a piece the boolean already welded away.
+pub const COINCIDENT: f32 = 1e-3;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Seg {
     Line {

@@ -33,6 +33,7 @@
 mod blend;
 mod chain;
 mod corner;
+pub mod feasible;
 mod query;
 mod rebuild;
 mod runout;

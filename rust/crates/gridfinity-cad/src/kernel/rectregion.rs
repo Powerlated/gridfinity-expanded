@@ -1,7 +1,7 @@
 use crate::kernel::math::Vec2;
+use crate::kernel::round::short_arc;
 use crate::kernel::sketch::Seg;
 use std::collections::HashMap;
-use std::f32::consts::PI;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RectF {
@@ -35,6 +35,26 @@ impl TracedLoop {
     }
     pub fn is_hole(&self) -> bool {
         self.signed_area() < 0.0
+    }
+
+    /// Whether `pt` lies strictly inside this loop, by even-odd crossings of a
+    /// ray cast in +x. A point exactly on the boundary is decided by which side
+    /// of it the ray's tie-breaking puts the two edges there, so callers with a
+    /// point that may sit on the loop must not ask.
+    pub fn contains(&self, pt: Vec2) -> bool {
+        let n = self.pts.len();
+        let mut inside = false;
+        for i in 0..n {
+            let a = self.pts[i];
+            let b = self.pts[(i + 1) % n];
+            if (a.y > pt.y) != (b.y > pt.y) {
+                let x = a.x + (pt.y - a.y) / (b.y - a.y) * (b.x - a.x);
+                if x > pt.x {
+                    inside = !inside;
+                }
+            }
+        }
+        inside
     }
 }
 
@@ -287,17 +307,6 @@ pub fn shape_loop(lp: &TracedLoop, style: &LoopStyle) -> Vec<Seg> {
         }
     }
     segs
-}
-
-fn short_arc(a0: f32, a1: f32) -> (f32, f32) {
-    let mut d = a1 - a0;
-    while d > PI {
-        d -= 2.0 * PI;
-    }
-    while d < -PI {
-        d += 2.0 * PI;
-    }
-    (a0, a0 + d)
 }
 
 #[cfg(test)]
