@@ -1,6 +1,6 @@
 use crate::kernel::build::{loop_of, ring, wall_between};
 use crate::kernel::geom::Surface;
-use crate::kernel::math::{Vec2, Vec3, vec3_of};
+use crate::kernel::math::{Vec2, Vec3, vec3_of, wrap_angle_into};
 use crate::kernel::program::{
     self, BlendReport, DirLoop as POpDirLoop, HoleProfile as PHoleProfile, Op as POp,
     PlaneRef as PPlaneRef, Program,
@@ -469,6 +469,135 @@ const REENTRANT_FILLET_OVERHANG: f32 = 8.0;
 /// concentric with the outer arc instead.
 const SLOPED_MIN_WALL: f32 = OUTER_R * (1.0 - std::f32::consts::FRAC_1_SQRT_2) + 0.05;
 
+/// The smallest blend radius worth emitting an op for, in millimetres. A
+/// rolling ball this small is under one extrusion width, so the blend it would
+/// build is invisible in the print and costs a torus face per edge to carry.
+const MIN_USEFUL_BLEND: f32 = 0.01;
+
+/// The smallest corner radius worth rounding a rectangular quad by, in
+/// millimetres -- an inner wall's end or a peg profile's corner. Below it the
+/// arc is shorter than the weld quantum and the quad is emitted square.
+const MIN_QUAD_ROUND: f32 = 0.02;
+
+/// How far apart two of a rounded quad's tangent points must be for the run
+/// between them to be a segment rather than a coincidence, in millimetres. At
+/// or under it the two arcs meet and no straight piece stands between them.
+const MIN_STRAIGHT_RUN: f32 = 1e-4;
+
+/// How near two insets must be to be the same inset, in millimetres. Insets are
+/// composed from `HALF_TOL`, a wall thickness and a divider half-thickness, so
+/// two that should agree agree to a few ulps and two that should not differ by
+/// at least `MIN_WALL / 2`.
+const INSET_SAME: f32 = 1e-6;
+
+/// The magnitude that separates a turn from a straight run in the cross product
+/// of two unit *axis-aligned* directions, which is exactly 0, +1 or -1. Half way
+/// between is the robust discriminator, not a tolerance on a near miss.
+const TURN_SIGN: f32 = 0.5;
+
+/// How much of the cavity's depth a sloped floor must leave below the rim, in
+/// millimetres, so the high end of the ramp still stands inside the bin.
+const SLOPE_RIM_HEADROOM: f32 = 0.5;
+
+/// How far above the sloped floor beneath it an island's own top must stand to
+/// be a top at all, in millimetres. Closer than this the ramp has already risen
+/// past the island and the island is capped at the rim instead.
+const SLOPE_ISLAND_HEADROOM: f32 = 0.2;
+
+/// The smallest slope run, in millimetres, over which a gradient is meaningful.
+/// Below it the piece has no extent along the uphill direction and the floor is
+/// built flat.
+const MIN_SLOPE_SPAN: f32 = 1e-6;
+
+/// The straight run a rounded corner must leave beside an opening's suppressed
+/// corner, in millimetres. The arc is shortened to keep it, so the two corners
+/// of one short run cannot consume the whole of it and meet.
+const OPEN_CORNER_CLEARANCE: f32 = 0.35;
+
+/// The thinnest wall the model will build at all, in millimetres -- under half a
+/// typical 0.4 mm nozzle's bead either side of the cavity, so a thinner one is
+/// not a wall a printer can produce.
+const MIN_WALL: f32 = 0.4;
+
+/// How far an opened bin's wall must stay clear of `PEG_TANGENT`, in
+/// millimetres. An opening lets the cavity run out to the pitch line, so the
+/// cavity's inset `HALF_TOL + wt` at the walls either side of it must still
+/// leave a straight stub of outline between the wall and the corner arc's
+/// tangent point; at `PEG_TANGENT` exactly there is no stub and the wall meets
+/// the arc at a point.
+const OPEN_WALL_HEADROOM: f32 = 0.6;
+
+/// How far below the rim a floor fillet must stop, in millimetres. A blend of
+/// the full cavity depth reaches the rim and leaves the wall no straight face
+/// above it for the chain to run out against.
+const FILLET_DEPTH_HEADROOM: f32 = 0.05;
+
+/// How far inside the convex cavity corner a concave floor fillet must stay, in
+/// millimetres, so the corner arc remains a curve the blend rolls *along*
+/// rather than one it degenerates onto -- the same degeneracy `MIN_TORUS_MAJOR`
+/// bounds per contact segment, applied to the corner radius up front.
+const FILLET_CORNER_HEADROOM: f32 = 0.02;
+
+/// The smallest cavity corner radius that counts as a rounded corner rather
+/// than a square one, in millimetres. Below it the cavity is built sharp and
+/// takes no floor fillet at all, because a blend has no corner arc to turn.
+const MIN_ROUNDED_CORNER: f32 = 0.05;
+
+/// The wall thickness one piece is actually built with, given the thickness
+/// `Params` asked for and what the bin is: `MIN_WALL` at the thin end always,
+/// `PEG_TANGENT - OPEN_WALL_HEADROOM` at the thick end when any edge is open,
+/// and `SLOPED_MIN_WALL` at the thin end when the floor is sloped.
+///
+/// The sloped floor is why the last clamp exists. It builds its cavity square,
+/// and a sharp convex corner sits `sqrt(2) * (OUTER_R - wt)` from the outer
+/// arc's centre while the arc itself reaches only `OUTER_R`; below
+/// `SLOPED_MIN_WALL` the cavity escapes the rounded corner entirely, is no
+/// longer inside the rim face it is a hole of, and panicked `plan_piece` with
+/// `total_h hole without a containing face`. A flat bin keeps its wall by
+/// rounding the cavity concentric with the outer arc; a sloped one cannot,
+/// because `ring_on_plane` names an arc on a tilted plane with a Z-axis circle
+/// while the true section is an ellipse.
+fn buildable_wall_thickness(want: f32, openish: bool, sloped: bool) -> f32 {
+    let wt = want.max(MIN_WALL);
+    let wt = if openish {
+        wt.min(PEG_TANGENT - OPEN_WALL_HEADROOM)
+    } else {
+        wt
+    };
+    let wt = if sloped { wt.max(SLOPED_MIN_WALL) } else { wt };
+    assert!(
+        wt >= MIN_WALL && wt.is_finite(),
+        "a piece's wall thickness is at least MIN_WALL, got {wt} from a requested {want}"
+    );
+    wt
+}
+
+/// The floor fillet radius one piece actually asks for, given the radius
+/// `Params` wanted, the cavity's depth, the convex corner radius `rc` the
+/// cavity is rounded by, and whether the floor is sloped.
+///
+/// Zero on a sloped floor, which takes no blend, and zero where the cavity's
+/// corners are square (`rc <= MIN_ROUNDED_CORNER`), since a blend rolling into a
+/// sharp corner has no arc to turn. Otherwise the request, held below the rim by
+/// `FILLET_DEPTH_HEADROOM` and inside the corner by `FILLET_CORNER_HEADROOM`.
+/// The result is a radius the compartment's *depth and corners* admit; whether
+/// its width admits it is `max_inward_radius`'s question, asked per loop later.
+fn buildable_floor_fillet(want: f32, cavity_depth: f32, rc: f32, sloped: bool) -> f32 {
+    if sloped || rc <= MIN_ROUNDED_CORNER {
+        return 0.0;
+    }
+    let fr = want
+        .min(cavity_depth - FILLET_DEPTH_HEADROOM)
+        .max(0.0)
+        .min(rc - FILLET_CORNER_HEADROOM);
+    assert!(
+        fr < rc && fr < cavity_depth,
+        "a floor fillet stays inside the corner it turns and the cavity it sits in, but {fr} was \
+         settled against a corner radius {rc} and a depth {cavity_depth}"
+    );
+    fr.max(0.0)
+}
+
 /// A rolling-ball blend along an arc builds a torus whose major radius is the
 /// gap between the arc and the ball, so equal radii put the blend's centre on
 /// the arc's own axis and the torus degenerates to a ring -- which
@@ -783,7 +912,7 @@ fn author_outer_loop(
         let ins_next = inset(&s_next.edge);
         let from = mm(s.from);
         let to = mm(s.to);
-        let is_std = (ins - HALF_TOL).abs() < 1e-6;
+        let is_std = (ins - HALF_TOL).abs() < INSET_SAME;
 
         let a = from + d * PEG_TANGENT + nrm * ins;
         let b = to - d * PEG_TANGENT + nrm * ins;
@@ -801,7 +930,7 @@ fn author_outer_loop(
         let cross = d.x * d1.y - d.y * d1.x;
         let start = to - d * PEG_TANGENT + nrm * ins;
         let end = to + d1 * PEG_TANGENT + n1 * ins_next;
-        let both_std = is_std && (ins_next - HALF_TOL).abs() < 1e-6;
+        let both_std = is_std && (ins_next - HALF_TOL).abs() < INSET_SAME;
         let same_side = walled(&s.edge) == walled(&s_next.edge);
         // Rounding a reentrant corner is a property of the *wall* that turns it,
         // so it takes a wall on both edges. The arc is struck about a centre
@@ -818,7 +947,7 @@ fn author_outer_loop(
         // 2.154 mm curved triangle rising 19.8 mm from the floor, unattached
         // above it, in the middle of the doorway the two openings made.
         let corner_walled = walled(&s.edge) && walled(&s_next.edge);
-        if cross.abs() < 0.5 {
+        if cross.abs() < TURN_SIGN {
             pieces.push(OuterPiece {
                 seg: Seg::Line { a: start, b: end },
                 shared: false,
@@ -973,11 +1102,11 @@ fn compartment_corners(steps: &[Step], inset: &dyn Fn(&GridEdge) -> f32) -> Vec<
         // A cell region's boundary turns by a right angle or not at all; a
         // reversal would need a spike of zero width, which no set of cells has.
         assert!(
-            d.dot(d1) > -0.5,
+            d.dot(d1) > -TURN_SIGN,
             "the boundary reverses at {c:?}: {d:?} then {d1:?}"
         );
         let cross = d.x * d1.y - d.y * d1.x;
-        if cross.abs() > 0.5 {
+        if cross.abs() > TURN_SIGN {
             pts.push(c + nrm * ins + n1 * ins_next);
         } else if (ins - ins_next).abs() > W_EPS {
             pts.push(c + nrm * ins);
@@ -1127,7 +1256,19 @@ fn short_arc(a0: f32, a1: f32) -> (f32, f32) {
     (a0, a0 + d)
 }
 
+/// How near two points must be to count as the same point of a boundary, in
+/// millimetres. A boolean's cut points and an authored corner agree to a few
+/// ulps of a coordinate near 90 mm, three orders below this; two genuinely
+/// distinct features of a bin are never this close, the narrowest being the
+/// 0.25 mm `HALF_TOL` step where an opened cavity meets the outline.
 const W_EPS: f32 = 1e-3;
+
+/// How far, in radians, a point's angle about a circle's centre may sit outside
+/// an arc's stored range and still be a point of it -- and, equally, how near
+/// two cut angles must be to be one cut. At the profile's `OUTER_R` this is
+/// 3.8e-4 mm of arc, comfortably inside `W_EPS` so the angular and positional
+/// tests agree about which points coincide.
+const ARC_ENDPOINT_ANGLE: f32 = 1e-4;
 
 fn v2_eq(a: Vec2, b: Vec2) -> bool {
     (a - b).length() < W_EPS
@@ -1239,15 +1380,14 @@ impl OuterLoops {
                     a0,
                     a1,
                 } => {
-                    let mut t = (p.y - center.y).atan2(p.x - center.x);
                     let (amin, amax) = (a0.min(a1), a0.max(a1));
-                    while t < amin - 1e-4 {
-                        t += std::f32::consts::TAU;
-                    }
-                    while t > amax + 1e-4 {
-                        t -= std::f32::consts::TAU;
-                    }
-                    if t <= amin + 1e-4 || t >= amax - 1e-4 {
+                    let t = wrap_angle_into(
+                        (p.y - center.y).atan2(p.x - center.x),
+                        amin,
+                        amax,
+                        ARC_ENDPOINT_ANGLE,
+                    );
+                    if t <= amin + ARC_ENDPOINT_ANGLE || t >= amax - ARC_ENDPOINT_ANGLE {
                         return;
                     }
                     (
@@ -1435,7 +1575,7 @@ fn inner_wall_quad(w: &InnerWall, r: f32) -> Option<Vec<Seg>> {
         sharp
     };
     let r = r.min(hw).min(len / 2.0);
-    if r < 0.02 {
+    if r < MIN_QUAD_ROUND {
         return Some(sharp);
     }
     let n_c = corners.len();
@@ -1463,7 +1603,7 @@ fn inner_wall_quad(w: &InnerWall, r: f32) -> Option<Vec<Seg>> {
             a1,
         });
         let next_in = tangents[(i + 1) % n_c].0;
-        if (next_in - t_out).length() > 1e-4 {
+        if (next_in - t_out).length() > MIN_STRAIGHT_RUN {
             out.push(Seg::Line {
                 a: t_out,
                 b: next_in,
@@ -1479,7 +1619,7 @@ fn island_clears(island: &[Seg], outer: &[Seg], needed: f32) -> bool {
 
 fn inner_wall_quad_in(w: &InnerWall, r: f32, outer: &[Seg]) -> Option<Vec<Seg>> {
     let sharp = inner_wall_quad(w, 0.0)?;
-    if r < 0.02 {
+    if r < MIN_QUAD_ROUND {
         return Some(sharp);
     }
     let floats_free = sharp.iter().all(|s| point_in_segs(s.start(), outer));
@@ -1563,16 +1703,14 @@ fn split_peg_profile(
                     .iter()
                     .filter(|p| ((**p - center).length() - OUTER_R).abs() < W_EPS)
                     .map(|p| {
-                        let mut t = (p.y - center.y).atan2(p.x - center.x);
-                        while t < lo - 1e-4 {
-                            t += std::f32::consts::TAU;
-                        }
-                        while t > hi + 1e-4 {
-                            t -= std::f32::consts::TAU;
-                        }
-                        t
+                        wrap_angle_into(
+                            (p.y - center.y).atan2(p.x - center.x),
+                            lo,
+                            hi,
+                            ARC_ENDPOINT_ANGLE,
+                        )
                     })
-                    .filter(|t| *t > lo + 1e-4 && *t < hi - 1e-4)
+                    .filter(|t| *t > lo + ARC_ENDPOINT_ANGLE && *t < hi - ARC_ENDPOINT_ANGLE)
                     .collect();
                 if cuts.is_empty() {
                     out.push(s);
@@ -1583,7 +1721,7 @@ fn split_peg_profile(
                 } else {
                     cuts.sort_by(|x, y| y.total_cmp(x));
                 }
-                cuts.dedup_by(|x, y| (*x - *y).abs() < 1e-4);
+                cuts.dedup_by(|x, y| (*x - *y).abs() < ARC_ENDPOINT_ANGLE);
                 let at = |t: f32| center + Vec2::new(t.cos(), t.sin()) * radius;
                 let (mut prev_p, mut prev_t) = (a, a0);
                 for t in cuts {
@@ -1653,9 +1791,11 @@ fn split_peg_profile(
     out
 }
 
-#[cfg(test)]
-const STRIP_OUT: f32 = 1.0;
-
+/// Whichever of the two cells `e` divides `set` holds, or `None` when it holds
+/// neither -- the edge then lies wholly outside the piece and bounds nothing of
+/// it. A `V` edge divides the cells left and right of `(e.x, e.y)`, an `H` edge
+/// the cells below and above it; when `set` holds both, the lower-indexed one is
+/// returned and either answer names the same edge.
 fn edge_inside_cell(set: &HashSet<GridCell>, e: &GridEdge) -> Option<GridCell> {
     let (a, b) = match e.orientation {
         Orientation::V => (GridCell { x: e.x - 1, y: e.y }, GridCell { x: e.x, y: e.y }),
@@ -1668,119 +1808,6 @@ fn edge_inside_cell(set: &HashSet<GridCell>, e: &GridEdge) -> Option<GridCell> {
     } else {
         None
     }
-}
-
-/// The cavity as *rectangles to subtract*, which is how the model planned it
-/// before `compartment_cavity_corners` authored it instead.
-///
-/// It is kept as the reference the walk is checked against, and only as that --
-/// nothing in the model calls it. Its three pieces are a wall strip per walled
-/// edge, reaching `STRIP_OUT` past the pitch line so neighbouring cells' strips
-/// overlap rather than abut; a centred strip per divider; and a `t x t` patch at
-/// each reentrant corner, without which the two wall strips there meet only at a
-/// point. `the_walk_reproduces_the_tracer_except_where_a_divider_meets_a_notch`
-/// says where the two answers part company, and `CLAUDE.md` says why the walk's
-/// is the one to keep. Delete this when that comparison stops earning its place.
-#[cfg(test)]
-fn plan_cavity(
-    cells: &[GridCell],
-    walls: &EffectiveWalls,
-    wall_thickness: f32,
-) -> (Vec<RectF>, Vec<RectF>) {
-    let p = GRID_PITCH;
-    let t = HALF_TOL + wall_thickness;
-    let set: HashSet<GridCell> = cells.iter().copied().collect();
-
-    let pos: Vec<RectF> = cells
-        .iter()
-        .map(|c| RectF::new(c.x as f32 * p, c.y as f32 * p, p, p))
-        .collect();
-    let mut neg: Vec<RectF> = Vec::new();
-
-    for e in &walls.walled {
-        let Some(inside) = edge_inside_cell(&set, e) else {
-            continue;
-        };
-        match e.orientation {
-            Orientation::H => {
-                let below = inside.y == e.y - 1;
-                let y0 = e.y as f32 * p - if below { t } else { STRIP_OUT };
-                neg.push(RectF::new(e.x as f32 * p, y0, p, t + STRIP_OUT));
-            }
-            Orientation::V => {
-                let left = inside.x == e.x - 1;
-                let x0 = e.x as f32 * p - if left { t } else { STRIP_OUT };
-                neg.push(RectF::new(x0, e.y as f32 * p, t + STRIP_OUT, p));
-            }
-        }
-    }
-
-    for e in &walls.dividers {
-        match e.orientation {
-            Orientation::H => neg.push(RectF::new(
-                e.x as f32 * p,
-                e.y as f32 * p - wall_thickness / 2.0,
-                p,
-                wall_thickness,
-            )),
-            Orientation::V => neg.push(RectF::new(
-                e.x as f32 * p - wall_thickness / 2.0,
-                e.y as f32 * p,
-                wall_thickness,
-                p,
-            )),
-        }
-    }
-
-    let mut lattice: HashSet<(i32, i32)> = HashSet::new();
-    for c in cells {
-        for l in [
-            (c.x, c.y),
-            (c.x + 1, c.y),
-            (c.x, c.y + 1),
-            (c.x + 1, c.y + 1),
-        ] {
-            if !lattice.insert(l) {
-                continue;
-            }
-            let quads = [(-1, -1), (0, -1), (-1, 0), (0, 0)];
-            let absent: Vec<(i32, i32)> = quads
-                .iter()
-                .filter(|(qx, qy)| {
-                    !set.contains(&GridCell {
-                        x: l.0 + qx,
-                        y: l.1 + qy,
-                    })
-                })
-                .copied()
-                .collect();
-            if absent.len() != 1 {
-                continue;
-            }
-            let (qx, qy) = absent[0];
-            let v_edge = GridEdge {
-                x: l.0,
-                y: l.1 + qy,
-                orientation: Orientation::V,
-            };
-            let h_edge = GridEdge {
-                x: l.0 + qx,
-                y: l.1,
-                orientation: Orientation::H,
-            };
-            if !walls.walled.contains(&v_edge) || !walls.walled.contains(&h_edge) {
-                continue;
-            }
-            neg.push(RectF::new(
-                l.0 as f32 * p + if qx == 0 { -t } else { 0.0 },
-                l.1 as f32 * p + if qy == 0 { -t } else { 0.0 },
-                t,
-                t,
-            ));
-        }
-    }
-
-    (pos, neg)
 }
 
 fn contained_holes(all: &[TracedLoop], outer: &TracedLoop) -> Vec<TracedLoop> {
@@ -1858,40 +1885,12 @@ fn plan_piece(
     // welds to is found by distance from the corner's own centre.
     let mut peg_arcs: Vec<Vec2> = Vec::new();
 
-    let wt = if openish {
-        p.wall_thickness.max(0.4).min(PEG_TANGENT - 0.6)
-    } else {
-        p.wall_thickness.max(0.4)
-    };
-    // A sloped floor builds its cavity square (see the `convex_r` choice
-    // below), and a sharp convex corner sits `sqrt(2) * (OUTER_R - wt)` from
-    // the outer arc's centre while the arc itself reaches only `OUTER_R`. Below
-    // `SLOPED_MIN_WALL` the cavity escapes the rounded corner entirely, is no
-    // longer inside the rim face it is a hole of, and panicked `plan_piece`
-    // with `total_h hole without a containing face`. The flat path keeps its
-    // wall by rounding the cavity concentric with the outer arc; the sloped
-    // path cannot, because `ring_on_plane` names an arc on a tilted plane with
-    // a Z-axis circle and the true section is an ellipse. So the wall is held
-    // to what a square corner can carry -- the same kind of clamp the model
-    // already applies at 0.4 mm and at `PEG_TANGENT - 0.6`.
-    let wt = if slope.is_some() {
-        wt.max(SLOPED_MIN_WALL)
-    } else {
-        wt
-    };
+    let wt = buildable_wall_thickness(p.wall_thickness, openish, slope.is_some());
     drop(_g);
     let mut _g = crate::kernel::perf::scope(crate::kernel::perf::Metric::PlanCavity);
     let cavity_depth = total_h - floor_z;
     let rc = p.cavity_corner_radius.max(0.0);
-    let mut fr = p.floor_fillet.min(cavity_depth - 0.05).max(0.0);
-    if slope.is_some() {
-        fr = 0.0;
-    }
-    if rc > 0.05 {
-        fr = fr.min(rc - 0.02);
-    } else {
-        fr = 0.0;
-    }
+    let fr = buildable_floor_fillet(p.floor_fillet, cavity_depth, rc, slope.is_some());
 
     // The cavity is authored: one walk per compartment, each edge at its own
     // inset, less the divider strips standing inside it. An opening is still an
@@ -2100,12 +2099,24 @@ fn plan_piece(
                     let sb = split_regions(&ob, &qb);
                     let mut b_all = sb.a_outside;
                     b_all.extend(sb.a_inside);
-                    bd.outline_b = chain_loops(b_all)
-                        .pop()
-                        .unwrap_or_else(|| ob[0].clone())
-                        .into_iter()
-                        .map(|(s, _)| s)
-                        .collect();
+                    let n_pieces = b_all.len();
+                    let mut chained = chain_loops(b_all);
+                    assert_eq!(
+                        chained.len(),
+                        1,
+                        "{tag}: a compartment's boundary cut by a partial wall is the same single \
+                         closed loop subdivided, but {n_pieces} piece(s) chained into {} loop(s)",
+                        chained.len()
+                    );
+                    let one = chained.pop().expect("exactly one loop, asserted above");
+                    assert_eq!(
+                        one.len(),
+                        n_pieces,
+                        "{tag}: chaining a compartment's cut boundary kept {} of its {n_pieces} \
+                         piece(s)",
+                        one.len()
+                    );
+                    bd.outline_b = one.into_iter().map(|(s, _)| s).collect();
                     bd.notches.push(Notch {
                         quad: q.clone(),
                         contact: sa.a_inside.into_iter().map(|(s, _)| s).collect(),
@@ -2159,19 +2170,19 @@ fn plan_piece(
                 if banded.is_some() {
                     loop_fr = 0.0;
                 }
-                if std::env::var("DIAG_LOOP").is_ok() {
-                    eprintln!(
-                        "loop_fr={loop_fr} segs={} islands={}",
-                        cl.segs.len(),
-                        islands.len()
-                    );
-                    let n = cl.segs.len();
-                    for i in 0..n {
-                        let o = seg_tangent(&cl.segs[i], true);
-                        let v = seg_tangent(&cl.segs[(i + 1) % n], false);
-                        eprintln!("   {i:2} {:?} -> dot {:.5}", cl.segs[i], o.dot(v));
-                    }
-                }
+                assert!(
+                    loop_fr >= 0.0 && loop_fr <= max_inward_radius(&cl.segs),
+                    "a compartment's settled blend radius is a radius the rolling ball fits: \
+                     {loop_fr} against a widest inward radius of {} over {} segment(s)",
+                    max_inward_radius(&cl.segs),
+                    cl.segs.len()
+                );
+                assert!(
+                    loop_fr == 0.0 || cl.touched() || !has_sharp_corner(&cl.segs),
+                    "a closed compartment keeping its blend is tangent-continuous, but this one \
+                     asks for {loop_fr} across a sharp corner of its {} segment(s)",
+                    cl.segs.len()
+                );
                 planned.push((cl, islands, loop_fr, banded));
             }
         }
@@ -2286,7 +2297,6 @@ fn plan_piece(
     let mut fillet_edges: Vec<(Seg, f32, f32)> = Vec::new();
     let mut rim_holes: Vec<Vec<Seg>> = Vec::new();
     let mut island_tops: Vec<Vec<Seg>> = Vec::new();
-    let mut touched: Vec<CavityLoop> = Vec::new();
 
     for (ci, (cl, island_shapes, loop_fr, banded)) in planned.into_iter().enumerate() {
         if cl.touched() {
@@ -2324,7 +2334,7 @@ fn plan_piece(
             // the compartment's. The segments the outer walk replaced are the
             // ones with no wall left to roll against; every other floor-wall
             // edge still gets its fillet, and the chain runs out on the mouth.
-            if loop_fr > 0.01 {
+            if loop_fr > MIN_USEFUL_BLEND {
                 let walled: Vec<bool> = cl.coincident.iter().map(|&c| !c).collect();
                 for (s, keep) in cl.segs.iter().zip(blendable_segs(&cl.segs, &walled)) {
                     if keep {
@@ -2333,11 +2343,10 @@ fn plan_piece(
                 }
             }
             for isl in &island_shapes {
-                if isl.fr > 0.01 {
+                if isl.fr > MIN_USEFUL_BLEND {
                     fillet_edges.extend(isl.segs.iter().map(|s| (*s, floor_z, isl.fr)));
                 }
             }
-            touched.push(cl);
             continue;
         }
 
@@ -2365,8 +2374,8 @@ fn plan_piece(
                 let (min_a, span) = slope_span(bin_cells, ux, uy);
                 let m = sl.angle_deg.to_radians().tan().clamp(0.0, 3.0);
                 let cavity_depth = total_h - floor_z;
-                let h_max = (m * span).min(cavity_depth - 0.5).max(0.0);
-                let eff_m = if span > 1e-6 { h_max / span } else { 0.0 };
+                let h_max = (m * span).min(cavity_depth - SLOPE_RIM_HEADROOM).max(0.0);
+                let eff_m = if span > MIN_SLOPE_SPAN { h_max / span } else { 0.0 };
                 let z_of = |pt: Vec2| floor_z + eff_m * (ux * pt.x + uy * pt.y - min_a);
                 let origin = Vec3::new(
                     cl.segs[0].start().x,
@@ -2397,7 +2406,10 @@ fn plan_piece(
                         .iter()
                         .map(|s| z_of(s.start()))
                         .fold(floor_z, f32::max);
-                    let t = isl.top.filter(|&t| t > slope_max + 0.2).unwrap_or(total_h);
+                    let t = isl
+                        .top
+                        .filter(|&t| t > slope_max + SLOPE_ISLAND_HEADROOM)
+                        .unwrap_or(total_h);
                     let island_top_plane = PPlaneRef::Z { z: t, up: true };
                     cav_ops.push((
                         format!("cavity {ci}: sloped island {ii} walls"),
@@ -2445,7 +2457,6 @@ fn plan_piece(
         }
     }
 
-    let _ = &touched;
     let sector_segs: Vec<Vec<Seg>> = wall_loops;
     let top_walls: Vec<Vec<Seg>> = if openish {
         sector_segs.clone()
@@ -2710,10 +2721,10 @@ fn shape_cavity_loop_open(lp: &TracedLoop, rc: f32, rf: f32, spans: &[OpenSpan])
         let prev = (i + n - 1) % n;
         let next = (i + 1) % n;
         if suppressed[prev] {
-            r = r.min(((lp.pts[i] - lp.pts[prev]).length() - 0.35).max(0.0));
+            r = r.min(((lp.pts[i] - lp.pts[prev]).length() - OPEN_CORNER_CLEARANCE).max(0.0));
         }
         if suppressed[next] {
-            r = r.min(((lp.pts[next] - lp.pts[i]).length() - 0.35).max(0.0));
+            r = r.min(((lp.pts[next] - lp.pts[i]).length() - OPEN_CORNER_CLEARANCE).max(0.0));
         }
         r
     };
@@ -2881,7 +2892,10 @@ fn seg_samples(s: &Seg, step: f32) -> Vec<(Vec2, Vec2)> {
         Seg::Line { a, b } => {
             let d = b - a;
             let len = d.length();
-            let t = d / len.max(f32::MIN_POSITIVE);
+            if !(len > 0.0) {
+                return out;
+            }
+            let t = d / len;
             (len, Box::new(move |u| (a + d * u, t)))
         }
         Seg::Arc {
@@ -2923,6 +2937,13 @@ fn is_convex_arc(shape: &[Seg], s: &Seg) -> bool {
     }
 }
 
+/// How far `|cos phi|` must fall below 1 for the turn between two runs to be a
+/// corner worth rounding. Below it the pair is collinear (`phi = 0`) or doubles
+/// back on itself (`phi = pi`), and neither admits an inscribed arc: the first
+/// has no corner, the second no interior. It also floors the half-angle tangent
+/// the trim divides by -- `tan(acos(1 - CORNER_TURNS) / 2)`, about 7.1e-4.
+const CORNER_TURNS: f32 = 1e-6;
+
 fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<Seg> {
     let n = segs.len();
     if n < 2 || (convex_r <= 0.0 && concave_r <= 0.0) {
@@ -2941,10 +2962,7 @@ fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<Seg> 
         let d_in = seg_tangent(cur, true);
         let d_out = seg_tangent(next, false);
         let dot = d_in.dot(d_out).clamp(-1.0, 1.0);
-        if dot > 1.0 - 1e-6 {
-            continue;
-        }
-        if dot < -1.0 + 1e-6 {
+        if dot > 1.0 - CORNER_TURNS || dot < -1.0 + CORNER_TURNS {
             continue;
         }
         let cross = d_in.x * d_out.y - d_in.y * d_out.x;
@@ -2979,8 +2997,14 @@ fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<Seg> 
             let k = len / want;
             for idx in [prev, i] {
                 if trim[idx] > 0.0 {
+                    assert!(
+                        tan_half[idx] > 0.0,
+                        "a corner with a trim to shrink turns by more than CORNER_TURNS, so its \
+                         half-angle tangent is positive, got {} at corner {idx}",
+                        tan_half[idx]
+                    );
                     trim[idx] *= k;
-                    arc_r[idx] = trim[idx] / tan_half[idx].max(1e-6);
+                    arc_r[idx] = trim[idx] / tan_half[idx];
                     changed = true;
                 }
             }
@@ -3063,11 +3087,11 @@ fn plan_cavity_flat(
         ));
     }
     let mut blends: Vec<(Seg, f32, f32)> = Vec::new();
-    if loop_fr > 0.01 {
+    if loop_fr > MIN_USEFUL_BLEND {
         blends.extend(shape.iter().map(|s| (*s, floor_z, loop_fr)));
     }
     for isl in islands {
-        if isl.fr > 0.01 {
+        if isl.fr > MIN_USEFUL_BLEND {
             blends.extend(isl.segs.iter().map(|s| (*s, floor_z, isl.fr)));
         }
     }
@@ -3163,7 +3187,7 @@ fn plan_cavity_banded(
         // constrain the radius.
         for s in &n.contact {
             let r = blend_radius_along(s, want);
-            if r < 0.05 {
+            if r < MIN_ROUNDED_CORNER {
                 continue;
             }
             blends.push((*s, n.top, r));
@@ -3417,47 +3441,6 @@ mod tests {
         coords.iter().map(|&(x, y)| GridCell { x, y }).collect()
     }
 
-    /// A cell of the compartment a traced cavity loop bounds.
-    ///
-    /// `trace_rects` traces material-on-the-left, so the inward side of an outer
-    /// loop is the left of travel; the loop is rectilinear, so one coordinate of the
-    /// first edge's midpoint is constant and names a rect boundary while the other
-    /// runs strictly between two of them. The cell is read off exactly rather than
-    /// by nudging inward and flooring: along the normal, a boundary lying *on* a
-    /// pitch line belongs to the cell the material is on, which is what
-    /// `ceil(u) - 1` says on the negative side and `floor(u)` on the positive one.
-    /// Along the edge the midpoint may still land on a pitch line, and then either
-    /// neighbouring cell is a correct answer -- the region runs continuously across
-    /// that line, so both cells carry it and both are in the same compartment.
-    fn loop_interior_cell(lp: &TracedLoop) -> GridCell {
-        assert!(
-            lp.pts.len() >= 4,
-            "a traced rectilinear loop has at least four points, got {}",
-            lp.pts.len()
-        );
-        let (a, b) = (lp.pts[0], lp.pts[1]);
-        let d = b - a;
-        assert!(
-            (d.x == 0.0) != (d.y == 0.0),
-            "a traced loop's edge is axis aligned and non-degenerate, got {a:?} -> {b:?}"
-        );
-        let m = (a + b) * 0.5;
-        let n = Vec2::new(-d.y, d.x);
-        let below = |v: f32| (v / GRID_PITCH).floor() as i32;
-        let above = |v: f32| (v / GRID_PITCH).ceil() as i32 - 1;
-        if d.y == 0.0 {
-            GridCell {
-                x: below(m.x),
-                y: if n.y > 0.0 { below(m.y) } else { above(m.y) },
-            }
-        } else {
-            GridCell {
-                x: if n.x > 0.0 { below(m.x) } else { above(m.x) },
-                y: below(m.y),
-            }
-        }
-    }
-
     fn area(pts: &[Vec2]) -> f32 {
         let n = pts.len();
         (0..n)
@@ -3489,106 +3472,6 @@ mod tests {
         }
         let (a, b) = (rotated(a), rotated(b));
         a.iter().zip(&b).all(|(p, q)| (*p - *q).length() < 1e-3)
-    }
-
-    /// The cells holding a reentrant corner patch of `plan_cavity`'s that a
-    /// divider also cuts. The patch is the `t x t` square in the quadrant
-    /// diagonally opposite the absent one, so the two edges of *that* cell
-    /// meeting at the lattice point are the ones a divider would overlap.
-    /// Mirrors `plan_cavity`'s own condition for emitting the patch.
-    fn patched_cells(cells: &[GridCell], walls: &EffectiveWalls) -> HashSet<GridCell> {
-        let set: HashSet<GridCell> = cells.iter().copied().collect();
-        let mut out: HashSet<GridCell> = HashSet::new();
-        let mut lattice: HashSet<(i32, i32)> = HashSet::new();
-        for c in cells {
-            for l in [
-                (c.x, c.y),
-                (c.x + 1, c.y),
-                (c.x, c.y + 1),
-                (c.x + 1, c.y + 1),
-            ] {
-                if !lattice.insert(l) {
-                    continue;
-                }
-                let absent: Vec<(i32, i32)> = [(-1, -1), (0, -1), (-1, 0), (0, 0)]
-                    .iter()
-                    .filter(|(qx, qy)| {
-                        !set.contains(&GridCell {
-                            x: l.0 + qx,
-                            y: l.1 + qy,
-                        })
-                    })
-                    .copied()
-                    .collect();
-                if absent.len() != 1 {
-                    continue;
-                }
-                let (qx, qy) = absent[0];
-                let walled = |e: GridEdge| walls.walled.contains(&e);
-                if !walled(GridEdge {
-                    x: l.0,
-                    y: l.1 + qy,
-                    orientation: Orientation::V,
-                }) || !walled(GridEdge {
-                    x: l.0 + qx,
-                    y: l.1,
-                    orientation: Orientation::H,
-                }) {
-                    continue;
-                }
-                let opp = GridCell {
-                    x: l.0 + (-1 - qx),
-                    y: l.1 + (-1 - qy),
-                };
-                let touches = [
-                    GridEdge {
-                        x: l.0,
-                        y: opp.y,
-                        orientation: Orientation::V,
-                    },
-                    GridEdge {
-                        x: opp.x,
-                        y: l.1,
-                        orientation: Orientation::H,
-                    },
-                ];
-                if touches.iter().any(|e| walls.dividers.contains(e)) {
-                    out.insert(opp);
-                }
-            }
-        }
-        out
-    }
-
-    /// Reentrant corners of a compartment where *both* edges are dividers. Each
-    /// one is a `wt/2` square of the divider junction that `trace_rects` leaves
-    /// in the cavity and the walk does not.
-    fn divider_junctions(steps: &[Step], walls: &EffectiveWalls, wt: f32) -> usize {
-        let n = steps.len();
-        (0..n)
-            .filter(|&k| {
-                let (s, s1) = (&steps[k], &steps[(k + 1) % n]);
-                let (d, d1) = (dirv(s.dir()), dirv(s1.dir()));
-                if d.x * d1.y - d.y * d1.x > -0.5
-                    || !walls.dividers.contains(&s.edge)
-                    || !walls.dividers.contains(&s1.edge)
-                {
-                    return false;
-                }
-                // The tab is the square between the walk's corner and the
-                // lattice point. Neither of the two dividers meeting here
-                // covers it -- each spans the cell edge on the *other* side of
-                // the corner -- but a third divider through the same lattice
-                // point does, and then the tracer has no tab to leave.
-                let c = mm(s.to);
-                let q = c + left_of(s.dir()) * (wt / 2.0) + left_of(s1.dir()) * (wt / 2.0);
-                let mid = (c + q) * 0.5;
-                !walls.dividers.iter().any(|e| {
-                    let r = divider_strip(e, wt);
-                    mid.x > r.x && mid.x < r.x + r.w && mid.y > r.y && mid.y < r.y + r.h
-                })
-            })
-            .count()
     }
 
     /// What the walk gives at the two places the tracer does something else, at
@@ -3668,141 +3551,4 @@ mod tests {
         );
     }
 
-    /// `compartment_cavity_corners` reproduces `plan_cavity` + `trace_rects`,
-    /// loop for loop and corner for corner, over every subset of six shapes'
-    /// internal edges as dividers, perimeter closed and fully open, at a thin
-    /// and a thick wall. Loops are paired by which compartment their interior
-    /// cell falls in, since two tracings of one compartment need not start at
-    /// the same corner or report the same cell of it.
-    ///
-    /// Both halves of the comparison earn their place. The **areas** catch a
-    /// walk that placed a run wrongly while keeping the corner count; the
-    /// **pairing** catches one that got the total right across two loops, which
-    /// is the shape a finger subtraction fails in.
-    ///
-    /// Two corrections, and each states a property rather than absorbing a
-    /// residue. A reentrant corner between two dividers leaves the tracer a
-    /// `wt/2` square of the junction as cavity -- unless a *third* divider runs
-    /// through the same lattice point, whose strip covers the tab, which is why
-    /// `divider_junctions` tests the tab itself rather than counting corners.
-    /// And a compartment holding one of the tracer's reentrant corner patches is
-    /// skipped outright: see `patched_cells`.
-    #[allow(clippy::too_many_lines)]
-    #[test]
-    fn the_walk_reproduces_the_tracer_except_where_a_divider_meets_a_notch() {
-        let shapes = [
-            cells(&[(0, 0)]),
-            cells(&[(0, 0), (1, 0)]),
-            cells(&[(0, 0), (1, 0), (0, 1), (1, 1)]),
-            cells(&[(0, 0), (1, 0), (0, 1)]),
-            cells(&[(0, 0), (1, 0), (2, 0), (1, 1)]),
-            cells(&[(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)]),
-            cells(&[
-                (0, 0),
-                (1, 0),
-                (2, 0),
-                (0, 1),
-                (2, 1),
-                (0, 2),
-                (1, 2),
-                (2, 2),
-            ]),
-        ];
-        let mut compared = 0usize;
-        let mut junctions = 0usize;
-        let mut fingered = 0usize;
-        let mut patched = 0usize;
-        let mut mismatches: Vec<String> = Vec::new();
-        for shape in &shapes {
-            let internal = internal_edges(shape);
-            assert!(internal.len() <= 8, "the subset sweep stays small");
-            for mask in 0..(1u32 << internal.len()) {
-                let dividers: Vec<GridEdge> = internal
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| mask & (1 << i) != 0)
-                    .map(|(_, e)| *e)
-                    .collect();
-                for open in [Vec::new(), perimeter_edges(shape)] {
-                    for wt in [1.2f32, 2.6] {
-                        let walls = effective_walls(shape, shape, &open, &dividers);
-                        let comps = crate::layout::compartments(shape, &walls.dividers);
-                        let (pos, neg) = plan_cavity(shape, &walls, wt);
-                        let traced = trace_rects(&pos, &neg);
-                        // Two tracings of one compartment need not report the
-                        // same cell of it, so the loops are paired by which
-                        // compartment their cell lands in, not by the cell.
-                        let mut of: HashMap<GridCell, usize> = HashMap::new();
-                        for (i, comp) in comps.iter().enumerate() {
-                            for &c in comp {
-                                of.insert(c, i);
-                            }
-                        }
-                        // The artifact: `plan_cavity` subtracts a full
-                        // `t x t` patch at a piece's reentrant corner to join
-                        // the two wall strips, which otherwise meet at a point.
-                        // Where a divider runs along the cell holding that
-                        // patch, part of it is already wall and the rest is a
-                        // lump protruding into the cavity -- `t(t - wt/2)` for
-                        // one divider, `(t - wt/2)^2` for two. The walk gives
-                        // the corner its own edges imply and no lump; the
-                        // amounts are pinned by `a_divider_by_a_notch...`.
-                        let patched_at = patched_cells(shape, &walls);
-                        for (ci, comp) in comps.iter().enumerate() {
-                            if comp.iter().any(|c| patched_at.contains(c)) {
-                                patched += 1;
-                                continue;
-                            }
-                            let walked = compartment_cavity_corners(comp, &walls, wt);
-                            if !finger_strips(comp, &walls, wt).is_empty() {
-                                fingered += 1;
-                            }
-                            let found: Vec<&TracedLoop> = traced
-                                .iter()
-                                .filter(|l| of[&loop_interior_cell(l)] == ci)
-                                .collect();
-                            assert!(
-                                !found.is_empty(),
-                                "no traced cavity loop over compartment {comp:?}"
-                            );
-                            let j: usize = boundary_steps(comp)
-                                .iter()
-                                .map(|l| divider_junctions(l, &walls, wt))
-                                .sum();
-                            junctions += j;
-                            compared += 1;
-                            let square = (wt / 2.0) * (wt / 2.0);
-                            let walk_area: f32 = walked.iter().map(|l| area(l)).sum();
-                            let trace_area: f32 = found.iter().map(|l| area(&l.pts)).sum();
-                            let diff = walk_area - (trace_area - j as f32 * square);
-                            let paired = walked.len() == found.len()
-                                && walked
-                                    .iter()
-                                    .all(|w| found.iter().any(|t| same_loop(w, &t.pts)));
-                            if diff.abs() >= 1e-2 || (j == 0 && !paired) {
-                                mismatches.push(format!(
-                                    "{diff:+.4} mm^2 j={j} wt={wt} open={} loops {}/{} \
-                                     cells={comp:?} dividers={dividers:?}",
-                                    open.len(),
-                                    walked.len(),
-                                    found.len()
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        assert!(
-            mismatches.is_empty(),
-            "{} of {compared} compartment(s) differ, first: {}",
-            mismatches.len(),
-            mismatches.first().map_or("", |m| m.as_str())
-        );
-        assert!(
-            compared > 2500 && fingered > 200 && junctions > 100 && patched > 0,
-            "the sweep compared {compared} compartment(s), {fingered} of them holding a finger, \
-             over {junctions} divider junction(s), skipping {patched} patched compartment(s)"
-        );
-    }
 }
