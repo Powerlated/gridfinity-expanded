@@ -1,8 +1,41 @@
+//! Closed-form intersection of two analytic surfaces, in world millimetres.
+//!
+//! `intersect_surfaces` is the whole surface: it dispatches an unordered pair to
+//! the one routine that solves it and answers with exact `Curve`s, never with a
+//! polyline or a numerical trace -- the kernel's rule that a curve is solved or
+//! not produced at all. Everything else here is one such routine, plus
+//! `cone_generator_hit`, which the cone's ellipse solve needs to find the two
+//! ends of its section along the plane's steepest direction.
+//!
+//! What a pair yields is decided by which of the results the geometry actually
+//! is, not by which one is convenient: a pair that meets in curves the set
+//! cannot name -- a torus against anything curved, two crossed cylinders, a
+//! plane cutting a cone open into a parabola or hyperbola -- is
+//! `Unsupported(why)` and stays the caller's problem. Refusing is what keeps a
+//! quartic from being approximated by something that merely looks like it. The
+//! solvable degeneracies are not refusals: two surfaces on top of one another
+//! are `Coincident`, two that miss are `Empty`, and two that touch at a point
+//! are `Tangent(p)`, all three distinguished at `TOL`.
+
 use crate::kernel::geom::{Curve, Surface, perp_unit};
 use crate::kernel::math::Vec3;
 
+/// How near two quantities in world millimetres must be to count as equal
+/// here -- a plane's distance from a sphere's surface, a cross product's length
+/// against zero, a cosine against 1. 1e-5 mm is four orders below the smallest
+/// feature the model builds and two orders above f32 noise at bin scale, so the
+/// degenerate cases it names are the geometric ones and not float slop.
 pub const TOL: f32 = 1e-5;
 
+/// What two surfaces meet in.
+///
+/// `Empty` and `Coincident` are the two ends of the degenerate range -- no
+/// common point at all, and every point in common. `Tangent` is a single point
+/// of contact, carried explicitly because it is not a curve of zero length. The
+/// intersection proper is `Curves`, each an exact analytic curve lying on both
+/// surfaces. `Unsupported` carries why no closed-form answer was produced, and
+/// is a statement about the curve set rather than about the surfaces: the
+/// intersection exists, this module cannot name it.
 #[derive(Clone, Debug)]
 pub enum Intersection {
     Empty,
@@ -13,6 +46,9 @@ pub enum Intersection {
 }
 
 impl Intersection {
+    /// The curves of a `Curves` result, and an empty slice for every other
+    /// variant -- for a caller that wants the curves and treats "there are
+    /// none" and "there are none it can have" alike.
     pub fn curves(&self) -> &[Curve] {
         match self {
             Intersection::Curves(c) => c,
@@ -21,6 +57,17 @@ impl Intersection {
     }
 }
 
+/// What `a` and `b` meet in, as exact curves on both of them.
+///
+/// Both surfaces are unbounded analytic surfaces in world millimetres -- the
+/// answer is the full intersection of the surfaces, not of any faces trimmed out
+/// of them, so a caller holding faces must still clip what comes back to its own
+/// parameter ranges. Symmetric in its arguments up to the order and direction of
+/// the curves returned: each pair is dispatched to a single routine with the
+/// plane first, so `intersect_surfaces(a, b)` and `(b, a)` describe the same
+/// point set. A pair whose intersection falls outside `Curve` -- degree 8 for a
+/// torus against a curved surface, quartic for crossed cylinders -- is
+/// `Unsupported`, never approximated.
 pub fn intersect_surfaces(a: &Surface, b: &Surface) -> Intersection {
     let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::IntersectSurfaces);
     use Surface::*;
@@ -42,6 +89,8 @@ pub fn intersect_surfaces(a: &Surface, b: &Surface) -> Intersection {
     }
 }
 
+/// A plane's `(origin, unit normal)`. Panics on any other surface, so a caller
+/// reaching for it has already established by dispatch that `s` is a `Plane`.
 fn plane_parts(s: &Surface) -> (Vec3, Vec3) {
     match *s {
         Surface::Plane { origin, normal, .. } => (origin, normal),
@@ -49,6 +98,13 @@ fn plane_parts(s: &Surface) -> (Vec3, Vec3) {
     }
 }
 
+/// Two planes, meeting in the one `Curve::Line` along both of them.
+///
+/// Direction is `n1 x n2`, normalized. The line's `p0` is the point of it
+/// nearest the origin, solved from the two plane equations in the basis the
+/// normals span, which is well conditioned exactly when the normals are not
+/// parallel. Parallel normals give no line: same plane within `TOL` is
+/// `Coincident`, otherwise `Empty`.
 fn plane_plane(a: &Surface, b: &Surface) -> Intersection {
     let (o1, n1) = plane_parts(a);
     let (o2, n2) = plane_parts(b);
@@ -70,6 +126,13 @@ fn plane_plane(a: &Surface, b: &Surface) -> Intersection {
     }])
 }
 
+/// A plane against a sphere: the one `Curve::Circle` cut out of the sphere.
+///
+/// The circle is centred on the sphere's centre projected onto the plane, has
+/// the plane's normal as its axis, and radius `sqrt(r^2 - d^2)` for `d` the
+/// signed distance from centre to plane. A plane grazing the sphere within `TOL`
+/// is `Tangent` at that projected point rather than a zero-radius circle;
+/// further off than the radius is `Empty`.
 fn plane_sphere(pl: &Surface, sp: &Surface) -> Intersection {
     let (_, n) = plane_parts(pl);
     let Surface::Sphere { center, radius, .. } = *sp else {
@@ -92,6 +155,14 @@ fn plane_sphere(pl: &Surface, sp: &Surface) -> Intersection {
     }])
 }
 
+/// Two spheres, meeting in the one `Curve::Circle` on their radical plane.
+///
+/// The circle's axis is the unit vector from the first centre to the second and
+/// its centre sits `(d^2 + r1^2 - r2^2) / 2d` along that axis, which is where
+/// the two sphere equations agree. Concentric within `TOL` is `Coincident` when
+/// the radii match and `Empty` when they do not; separated further than
+/// `r1 + r2` or nested closer than `|r1 - r2|` is `Empty`; touching at one point
+/// is `Tangent` there.
 fn sphere_sphere(a: &Surface, b: &Surface) -> Intersection {
     let Surface::Sphere {
         center: c1,
@@ -136,6 +207,16 @@ fn sphere_sphere(a: &Surface, b: &Surface) -> Intersection {
     }])
 }
 
+/// A plane against a cylinder: one to two curves, whichever conic section the
+/// angle between plane normal and cylinder axis makes it.
+///
+/// A plane parallel to the axis (`|axis . n| < TOL`) cuts generators: two
+/// `Curve::Line`s a half-chord either side of the axis' projection, one when it
+/// is tangent within `TOL`, none when it clears the radius. A plane square on
+/// (`|axis . n| > 1 - TOL`) cuts a `Curve::Circle` of the cylinder's own radius.
+/// Every angle between gives one `Curve::Ellipse` centred where the axis crosses
+/// the plane, semi-minor `radius` across the tilt and semi-major
+/// `radius / |axis . n|` along it.
 fn plane_cylinder(pl: &Surface, cy: &Surface) -> Intersection {
     let (_, n) = plane_parts(pl);
     let Surface::Cylinder {
@@ -191,6 +272,17 @@ fn plane_cylinder(pl: &Surface, cy: &Surface) -> Intersection {
     }])
 }
 
+/// A plane against a cone: the section, but only where the section is closed.
+///
+/// A plane square on the axis gives a `Curve::Circle` of radius
+/// `|h| tan(half_angle)` at the height it crosses, or `Tangent(apex)` when it
+/// passes through the apex. A plane tilted less than the half angle from square
+/// on gives a `Curve::Ellipse`, spanned between the two points where the section
+/// crosses the cone's steepest generators and with the semi-minor axis solved
+/// from the cone's radius at the ellipse's own centre. Tilt the plane past that
+/// and the section opens into a parabola or hyperbola, which `Curve` has no
+/// unbounded conic for: `Unsupported`, as is a section whose ends do not both
+/// come back finite or whose semi-minor collapses.
 fn plane_cone(pl: &Surface, co: &Surface) -> Intersection {
     let (_, n) = plane_parts(pl);
     let Surface::Cone {
@@ -248,6 +340,15 @@ fn plane_cone(pl: &Surface, co: &Surface) -> Intersection {
     }])
 }
 
+/// Where the cone's generator leaning towards `dir` meets the plane, or `None`
+/// when neither nappe's generator crosses it ahead of the apex.
+///
+/// `dir` need only have a component across the axis -- the generator is built in
+/// the plane of `axis` and `perp_unit(axis, dir)`, which is the direction the
+/// section reaches furthest in, so the two calls at `+/-tilt` bracket an
+/// elliptical section's major axis. Both nappes are tried and the first
+/// crossing at parameter `> TOL` wins, so the point returned always lies on the
+/// cone ahead of the apex rather than behind it on the mirrored nappe.
 fn cone_generator_hit(
     apex: Vec3,
     axis: Vec3,
@@ -271,6 +372,15 @@ fn cone_generator_hit(
     None
 }
 
+/// Two cylinders, and only while their axes are parallel.
+///
+/// Parallel axes reduce the problem to two circles in the plane across them, so
+/// the answer is generators: two `Curve::Line`s along the shared axis direction,
+/// through the two points where those circles cross, or one where they are
+/// tangent. Coaxial within `TOL` is `Coincident` at equal radii and `Empty`
+/// otherwise, as is a pair too far apart or too deeply nested to cross.
+/// Non-parallel axes meet in a quartic space curve outside `Curve`:
+/// `Unsupported`.
 fn cylinder_cylinder(a: &Surface, b: &Surface) -> Intersection {
     let Surface::Cylinder {
         base: b1,
@@ -329,6 +439,18 @@ fn cylinder_cylinder(a: &Surface, b: &Surface) -> Intersection {
     ])
 }
 
+/// A plane against a torus, in either argument order, and only at the two angles
+/// whose section `Curve` can name.
+///
+/// A plane parallel to the torus axis cuts the two `Curve::TorusSection`
+/// branches either side of the plane's normal -- the spiric curve, exact because
+/// fixing the minor angle fixes a ring radius and the plane meets that ring in
+/// closed form -- or `Empty` when it clears `major_r + minor_r`. A plane square
+/// on the axis cuts circles concentric with the torus: two of radius
+/// `major_r +/- sqrt(minor_r^2 - h^2)` for `h` the plane's height above the
+/// torus centre, one of `major_r` where the plane grazes the tube's silhouette,
+/// and `Empty` past `minor_r`. Any angle between is a quartic Cassinian curve:
+/// `Unsupported`.
 fn plane_torus(a: &Surface, b: &Surface) -> Intersection {
     let (pl, to) = match a {
         Surface::Plane { .. } => (a, b),
