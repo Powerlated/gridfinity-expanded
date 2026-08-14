@@ -12,6 +12,37 @@ pub fn vec3_of(x: f32, y: f32, z: f32) -> Vec3 {
     Vec3::new(x, y, z)
 }
 
+/// `a` shifted by whole turns into `(-PI, PI]`, which is the half-turn either
+/// side of zero that a *difference* of two angles belongs in: the short way
+/// round from one to the other, signed by which way that is.
+///
+/// The closed end is at `+PI`, so an exact half turn comes back positive and
+/// two angles diametrically opposite are one turn apart in a definite
+/// direction rather than an arbitrary one. Every caller here is subtracting two
+/// angles -- a sweep against its source, a sample's drift from the last one, a
+/// corner's turn -- which is what distinguishes this from `wrap_angle_into`,
+/// where the range is the caller's and the answer must land inside it.
+pub fn wrap_pi(a: f32) -> f32 {
+    assert!(
+        a.is_finite(),
+        "wrapping an angle into a half turn either side of zero needs it finite, got {a}"
+    );
+    let mut out = a;
+    while out > std::f32::consts::PI {
+        out -= std::f32::consts::TAU;
+    }
+    while out <= -std::f32::consts::PI {
+        out += std::f32::consts::TAU;
+    }
+    let turns = (a - out) / std::f32::consts::TAU;
+    assert!(
+        (turns - turns.round()).abs() < 1e-3,
+        "wrapping moves an angle by whole turns only, but {a} became {out}, a shift of {turns} \
+         turn(s)"
+    );
+    out
+}
+
 /// `angle` shifted by whole turns until it lies in `[lo - slack, hi + slack]`,
 /// which is what reading a point's angle about a circle's centre and matching it
 /// to an arc's stored parameter range needs: `atan2` answers in `(-pi, pi]`

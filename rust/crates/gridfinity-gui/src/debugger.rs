@@ -470,7 +470,7 @@ mod tests {
     use super::*;
     use gridfinity_cad::gridfinity::{BinSlope, LogicalBin, Mode, SlopeDir};
     use gridfinity_cad::layout::{internal_edges, perimeter_edges};
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use crate::catch;
 
     struct Rng(u64);
 
@@ -679,18 +679,4 @@ mod tests {
         assert!(drawn > 0, "a rolled-back subset must still upload triangles");
     }
 
-    fn catch<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let caught = catch_unwind(AssertUnwindSafe(f));
-        std::panic::set_hook(prev);
-        match caught {
-            Ok(r) => r,
-            Err(e) => Err(e
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| e.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "panicked".to_string())),
-        }
-    }
 }

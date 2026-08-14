@@ -365,6 +365,8 @@ Three phases, two parallelisable. Measured 8c/16t: check phase alone **7.1×** (
 
 **`gridfinity-gui`'s `broken()` is coupled to the model's failure surface.** Its three failure-path tests need a configuration that genuinely fails, and every fix here retires one — re-pointed twice so far. Needs a **hard** failure: `build_bin` only catches `Err` and panics, so a solid that builds and then fails `validate` reads as success there.
 
+**One `catch`, `main.rs`'s, `pub(crate)`.** `debugger.rs`'s test module had a second copy differing only in dropping the `"panicked: "` prefix. It is the *app's* net (silent hook for the duration, unwind or `Err` alike into a message) and the rollback sweep drives it deliberately — which is not the same as `rolling_back_the_construction_never_crashes_the_viewer` being routed through it. That test still is not, on purpose: the app keeps the net so the window survives, and a fuzzer behind one passes on a viewer that panics at every step.
+
 ## Workspace layout
 
 Two crates (`Cargo.toml` = virtual workspace, edition 2024, resolver 3):
@@ -409,6 +411,10 @@ Alternation is not the whole story — it holds just as well for a consistently-
 
 2D profiles as closed loops of `Line`/`Arc` segments (`rectangle`, `rounded_rect`, `circle`). Corner radii are real arcs. Outer loops CCW.
 
+**A 2D loop given as *points* is `&[Vec2]`, and `sketch.rs` owns what you ask of one.** `polygon_area` (shoelace, positive CCW) and `point_in_polygon` (even-odd, +x ray) sit beside the seg-based `loop_area` and `point_in_segs` they mirror. Three copies of each before: `rectregion::TracedLoop::{signed_area, contains}`, `region.rs`'s `poly_area`, and `split.rs`'s own `polygon_area`/`point_inside` plus the loop open-coded inside `Prism::contains`.
+
+`split.rs` carried its 2D loops as `Vec<(f32, f32)>`, which is why it could not call anyone: the tuple is a genuine uv *pair* where `Surface::project` returns one, but in `Prism`, `unwrap_u`, `loop_encloses` and `emit_trimmed_faces` it is a plain 2D point. `Cut::prism` takes `&[Vec<Vec2>]` now, and the payoff is at the caller — `gridfinity/pieces.rs` was unpacking `TracedLoop::pts`, already a `Vec<Vec2>`, into tuples for no reason but that signature. `Prism::contains` also states what it relies on that the open-coded version left implicit: parity is taken over **all** the loops together, so a point inside an outer *and* inside one of its holes crosses evenly and is correctly outside.
+
 ### `build.rs`
 
 Features. Three primitives write into a shared `Builder`: `ring` (profile at a height), `wall_between` (side faces between two rings), `cap`/`loop_of` (planar caps). `extrude`/`prism`/`loft` wrap them. **Orientation convention:** author loops CCW; an `outward` flag says whether material is inside the loop (`true`) or it is a hole/cavity (`false`). `loft` turns arcs whose radius changes with height into `Cone` faces; a straight segment on a loft becomes a *slanted* `Plane`, its normal computed from the actual 3D quad, not assumed vertical.
@@ -416,6 +422,8 @@ Features. Three primitives write into a shared `Builder`: `ring` (profile at a h
 ### Nine files, one phase each; `fillet_edges_with` is the sequence and nothing else. `chain` — request → chains, terminating vertices, `salvage`. `corner` — rolling-ball solve + `reconcile_shared_ends`. `blend` — `Fillet`, cyl/torus surfaces, `connect_arc`, `circle_span`, and the per-corner build that runs each end out. `runout` — `RunoutEnd`/`Runout`, the Absorb→Cap→Flat ladder, `absorb_fits`. `section` — `runout_on`/`_cyl`/`_torus`, `respan`. `rebuild` — loop rewrite, blend faces, caps, `move_vertex`. `query` — `as_cyl`, `coplanar`, `across_at`, `dist_to_curve`. `mod` — the three public items and the three shared tolerances (`END_AGREE`, `ON_EDGE`, `MAX_JOIN_KINK`). `feasible` — what a blend can be *asked* for, decided in 2D before any of it is built: `max_inward_radius`, `island_clears`, `blendable_segs`, `blend_radius_along`, `MIN_TORUS_MAJOR`. `fillet_edges` reports a refusal only after trying to build the surface, by which point the message names a face rather than the impossible request; these answer the same questions from the profile the caller is about to extrude, as upper bounds erring towards allowing it.
 
 `CurvEdge`, `as_plane`, `loop_edge_dir`, `emit_curv` moved to **`kernel/curvedge.rs`**; `chamfer.rs` carried byte-identical copies and uses them now.
+
+**`emit_edge` is the one place that knows which `Builder` constructor each `Curve` variant is built by**, in `curvedge.rs` beside `emit_curv`. Moved there from `split.rs`, which had the only named copy; `fillet/rebuild.rs` and `chamfer.rs` open-coded the same four-arm match inside their `rebuild_loop`s, and `emit_curv` repeated it **four times** — once per arm — because it re-decided `(t0, t1)` in each. `emit_curv` is now the endpoint bookkeeping plus one `emit_edge` call, 45 lines to 6. Adding a fifth `Curve` variant is a one-file change. Evaluating `emit_curv`'s `forward` eagerly rather than in a closure is free: `Builder::line` ignores the range, which is the only arm that skipped it.
 
 Split was behaviour-preserving by construction and verified as such: lib gate 212/212, and `fuzz_inner_walls` 23/150 · `fuzz_wall_openings` green · `fuzz_stripped_polyominoes` 15/150 · `fuzz_openings_and_inner_walls` 6/150, i.e. the table above unmoved in both directions. Hold any future move to that bar — a count that improves is as much a signal that the move was not a move as one that worsens.
 
@@ -511,7 +519,15 @@ Both cavity builders are stacks. `build_cavity_flat` = compartment void minus on
 
 Reading and reshaping a closed 2D seg loop **at its corners**, nothing about what it bounds. Tangency (`seg_tangent`, `sharp_between`, `has_sharp_corner`, `TANGENT_DOT` = 0.9995 ≈ 1.8°) is what every blend chain and every rounding asks first. `round_sharp_corners` inscribes an arc at each line/line corner, `convex_r` where the loop turns away from its material and `concave_r` where it turns into it, both read off the winding — and **honours neither blindly**: two corners of one run each trim it by `r·tan(φ/2)`, so an over-long pair is scaled to fit (`USABLE` 0.98), which can take a radius under `MIN_ARC_R` and revert that corner to sharp, freeing its neighbour again — hence a fixed point, swept until nothing changes. It asserts its own postcondition, that the rounded loop is still closed. `corners_of`/`loop_of_points` convert between segs and points; `seg_mid`, `seg_samples` (true line/true circle, never a chord), `drop_degenerate`, `is_convex_arc`, `short_arc`, `v2_eq` are the rest.
 
-`region2d` and `rectregion` each carried a byte-identical private copy of `seg_mid` and `short_arc`; both call this now.
+`region2d` and `rectregion` each carried a byte-identical private copy of `seg_mid` and `short_arc`; both call this now. `region.rs` (the model layer's polyomino tracer) carried a third copy of `short_arc` and calls this too.
+
+**`short_arc` is `wrap_pi` and nothing else**, `(a0, a0 + wrap_pi(a1 - a0))`.
+
+### One wrap, in `math.rs`
+
+`wrap_pi(a)` — `a` shifted by whole turns into `(-PI, PI]` — is what every *difference* of two angles goes through: a sweep against its source (`fillet/section::respan`), a candidate against the angle it wants (`fillet/blend`), a sample's drift from the last (`orient::wraps`), a corner's turn (`round::short_arc`). Four private copies before, three of which differed from the fourth **at exactly -PI**: `while d < -PI` keeps it, `while a <= -PI` maps it to `+PI`. Unified on the closed end at `+PI`, so an exact half turn sweeps positive and two diametrically opposite angles are a turn apart in a *definite* direction rather than an arbitrary one. `blend`'s use is inside `.abs()` and cannot see the difference; `orient`'s is a per-sample drift orders below PI. All eight profiles at their table counts across it.
+
+Distinct from `wrap_angle_into(angle, lo, hi, slack)`, which shifts into a range **the caller owns** — what matching a point's `atan2` angle to an arc's stored parameter range needs. `wrap_pi` owns its range; `wrap_angle_into` is given one.
 
 ### `nesting.rs`
 

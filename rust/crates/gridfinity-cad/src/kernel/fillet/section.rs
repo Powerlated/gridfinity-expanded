@@ -9,7 +9,7 @@
 use crate::kernel::curvedge::CurvEdge;
 use crate::kernel::geom::Curve;
 use crate::kernel::geom::Surface;
-use crate::kernel::math::Vec3;
+use crate::kernel::math::{Vec3, wrap_pi};
 
 use super::{END_AGREE, join_agree};
 
@@ -139,17 +139,6 @@ pub(super) fn respan(ce: &mut CurvEdge, from: Vec3, to: Vec3) {
     );
     ce.t0 = t0;
     ce.t1 = t0 + sweep;
-}
-
-/// Maps an angle in radians to the equivalent one in `(-pi, pi]`.
-fn wrap_pi(mut a: f32) -> f32 {
-    while a > std::f32::consts::PI {
-        a -= std::f32::consts::TAU;
-    }
-    while a <= -std::f32::consts::PI {
-        a += std::f32::consts::TAU;
-    }
-    a
 }
 
 /// Whether the closed angular interval `[lo, hi]` contains pi modulo a full

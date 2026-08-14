@@ -20,6 +20,21 @@ export function drawerGrid(drawer: Drawer, maxGrid: number): DrawerGrid {
   };
 }
 
+/**
+ * The smallest drawer measurement worth offering, in mm: one grid cell, below
+ * which `drawerGrid` floors to zero cells and the drawer holds nothing.
+ */
+export const MIN_DRAWER_MM = GRIDFINITY_SPEC.gridPitch;
+
+/**
+ * The largest drawer measurement worth offering, in mm: the point past which
+ * `drawerGrid` clamps to `maxGrid` and every further millimetre becomes
+ * unusable margin rather than another cell.
+ */
+export function maxDrawerMm(maxGrid: number): number {
+  return maxGrid * GRIDFINITY_SPEC.gridPitch;
+}
+
 export function packingInset(perimeterThickness: number): number {
   return GRIDFINITY_DERIVED.perimeterClearancePerSide + perimeterThickness;
 }

@@ -1,5 +1,5 @@
 use crate::kernel::geom::Surface;
-use crate::kernel::math::Vec3;
+use crate::kernel::math::{Vec3, wrap_pi};
 use crate::kernel::topo::{EdgeId, Solid};
 
 const SAMPLES_PER_EDGE: usize = 4;
@@ -39,14 +39,7 @@ fn wraps(solid: &Solid, surface: &Surface, lp: &[(EdgeId, bool)]) -> bool {
             let f = k as f32 / SAMPLES_PER_EDGE as f32;
             let (u, _) = prep.project(ed.curve.point(ta + (tb - ta) * f));
             if let Some(p) = prev {
-                let mut d = u - p;
-                while d > std::f32::consts::PI {
-                    d -= std::f32::consts::TAU;
-                }
-                while d < -std::f32::consts::PI {
-                    d += std::f32::consts::TAU;
-                }
-                drift += d;
+                drift += wrap_pi(u - p);
             }
             prev = Some(u);
         }

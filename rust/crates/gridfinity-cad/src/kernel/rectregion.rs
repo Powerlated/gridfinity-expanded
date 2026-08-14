@@ -1,6 +1,6 @@
 use crate::kernel::math::Vec2;
 use crate::kernel::round::short_arc;
-use crate::kernel::sketch::Seg;
+use crate::kernel::sketch::{Seg, point_in_polygon, polygon_area};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug)]
@@ -24,14 +24,7 @@ pub struct TracedLoop {
 
 impl TracedLoop {
     pub fn signed_area(&self) -> f32 {
-        let n = self.pts.len();
-        let mut s = 0.0;
-        for i in 0..n {
-            let a = self.pts[i];
-            let b = self.pts[(i + 1) % n];
-            s += a.x * b.y - b.x * a.y;
-        }
-        s * 0.5
+        polygon_area(&self.pts)
     }
     pub fn is_hole(&self) -> bool {
         self.signed_area() < 0.0
@@ -42,19 +35,7 @@ impl TracedLoop {
     /// of it the ray's tie-breaking puts the two edges there, so callers with a
     /// point that may sit on the loop must not ask.
     pub fn contains(&self, pt: Vec2) -> bool {
-        let n = self.pts.len();
-        let mut inside = false;
-        for i in 0..n {
-            let a = self.pts[i];
-            let b = self.pts[(i + 1) % n];
-            if (a.y > pt.y) != (b.y > pt.y) {
-                let x = a.x + (pt.y - a.y) / (b.y - a.y) * (b.x - a.x);
-                if x > pt.x {
-                    inside = !inside;
-                }
-            }
-        }
-        inside
+        point_in_polygon(&self.pts, pt)
     }
 }
 

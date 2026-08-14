@@ -8,7 +8,7 @@
 //! ball, and it has no runout to plan -- a flat face needs no face to run out
 //! onto.
 
-use crate::kernel::curvedge::{CurvEdge, as_plane, emit_curv, loop_edge_dir};
+use crate::kernel::curvedge::{CurvEdge, as_plane, emit_curv, emit_edge, loop_edge_dir};
 use crate::kernel::geom::{Curve, Surface};
 use crate::kernel::math::Vec3;
 use crate::kernel::topo::{Builder, EdgeId, Loop, Solid};
@@ -402,31 +402,8 @@ fn rebuild_loop(
             let (start, end) = if fwd { (new0, new1) } else { (new1, new0) };
             let vs = b.vertex(start);
             let ve = b.vertex(end);
-            let eid = match ed.curve {
-                Curve::Line { .. } => b.line(vs, ve),
-                Curve::Circle {
-                    center,
-                    axis,
-                    radius,
-                    ref_dir,
-                } => {
-                    let (a0, a1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
-                    b.arc(vs, ve, center, axis, radius, ref_dir, a0, a1)
-                }
-                Curve::Ellipse {
-                    center,
-                    a: ea,
-                    b: eb,
-                } => {
-                    let (t0, t1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
-                    b.ellipse(vs, ve, center, ea, eb, t0, t1)
-                }
-                Curve::TorusSection { .. } => {
-                    let (t0, t1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
-                    b.torus_section(vs, ve, ed.curve, t0, t1)
-                }
-            };
-            out.push(eid);
+            let (t0, t1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
+            out.push(emit_edge(b, vs, ve, ed.curve, t0, t1));
         }
     }
     Ok(())

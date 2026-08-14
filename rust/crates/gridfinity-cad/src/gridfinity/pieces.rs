@@ -11,7 +11,7 @@
 //! bin, partition it, carve.
 
 use super::*;
-use crate::kernel::math::Vec3;
+use crate::kernel::math::{Vec2, Vec3};
 use crate::kernel::rectregion::{RectF, trace_rects};
 use crate::kernel::split::{Cut, Side, trim};
 use crate::kernel::topo::Solid;
@@ -69,9 +69,9 @@ pub fn carve_to_cells(
             ));
         }
     }
-    let loops: Vec<Vec<(f32, f32)>> = trace_rects(&rects, &[])
-        .iter()
-        .map(|lp| lp.pts.iter().map(|p| (p.x, p.y)).collect())
+    let loops: Vec<Vec<Vec2>> = trace_rects(&rects, &[])
+        .into_iter()
+        .map(|lp| lp.pts)
         .collect();
     if loops.is_empty() {
         return Err("a piece traced no boundary".into());

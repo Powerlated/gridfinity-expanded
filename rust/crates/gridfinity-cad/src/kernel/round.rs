@@ -15,10 +15,9 @@
 //!
 //! Nothing here builds geometry or knows what the loop bounds.
 
-use crate::kernel::math::Vec2;
+use crate::kernel::math::{Vec2, wrap_pi};
 use crate::kernel::rectregion::merge_collinear;
 use crate::kernel::sketch::{COINCIDENT, Seg, loop_area};
-use std::f32::consts::PI;
 
 /// How near `cos phi` must be to 1 for two consecutive segments to count as
 /// meeting smoothly. 0.9995 is a turn of about 1.8 degrees -- three orders above
@@ -77,16 +76,10 @@ pub fn corners_of(segs: &[Seg]) -> Vec<Vec2> {
 
 /// `(a0, a1)` re-expressed so the sweep from one to the other is the short way
 /// round: the returned pair starts at `a0` and ends within `PI` of it, naming
-/// the same two points of the circle as the input.
+/// the same two points of the circle as the input. An exact half turn, where
+/// neither way round is shorter, sweeps positive -- `wrap_pi`'s closed end.
 pub fn short_arc(a0: f32, a1: f32) -> (f32, f32) {
-    let mut d = a1 - a0;
-    while d > PI {
-        d -= 2.0 * PI;
-    }
-    while d < -PI {
-        d += 2.0 * PI;
-    }
-    (a0, a0 + d)
+    (a0, a0 + wrap_pi(a1 - a0))
 }
 
 /// Whether two points are the same point of a boundary, within `COINCIDENT`.

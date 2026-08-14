@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::kernel::curvedge::{CurvEdge, as_plane};
 use crate::kernel::geom::{Curve, Surface};
-use crate::kernel::math::Vec3;
+use crate::kernel::math::{Vec3, wrap_pi};
 use crate::kernel::topo::{Edge, EdgeFaces, EdgeId, Solid};
 
 use super::corner::Corner;
@@ -249,17 +249,8 @@ fn circle_span(
     if span.abs() >= std::f32::consts::TAU - 1e-3 {
         return (t0, t0 + span);
     }
-    let wrapped = |mut a: f32| {
-        while a > std::f32::consts::PI {
-            a -= std::f32::consts::TAU;
-        }
-        while a < -std::f32::consts::PI {
-            a += std::f32::consts::TAU;
-        }
-        a
-    };
     let want = angle(p1);
-    let miss = |s: f32| wrapped(t0 + s - want).abs();
+    let miss = |s: f32| wrap_pi(t0 + s - want).abs();
     let sweep = if miss(span.abs()) <= miss(-span.abs()) {
         span.abs()
     } else {

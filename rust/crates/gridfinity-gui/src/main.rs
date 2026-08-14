@@ -78,7 +78,7 @@ fn placeholder(p: &Params, bin: &LogicalBin) -> Vec<f32> {
     out
 }
 
-fn catch<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+pub(crate) fn catch<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));

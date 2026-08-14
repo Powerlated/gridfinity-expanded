@@ -161,6 +161,50 @@ pub fn loop_area(segs: &[Seg]) -> f32 {
     s / 2.0
 }
 
+/// The signed area a closed polygon through `pts` in order encloses, by the
+/// shoelace sum over its edges and the closing edge from the last point back to
+/// the first.
+///
+/// Positive when the points wind counter-clockwise, which for a loop wound
+/// material-on-the-left makes an outer positive and a hole negative -- the
+/// convention every region in the kernel is read by. This is `loop_area` for a
+/// loop given as *points* rather than segments; a polygon has no arcs, so there
+/// is no circular-segment term to add.
+pub fn polygon_area(pts: &[Vec2]) -> f32 {
+    let n = pts.len();
+    let mut s = 0.0;
+    for i in 0..n {
+        let a = pts[i];
+        let b = pts[(i + 1) % n];
+        s += a.x * b.y - b.x * a.y;
+    }
+    s * 0.5
+}
+
+/// Whether `p` lies strictly inside the closed polygon through `pts`, by the
+/// parity of the crossings a ray cast in +x makes with its edges.
+///
+/// This is `point_in_segs` for a loop given as *points*, and answers for either
+/// winding, parity being blind to direction. A point *on* the boundary has no
+/// answer here -- it falls to whichever side the tie-break in the half-open
+/// crossing test puts the two edges meeting there -- so a caller holding a point
+/// that may sit on the loop must decide that case before asking.
+pub fn point_in_polygon(pts: &[Vec2], p: Vec2) -> bool {
+    let n = pts.len();
+    let mut inside = false;
+    for i in 0..n {
+        let a = pts[i];
+        let b = pts[(i + 1) % n];
+        if (a.y > p.y) != (b.y > p.y) {
+            let x = a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x);
+            if x > p.x {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
+
 const MAX_ARC_STOPS: usize = 8;
 
 #[derive(Clone, Copy, PartialEq)]

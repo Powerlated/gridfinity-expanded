@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::kernel::curvedge::emit_curv;
+use crate::kernel::curvedge::{emit_curv, emit_edge};
 use crate::kernel::geom::{Curve, Surface};
 use crate::kernel::math::Vec3;
 use crate::kernel::topo::{Builder, EdgeFaces, EdgeId, Solid};
@@ -477,30 +477,8 @@ fn rebuild_loop(
             }
             let vs = b.vertex(start);
             let ve = b.vertex(end);
-            let eid = match ed.curve {
-                Curve::Line { .. } => b.line(vs, ve),
-                Curve::Circle {
-                    center,
-                    axis,
-                    radius,
-                    ref_dir,
-                } => {
-                    let (a0, a1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
-                    b.arc(vs, ve, center, axis, radius, ref_dir, a0, a1)
-                }
-                Curve::Ellipse {
-                    center,
-                    a: ea,
-                    b: eb,
-                } => {
-                    let (t0, t1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
-                    b.ellipse(vs, ve, center, ea, eb, t0, t1)
-                }
-                Curve::TorusSection { .. } => {
-                    let (t0, t1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
-                    b.torus_section(vs, ve, ed.curve, t0, t1)
-                }
-            };
+            let (t0, t1) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
+            let eid = emit_edge(b, vs, ve, ed.curve, t0, t1);
             items.push(Emitted {
                 edge: eid,
                 start,

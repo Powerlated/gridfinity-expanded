@@ -12,7 +12,7 @@ import {
   TextInput,
 } from '@mantine/core';
 import { usePackLayout } from '../../hooks/usePackLayout';
-import { drawerGrid, packingArea } from '../../lib/project/drawer';
+import { MIN_DRAWER_MM, drawerGrid, maxDrawerMm, packingArea } from '../../lib/project/drawer';
 import { PACK_RESTARTS } from '../../lib/project/pack';
 import type { PackEffort } from '../../lib/types';
 import { MAX_GRID, useAppStore } from '../../store';
@@ -92,8 +92,8 @@ export function ProjectPanel() {
               <NumberInput
                 w={NUMBER_INPUT_WIDTH}
                 hideControls
-                min={42}
-                max={MAX_GRID * 42}
+                min={MIN_DRAWER_MM}
+                max={maxDrawerMm(MAX_GRID)}
                 step={10}
                 value={project.drawer.width}
                 onChange={(value) => {
@@ -106,8 +106,8 @@ export function ProjectPanel() {
               <NumberInput
                 w={NUMBER_INPUT_WIDTH}
                 hideControls
-                min={42}
-                max={MAX_GRID * 42}
+                min={MIN_DRAWER_MM}
+                max={maxDrawerMm(MAX_GRID)}
                 step={10}
                 value={project.drawer.depth}
                 onChange={(value) => {

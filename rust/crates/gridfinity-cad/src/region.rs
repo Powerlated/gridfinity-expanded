@@ -1,8 +1,8 @@
 use crate::kernel::math::Vec2;
-use crate::kernel::sketch::{Seg, loop_area};
+use crate::kernel::round::short_arc;
+use crate::kernel::sketch::{Seg, loop_area, polygon_area};
 use crate::layout::GridCell;
 use std::collections::{HashMap, HashSet};
-use std::f32::consts::PI;
 
 type Pt = (i32, i32);
 
@@ -134,28 +134,6 @@ fn build_loop(pts: &[Pt], pitch: f32, origin: Vec2, r: f32) -> Vec<Seg> {
     segs
 }
 
-fn short_arc(a0: f32, a1: f32) -> (f32, f32) {
-    let mut d = a1 - a0;
-    while d > PI {
-        d -= 2.0 * PI;
-    }
-    while d < -PI {
-        d += 2.0 * PI;
-    }
-    (a0, a0 + d)
-}
-
-fn poly_area(pts: &[Vec2]) -> f32 {
-    let n = pts.len();
-    let mut s = 0.0;
-    for i in 0..n {
-        let a = pts[i];
-        let b = pts[(i + 1) % n];
-        s += a.x * b.y - b.x * a.y;
-    }
-    s * 0.5
-}
-
 #[derive(Clone, Debug)]
 pub struct RegionLoop {
     pub segs: Vec<Seg>,
@@ -179,7 +157,7 @@ pub fn region_loops(
         .drain(..)
         .map(|pts| {
             let mm: Vec<Vec2> = pts.iter().map(|&p| to_mm(p, pitch, origin)).collect();
-            (poly_area(&mm).abs(), pts)
+            (polygon_area(&mm).abs(), pts)
         })
         .collect();
     with_area.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));

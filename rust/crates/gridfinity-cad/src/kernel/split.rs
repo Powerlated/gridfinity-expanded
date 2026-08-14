@@ -1,6 +1,8 @@
+use crate::kernel::curvedge::emit_edge;
 use crate::kernel::geom::{Curve, Surface, radial_frame};
 use crate::kernel::isect::{Intersection, intersect_surfaces};
-use crate::kernel::math::Vec3;
+use crate::kernel::math::{Vec2, Vec3};
+use crate::kernel::sketch::{point_in_polygon, polygon_area};
 use crate::kernel::topo::{Builder, EdgeId, Solid, VertexId};
 
 pub const ON_PLANE: f32 = 1e-4;
@@ -97,27 +99,6 @@ fn harmonic_roots(a: f32, b: f32, rhs: f32, lo: f32, hi: f32) -> Vec<f32> {
     out
 }
 
-pub fn emit_edge(
-    b: &mut Builder,
-    vs: VertexId,
-    ve: VertexId,
-    curve: Curve,
-    t0: f32,
-    t1: f32,
-) -> (EdgeId, bool) {
-    match curve {
-        Curve::Line { .. } => b.line(vs, ve),
-        Curve::Circle {
-            center,
-            axis,
-            radius,
-            ref_dir,
-        } => b.arc(vs, ve, center, axis, radius, ref_dir, t0, t1),
-        Curve::Ellipse { center, a, b: eb } => b.ellipse(vs, ve, center, a, eb, t0, t1),
-        Curve::TorusSection { .. } => b.torus_section(vs, ve, curve, t0, t1),
-    }
-}
-
 pub fn param_of(curve: &Curve, p: Vec3) -> f32 {
     match *curve {
         Curve::Line { p0, dir } => (p - p0).dot(dir),
@@ -193,7 +174,7 @@ struct CutPlane {
 
 /// A vertical prism over a 2D region, traced material-on-the-left.
 struct Prism {
-    loops: Vec<Vec<(f32, f32)>>,
+    loops: Vec<Vec<Vec2>>,
     axis: Vec3,
 }
 
@@ -240,7 +221,7 @@ impl Cut {
 
     /// Keep the material inside a vertical prism over `loops`, each traced with
     /// the kept region on its left (outers CCW, holes CW).
-    pub fn prism(loops: &[Vec<(f32, f32)>], axis: Vec3) -> Result<Cut, String> {
+    pub fn prism(loops: &[Vec<Vec2>], axis: Vec3) -> Result<Cut, String> {
         let mut planes = Vec::new();
         for lp in loops {
             if lp.len() < 3 {
@@ -248,10 +229,10 @@ impl Cut {
             }
             let (u, v) = axis_frame(axis);
             for i in 0..lp.len() {
-                let (x0, y0) = lp[i];
-                let (x1, y1) = lp[(i + 1) % lp.len()];
-                let a = u * x0 + v * y0;
-                let b = u * x1 + v * y1;
+                let p0 = lp[i];
+                let p1 = lp[(i + 1) % lp.len()];
+                let a = u * p0.x + v * p0.y;
+                let b = u * p1.x + v * p1.y;
                 let along = b - a;
                 if along.length() < ON_PLANE {
                     continue;
@@ -333,23 +314,18 @@ impl Cut {
 
 impl Prism {
     /// Even-odd containment, with the region's loops projected off the axis.
+    /// Parity is taken over *all* the loops together, so a point inside an outer
+    /// but also inside one of its holes crosses an even number of times and is
+    /// correctly outside the region.
     fn contains(&self, p: Vec3) -> bool {
         let (u, v) = axis_frame(self.axis);
-        let q = (p.dot(u), p.dot(v));
-        let mut inside = false;
-        for lp in &self.loops {
-            for i in 0..lp.len() {
-                let (x0, y0) = lp[i];
-                let (x1, y1) = lp[(i + 1) % lp.len()];
-                if (y0 > q.1) != (y1 > q.1) {
-                    let x = x0 + (q.1 - y0) / (y1 - y0) * (x1 - x0);
-                    if x > q.0 {
-                        inside = !inside;
-                    }
-                }
-            }
-        }
-        inside
+        let q = Vec2::new(p.dot(u), p.dot(v));
+        self.loops
+            .iter()
+            .filter(|lp| point_in_polygon(lp, q))
+            .count()
+            % 2
+            == 1
     }
 }
 
@@ -815,60 +791,36 @@ fn rebuild_loop(b: &mut Builder, solid: &Solid, lp: &[(EdgeId, bool)]) -> Vec<(E
         .collect()
 }
 
-fn polygon_area(pts: &[(f32, f32)]) -> f32 {
-    let mut a = 0.0;
-    for i in 0..pts.len() {
-        let (x0, y0) = pts[i];
-        let (x1, y1) = pts[(i + 1) % pts.len()];
-        a += x0 * y1 - x1 * y0;
-    }
-    a * 0.5
-}
-
-fn point_inside(pts: &[(f32, f32)], p: (f32, f32)) -> bool {
-    let mut hit = false;
-    for i in 0..pts.len() {
-        let (x0, y0) = pts[i];
-        let (x1, y1) = pts[(i + 1) % pts.len()];
-        if (y0 > p.1) != (y1 > p.1) {
-            let x = x0 + (p.1 - y0) / (y1 - y0) * (x1 - x0);
-            if x > p.0 {
-                hit = !hit;
-            }
-        }
-    }
-    hit
-}
-
-fn unwrap_u(pts: &mut [(f32, f32)]) {
+fn unwrap_u(pts: &mut [Vec2]) {
     use std::f32::consts::{PI, TAU};
     for i in 1..pts.len() {
-        while pts[i].0 - pts[i - 1].0 > PI {
-            pts[i].0 -= TAU;
+        while pts[i].x - pts[i - 1].x > PI {
+            pts[i].x -= TAU;
         }
-        while pts[i].0 - pts[i - 1].0 < -PI {
-            pts[i].0 += TAU;
+        while pts[i].x - pts[i - 1].x < -PI {
+            pts[i].x += TAU;
         }
     }
-    let min = pts.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+    let min = pts.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
     let shift = (min / TAU).floor() * TAU;
     if shift != 0.0 {
         for p in pts.iter_mut() {
-            p.0 -= shift;
+            p.x -= shift;
         }
     }
 }
 
-fn loop_encloses(outer: &[(f32, f32)], inner: &[(f32, f32)], angular: bool) -> bool {
+fn loop_encloses(outer: &[Vec2], inner: &[Vec2], angular: bool) -> bool {
     let p = inner[0];
-    if point_inside(outer, p) {
+    if point_in_polygon(outer, p) {
         return true;
     }
     if !angular {
         return false;
     }
     let tau = std::f32::consts::TAU;
-    point_inside(outer, (p.0 + tau, p.1)) || point_inside(outer, (p.0 - tau, p.1))
+    point_in_polygon(outer, Vec2::new(p.x + tau, p.y))
+        || point_in_polygon(outer, Vec2::new(p.x - tau, p.y))
 }
 
 fn emit_trimmed_faces(
@@ -887,13 +839,13 @@ fn emit_trimmed_faces(
     }
 
     let angular = !matches!(surface, Surface::Plane { .. });
-    let mut polys: Vec<Vec<(f32, f32)>> = loops
+    let mut polys: Vec<Vec<Vec2>> = loops
         .iter()
         .map(|lp| {
             lp.iter()
                 .map(|&d| {
                     let uv = surface.project(b.point(b.directed_ends(d).0));
-                    (uv.0, uv.1)
+                    Vec2::new(uv.0, uv.1)
                 })
                 .collect()
         })
@@ -981,13 +933,13 @@ fn emit_caps(
         Surface::Plane { u_dir, v_dir, .. } => (u_dir, v_dir),
         _ => unreachable!(),
     };
-    let to_2d = |p: Vec3| (p.dot(u_dir), p.dot(v_dir));
-    let poly = |lp: &[(EdgeId, bool)]| -> Vec<(f32, f32)> {
+    let to_2d = |p: Vec3| Vec2::new(p.dot(u_dir), p.dot(v_dir));
+    let poly = |lp: &[(EdgeId, bool)]| -> Vec<Vec2> {
         lp.iter()
             .map(|&d| to_2d(b.point(b.directed_ends(d).0)))
             .collect()
     };
-    let polys: Vec<Vec<(f32, f32)>> = loops.iter().map(|l| poly(l)).collect();
+    let polys: Vec<Vec<Vec2>> = loops.iter().map(|l| poly(l)).collect();
     let areas: Vec<f32> = polys.iter().map(|p| polygon_area(p)).collect();
     let mut used = vec![false; loops.len()];
     for i in 0..loops.len() {
@@ -996,7 +948,7 @@ fn emit_caps(
         }
         let mut inners: Vec<usize> = Vec::new();
         for j in 0..loops.len() {
-            if i != j && areas[j] < 0.0 && point_inside(&polys[i], polys[j][0]) {
+            if i != j && areas[j] < 0.0 && point_in_polygon(&polys[i], polys[j][0]) {
                 inners.push(j);
                 used[j] = true;
             }
@@ -1016,6 +968,10 @@ fn emit_caps(
 mod tests {
     use super::*;
     use std::f32::consts::PI;
+
+    fn pts(xy: &[(f32, f32)]) -> Vec<Vec2> {
+        xy.iter().map(|&(x, y)| Vec2::new(x, y)).collect()
+    }
 
     fn plane_x(c: f32) -> Surface {
         Surface::plane(Vec3::new(c, 0.0, 0.0), Vec3::X)
@@ -1162,7 +1118,7 @@ mod tests {
     #[test]
     fn a_prism_cut_keeps_the_material_inside_a_convex_window() {
         let solid = extrude(&Sketch::rectangle(0.0, 0.0, 12.0, 12.0), 0.0, 5.0);
-        let strip = vec![vec![(-2.0, -9.0), (2.0, -9.0), (2.0, 9.0), (-2.0, 9.0)]];
+        let strip = vec![pts(&[(-2.0, -9.0), (2.0, -9.0), (2.0, 9.0), (-2.0, 9.0)])];
         let cut = Cut::prism(&strip, Vec3::Z).unwrap();
         let kept = trim(&solid, &cut).unwrap();
         kept.validate().expect("manifold");
@@ -1173,14 +1129,14 @@ mod tests {
     #[test]
     fn a_prism_cut_turns_the_corner_at_a_reentrant_window_edge() {
         let solid = extrude(&Sketch::rectangle(0.0, 0.0, 12.0, 12.0), 0.0, 5.0);
-        let l = vec![vec![
+        let l = vec![pts(&[
             (-9.0, -9.0),
             (0.0, -9.0),
             (0.0, 0.0),
             (9.0, 0.0),
             (9.0, 9.0),
             (-9.0, 9.0),
-        ]];
+        ])];
         let cut = Cut::prism(&l, Vec3::Z).unwrap();
         let kept = trim(&solid, &cut).unwrap();
         kept.validate().expect("manifold");
