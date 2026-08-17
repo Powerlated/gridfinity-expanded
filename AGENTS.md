@@ -141,6 +141,12 @@ STL is the only wired export format.
 carved as cannot meet the tilted floor; the walls are dropped and the bin builds without them. See
 `rust/CLAUDE.md`.
 
+**A sloped bin does take wall openings, and keeps its ramp.** It used to drop the slope for the whole
+piece the moment any edge was open — a flat part for a user who asked for a ramp, built cleanly
+enough that nothing but a fuzz profile saw it. The opened compartment's floor lies in the ramp now,
+the standing wall stands on it, and a plinth carries the outline up to it. Its cavity corners are
+still square. See `rust/CLAUDE.md`.
+
 **A reentrant corner is rounded only when both its edges are walled.** Open both and the corner
 squares: the outer fillet's arc stands 3.5 mm past both pitch lines, and with no wall there to be
 the outside of, it was left standing alone as a 2.15 mm fin the full height of the bin. See

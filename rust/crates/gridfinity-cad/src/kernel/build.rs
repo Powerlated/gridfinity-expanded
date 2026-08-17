@@ -68,9 +68,28 @@ pub fn ring_into(b: &mut Builder, segs: &[Seg], z: f32, out: &mut RingEdges) {
     }
 }
 
+/// A 2D seg loop lifted onto `plane`, as one edge per segment, with each
+/// segment's own vertex at the height the plane gives its start.
+///
+/// **An arc lifted onto a tilted plane is an ellipse, not a circle.** Its two
+/// axes are the arc's radius along x and y, each carrying the plane's gradient
+/// in that direction, so `point(t)` at the arc's own angle `t` lands on both the
+/// cylinder over the arc and the plane -- and the parameter range carries over
+/// unchanged, because the ellipse is parameterised by that same angle. Building
+/// it as a Z-axis circle at the *centre's* height instead puts every point of it
+/// at one z: the ends then miss the vertices this function placed by the ramp's
+/// rise across the arc, which `audit` reports as `EdgeVertexGeometry` and which
+/// is why a sloped bin's rounded features had to be left square. `Vec3::Z` is
+/// still used where the plane is level, so nothing about a flat ring changes.
 pub fn ring_on_plane(b: &mut Builder, segs: &[Seg], plane: (Vec3, Vec3)) -> RingEdges {
     let (origin, normal) = plane;
     let normal = normal.normalize_or(Vec3::Z);
+    let level = normal.z.abs() < 1e-9 || (normal.x.abs() < 1e-9 && normal.y.abs() < 1e-9);
+    let (gx, gy) = if normal.z.abs() < 1e-9 {
+        (0.0, 0.0)
+    } else {
+        (-normal.x / normal.z, -normal.y / normal.z)
+    };
     let z_of = |p: crate::kernel::math::Vec2| -> f32 {
         if normal.z.abs() < 1e-9 {
             return origin.z;
@@ -98,17 +117,27 @@ pub fn ring_on_plane(b: &mut Builder, segs: &[Seg], plane: (Vec3, Vec3)) -> Ring
                 a1,
                 ..
             } => {
-                let cz = z_of(center);
-                b.arc(
-                    verts[k],
-                    verts[k1],
-                    vec3_of(center.x, center.y, cz),
-                    Vec3::Z,
-                    radius,
-                    Vec3::X,
-                    a0,
-                    a1,
-                )
+                let c3 = vec3_of(center.x, center.y, z_of(center));
+                if level {
+                    b.arc(verts[k], verts[k1], c3, Vec3::Z, radius, Vec3::X, a0, a1)
+                } else {
+                    let (ea, eb) = (
+                        vec3_of(radius, 0.0, radius * gx),
+                        vec3_of(0.0, radius, radius * gy),
+                    );
+                    for (t, s2) in [(a0, segs[k].start()), (a1, segs[k1].start())] {
+                        let on_curve = c3 + t.cos() * ea + t.sin() * eb;
+                        let at_vert = vec3_of(s2.x, s2.y, z_of(s2));
+                        assert!(
+                            (on_curve - at_vert).length() <= 1e-3,
+                            "ring on a tilted plane: the lifted arc reaches {on_curve:?} at its \
+                             own angle {t} but the ring puts that end at {at_vert:?}; the two \
+                             are one point, which is what makes the lift an ellipse in the \
+                             arc's own parameter"
+                        );
+                    }
+                    b.ellipse(verts[k], verts[k1], c3, ea, eb, a0, a1)
+                }
             }
         });
     }

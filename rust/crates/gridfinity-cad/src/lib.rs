@@ -1574,6 +1574,80 @@ mod tests {
         }
     }
 
+    /// An opening does not flatten a sloped bin's floor.
+    ///
+    /// The opened compartment's floor used to come off `emit_open_cavity`'s
+    /// `PlanarFace` at `floor_z` -- the touched branch runs before the slope
+    /// dispatch -- so a user who asked for a ramp and opened one edge got a flat
+    /// part that built, validated and tessellated cleanly. `fuzz_params_broad`
+    /// saw it only through the floor-fillet comparison, as a bin going from no
+    /// cavity floor at all to three unrounded ones.
+    #[test]
+    fn an_opening_does_not_flatten_a_sloped_floor() {
+        let bin = |open: Vec<GridEdge>| {
+            let p = gridfinity::Params {
+                bins: vec![LogicalBin {
+                    cells: cells(&[(1, 2)]),
+                    slope: Some(BinSlope {
+                        angle_deg: 9.0,
+                        dir: SlopeDir::PlusX,
+                    }),
+                    ..Default::default()
+                }],
+                height_units: 2,
+                cavity_corner_radius: 0.0,
+                open_edges: open,
+                ..gridfinity::Params::default()
+            };
+            gridfinity::try_build(&p).expect("the bin builds")
+        };
+        let flat_floors = |s: &Solid| {
+            s.faces
+                .iter()
+                .filter(|f| match f.surface {
+                    geom::Surface::Plane { origin, normal, .. } => {
+                        normal.z.abs() > 1.0 - 1e-3
+                            && (origin.z - (gridfinity::BASE_TOTAL_HEIGHT
+                                + gridfinity::FLOOR_THICKNESS))
+                                .abs()
+                                < 1e-3
+                    }
+                    _ => false,
+                })
+                .count()
+        };
+        let closed = bin(Vec::new());
+        assert_eq!(
+            flat_floors(&closed),
+            0,
+            "a sloped bin's floor is the ramp, so nothing of it lies flat at floor_z"
+        );
+        let opened = bin(vec![GridEdge {
+            x: 1,
+            y: 3,
+            orientation: Orientation::H,
+        }]);
+        opened.validate().expect("manifold");
+        assert_watertight(&tessellate(&opened, 8).to_mesh());
+        for (i, f) in opened.faces.iter().enumerate() {
+            if let geom::Surface::Plane { origin, normal, .. } = f.surface {
+                if normal.z.abs() > 1.0 - 1e-3 && (origin.z - 8.2).abs() < 1e-3 {
+                    println!("PROBE flat floor face {i} origin={origin:?} n={normal:?} sense={}", f.sense);
+                }
+            }
+        }
+        assert_eq!(
+            flat_floors(&opened),
+            0,
+            "opening one edge must not lay the ramp flat"
+        );
+        assert!(
+            signed_volume(&tessellate(&opened, 8).to_mesh())
+                < signed_volume(&tessellate(&closed, 8).to_mesh()),
+            "the opening takes material away"
+        );
+    }
+
     #[test]
     fn sloped_floor_displaces_volume() {
         let flat = tessellate(&gridfinity::build(&gridfinity::Params::default()), 8).to_mesh();

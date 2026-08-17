@@ -87,16 +87,18 @@ GUI is `windows_subsystem="windows"` in release — opens a window and blocks. S
 
 | profile | varies | status at default seed |
 | --- | --- | --- |
-| `fuzz_inner_walls` | freeform walls on a fixed 2×2 | **red 21/150** — 7 defects |
+| `fuzz_inner_walls` | freeform walls on a fixed 2×2 | **red 21/150** — 8 defects |
 | `fuzz_tidy_inner_walls` | tidy walls, up to 3 so they cross | green |
 | `fuzz_wall_openings` | `open_edges` + `divider_edges` on rectangles | green |
 | `fuzz_openings_and_inner_walls` | both at once | green (was 6/150) |
 | `fuzz_bin_shapes` | polyominoes, flood-fill pieces | green |
 | `fuzz_split_pieces` | polyominoes, `SplitLine`s + `partition_cells` | green (was 1/120) |
 | `fuzz_stripped_polyominoes` | polyominoes, **half** the perimeter wall opened | green (was 15/150) |
-| `fuzz_params_broad` | everything, incl. reentrant corners, slope, baseplate | **red 16/400** — 6 defects |
+| `fuzz_params_broad` | everything, incl. reentrant corners, slope, baseplate | **red 7/400** — 3 defects |
 
 Every red was already failing before, on a `known` list or behind a `require_blends` opt-out or both. Nothing is a regression; the counts are the backlog. Check the table before assuming a failure is yours. `fuzz_wall_openings` additionally clean at six seeds (default, 1, 7, 13, 42, 99) and at `FUZZ_CASES=600`.
+
+Six of eight green at the default seed; the two reds are **28 cases across 11 defects**, from 44 across 15. At seeds 1 / 7 / 42 the other six are green but for `fuzz_openings_and_inner_walls` (2/0/0) and `fuzz_stripped_polyominoes` (2/3/1), and `fuzz_inner_walls` sits at 25/21/25, `fuzz_params_broad` at 11/12/12. **`fuzz_inner_walls`' 21 are 13 of one class** — the ramp running out into a needle, below — so the profile is one defect from being close.
 
 **There is no expected failure, and there must never be one again.** A profile used to carry `Options::known` — message substrings of pre-existing undiagnosed defects, counted, printed tagged `KNOWN`, excluded from the assert. **Gone**: `Report` holds `failures`, `gate()` asserts it is zero. A forgiveness list is how a defect sits behind a green tick indefinitely, and the entry always outlives the diagnosis that justified it. Do not reintroduce it here or in any other test — a red profile naming a real bug is the correct state, and the fix is the model.
 
@@ -243,7 +245,7 @@ Half a complex polyomino's perimeter is the first thing to reach openings meetin
 `FUZZ_CASES=6000 fuzz_params_broad` + 3000–4000 on every other profile is the census these counts come from. Started **243/6000 across 15 distinct defects**; three fixes took it to **170/6000 across 11**, each a real model defect only a long run reaches:
 
 - **A partial-height wall's ramp asked for a blend the size of the arc it rolls along.** `plan_cavity_banded` took `r = min(total_h − top, TRANSITION_R)` with no reference to the cavity corner it lands on, so `cavity_corner_radius: 4.0` against `TRANSITION_R` 4.0 put the blend's centre on the arc's own axis and `build_torus_blend` asserted `major 0`. Exactly `rc == 4.0` failed while 3.9 and 4.1 built. `blend_radius_along` pulls any requested radius clear of the segment's own by `MIN_TORUS_MAJOR`, per contact segment rather than per notch — one run can mix straight pieces with arcs and only the arcs constrain it.
-- **A sloped bin with a thin wall escaped its own rounded corner.** A sloped floor builds its cavity square, and a sharp corner sits `sqrt(2)·(OUTER_R − wt)` from the outer arc's centre while the arc reaches only `OUTER_R`, so below ~1.1 mm the cavity left the rim face it is a hole of and `plan_piece` panicked `total_h hole without a containing face`. The flat path rounds the cavity concentric with the outer arc; the sloped path **cannot**, because `ring_on_plane` names an arc on a tilted plane with a Z-axis circle when the true section is an ellipse — rounding there swaps the panic for eight `EdgeOn` audit errors. So the wall is clamped to `SLOPED_MIN_WALL`, the same kind of clamp already applied at 0.4 mm and `PEG_TANGENT − 0.6`. Tangency is not enough: 1.0983 (the exact algebraic threshold) still fails, 1.10 builds — hence 0.05 of clearance.
+- **A sloped bin with a thin wall escaped its own rounded corner.** A sloped floor builds its cavity square, and a sharp corner sits `sqrt(2)·(OUTER_R − wt)` from the outer arc's centre while the arc reaches only `OUTER_R`, so below ~1.1 mm the cavity left the rim face it is a hole of and `plan_piece` panicked `total_h hole without a containing face`. The flat path rounds the cavity concentric with the outer arc; the sloped path **could not**, because `ring_on_plane` named an arc on a tilted plane with a Z-axis circle when the true section is an ellipse — rounding there swapped the panic for eight `EdgeOn` audit errors. So the wall is clamped to `SLOPED_MIN_WALL`, the same kind of clamp already applied at 0.4 mm and `PEG_TANGENT − 0.6`. Tangency is not enough: 1.0983 (the exact algebraic threshold) still fails, 1.10 builds — hence 0.05 of clearance. **`ring_on_plane` emits the ellipse now** (below), so the reason for leaving the sloped cavity square is gone; the clamp and the square cavity are still in place and re-rounding it is untried.
 - **A sloped bin took no inner wall at all** — not a rare one, *any*, plain straight spanning divider included. The wall is carved as a z-prism island whose bottom ring sits at a flat `floor_z`, and a tilted floor is not at `floor_z`: `audit` reported `EdgeOnSurface` and `EdgeVertexGeometry` in equal numbers. The partial-height branch already skipped walls on a slope; the full-height branch does too now, so a sloped bin builds without dividers rather than emitting unsound geometry. **The one fix that drops a feature the user asked for** — revisit whenever the sloped cavity stops being a special case.
 
   **The partial-height branch only *half* skipped them.** Its guard sat between `band_partial_walls`'s two branches, so the *island* branch — a wall lying wholly inside one compartment, which is the common case for a long diagonal across an L — reached a sloped bin regardless, and left an edge running the length of the wall unpaired at the rim (`edge N used fwd=0 bwd=1` at exactly `total_h`). The guard is the first statement of the function now. Both of `fuzz_params_broad`'s remaining sloped classes: 15/400 → **12/400**, 6 defects → 4.
@@ -346,6 +348,23 @@ The patch is a full `t × t` square subtracted at a piece's reentrant corner, ex
 
 **Measured against the profile table.** `fuzz_wall_openings`, `fuzz_tidy_inner_walls`, `fuzz_bin_shapes` stay green; `fuzz_inner_walls` (23/150), `fuzz_openings_and_inner_walls` (6/150), `fuzz_split_pieces` (1/120) unmoved. `fuzz_params_broad` **24/400 → 22/400** (two `OPENING_LOSES_FILLET`). `fuzz_stripped_polyominoes` retires its `edge 314 used fwd=2 bwd=2` manifold class outright — 4 defects → 3 at the same 15/150, that case now failing in an existing class. Its repro was a divider junction: the staircase was costing a bin its manifoldness.
 
+### An opened sloped bin keeps its ramp
+
+`author_outline` used to do `let slope = if openish { None } else { slope }` — any open edge anywhere on the piece and the whole bin's floor came out **flat**. It built, validated and tessellated cleanly, so nothing but `fuzz_params_broad`'s floor-fillet comparison ever saw it, as a bin going from no cavity floor at all to three unrounded ones (×5/400).
+
+Three emitters have to agree on one plane, so `SlopedFloor` derives it once per piece and hands out `plane()` and `z_of()`; two of them solving it separately would put a shared ring a float apart and open the solid along it.
+
+```
+plinth       outline swept  Z(floor_z) -> ramp        (SlopedWall, outward)
+wall sector  wall region    ramp       -> Z(total_h)  (was Wall floor_z -> total_h)
+floor        compartment    on the ramp               (was PlanarFace at floor_z)
+island tower enclosed hole  ramp       -> Z(total_h)  (was WallFaces floor_z -> total_h)
+```
+
+The plinth is the load-bearing piece and the reason a prismatic sweep is wrong rather than merely ugly. The standing wall op sweeps a *region* — outline outside, cavity runs inside — so it emits both surfaces at once, and swept from `floor_z` its **inner** surface goes on existing below the ramp, where both sides of it are material. Standing the wall on the ramp instead leaves the outline unclad from `floor_z` up to it, which the plinth clads. Ring pairing then closes: outline at `floor_z` is the outer wall's top against the plinth's bottom; outline at the ramp is the plinth's top against the wall's outer runs where a wall stands and against the cavity floor's own boundary at an opening, since an opened cavity runs out to the outline. A closed bin is untouched — its outer wall already runs `PEG_HEIGHT → total_h` in one sweep and has no wall sectors.
+
+`fuzz_params_broad` 12/400 → **7/400**, 4 defects → 3, and 16 → 11 at seed 1, 18 → 12 at 7, 14 → 12 at 42. It needed `ring_on_plane`'s ellipse first: the outline is *always* rounded, so the plinth and the wall both lift `OUTER_R` corner arcs onto the ramp.
+
 ### An opening onto an enclosed hole's boundary is ignored, not honoured
 
 `layout::enclosed_holes` flood-fills the empty cells a bin's cell set surrounds; `effective_walls` drops any `open_edge` touching one, so the wall stays. The bin builds and stays closed; the doorway simply does not appear — the same degradation a sloped bin's inner walls take.
@@ -430,6 +449,8 @@ Alternation is not the whole story — it holds just as well for a consistently-
 ### `build.rs`
 
 Features. Three primitives write into a shared `Builder`: `ring` (profile at a height), `wall_between` (side faces between two rings), `cap`/`loop_of` (planar caps). `extrude`/`prism`/`loft` wrap them. **Orientation convention:** author loops CCW; an `outward` flag says whether material is inside the loop (`true`) or it is a hole/cavity (`false`). `loft` turns arcs whose radius changes with height into `Cone` faces; a straight segment on a loft becomes a *slanted* `Plane`, its normal computed from the actual 3D quad, not assumed vertical.
+
+**An arc lifted onto a tilted plane is an ellipse, and `ring_on_plane` built a circle.** Its axes are the arc's radius along x and y, each carrying the plane's gradient in that direction — `a = (r, 0, r·gx)`, `b = (0, r, r·gy)` for `g = (−n.x/n.z, −n.y/n.z)` — so `point(t)` at the arc's *own* angle lands on both the cylinder over the arc and the plane, and the parameter range carries over untouched. A Z-axis circle at the centre's height puts the whole arc at one z, and its ends then miss the vertices the ring already placed by the ramp's rise across the arc: `EdgeVertexGeometry`, 0.594 mm on a 9° ramp. That single defect is why every rounded feature of a sloped bin had to be squared, and why an opened sloped bin dropped its slope altogether. The assertion states the fix rather than the code: each end of the emitted ellipse is checked against the vertex the ring put there.
 
 ### Nine files, one phase each; `fillet_edges_with` is the sequence and nothing else. `chain` — request → chains, terminating vertices, `salvage`. `corner` — rolling-ball solve + `reconcile_shared_ends`. `blend` — `Fillet`, cyl/torus surfaces, `connect_arc`, `circle_span`, and the per-corner build that runs each end out. `runout` — `RunoutEnd`/`Runout`, the Absorb→Cap→Flat ladder, `absorb_fits`. `section` — `runout_on`/`_cyl`/`_torus`, `respan`. `rebuild` — loop rewrite, blend faces, caps, `move_vertex`. `query` — `as_cyl`, `coplanar`, `across_at`, `dist_to_curve`. `mod` — the three public items and the three shared tolerances (`END_AGREE`, `ON_EDGE`, `MAX_JOIN_KINK`). `feasible` — what a blend can be *asked* for, decided in 2D before any of it is built: `max_inward_radius`, `island_clears`, `blendable_segs`, `blend_radius_along`, `MIN_TORUS_MAJOR`. `fillet_edges` reports a refusal only after trying to build the surface, by which point the message names a face rather than the impossible request; these answer the same questions from the profile the caller is about to extrude, as upper bounds erring towards allowing it.
 
@@ -584,7 +605,8 @@ When adding geometry, keep the manifold invariant: any edge a new face introduce
 
 ## Known limitations
 
-- **A sloped bin takes no inner walls.** Cavity is not a z-prism, so the island a free-form wall is carved as cannot meet the tilted floor; walls dropped, bin builds without them.
+- **A sloped bin takes no inner walls.** Cavity is not a z-prism, so the island a free-form wall is carved as cannot meet the tilted floor; walls dropped, bin builds without them. Full-height and partial-height alike, and the partial-height guard is `band_partial_walls`'s first statement so *both* of its branches are covered.
+- **A sloped bin's cavity corners are square**, and its wall is clamped to `SLOPED_MIN_WALL`. `ring_on_plane` can express the rounding now (an arc on a tilted plane is an ellipse); re-rounding the sloped cavity on that is untried.
 - **A reentrant corner is rounded only when both its edges are walled.** See `corner_walled`.
 - **A wall opening onto an enclosed hole's boundary is ignored.** `layout::effective_walls` drops it.
 - **A piece enclosed on all four sides is refused**, not mangled.

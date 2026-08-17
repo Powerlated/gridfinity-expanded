@@ -37,8 +37,12 @@ use std::collections::HashMap;
 /// authored: the outer profile and the peg cuts it will need, the open spans,
 /// the wall thickness and the two z heights the whole plan is measured against.
 ///
-/// `slope` is the piece's own, which is `None` whenever any edge is open --
-/// a sloped floor and an opening are not built together.
+/// `slope` is the piece's own. An opened sloped bin keeps its ramp: the opened
+/// compartment's floor lies in it, the standing wall stands on it, and a plinth
+/// carries the outline from `floor_z` up to it. It used to be dropped outright
+/// whenever any edge was open, which built a flat part for a user who had asked
+/// for a ramp -- and built it cleanly, so only `fuzz_params_broad`'s floor
+/// comparison ever saw it.
 struct PieceOutline {
     loops: OuterLoops,
     shared: SharedWithPegs,
@@ -98,10 +102,88 @@ pub(super) fn plan_piece(
     let _perf = scope(Metric::PlanPiece);
     let mut outline = author_outline(p, cells, bin_cells, &walls, slope);
     let (planned, wall_loops) = plan_cavities(p, cells, &walls, &mut outline, tag);
-    let cavity_ops = emit_cavity_ops(bin_cells, &outline, planned);
+    let ramp = outline.slope.map(|sl| SlopedFloor::of(sl, bin_cells, &outline));
+    let cavity_ops = emit_cavity_ops(ramp.as_ref(), &outline, planned);
     let pegs = peg_rings(cells, &outline);
     emit_pegs(p, &pegs, tag, prog);
-    emit_base_and_rim(&outline, &pegs, wall_loops, cavity_ops, tag, prog);
+    emit_base_and_rim(
+        &outline,
+        ramp.as_ref(),
+        &pegs,
+        wall_loops,
+        cavity_ops,
+        tag,
+        prog,
+    );
+}
+
+/// The one tilted plane a sloped bin's cavity floor lies in, and the height it
+/// reaches over any point of the bin.
+///
+/// The gradient is the **bin's**, not a compartment's -- `slope_span` measures
+/// across `bin_cells`, so every compartment of one bin rides one ramp -- and it
+/// is flattened until the high end clears the rim by `SLOPE_RIM_HEADROOM`. The
+/// plane is derived once per piece because three emitters have to agree on it
+/// exactly: the cavity floor lies in it, the standing wall stands on it, and the
+/// plinth beneath that wall is capped by it. Two of them solving it separately
+/// would put their shared ring a float apart and open the solid along it.
+pub(super) struct SlopedFloor {
+    origin: Vec3,
+    normal: Vec3,
+    ux: f32,
+    uy: f32,
+    eff_m: f32,
+}
+
+impl SlopedFloor {
+    fn of(sl: BinSlope, bin_cells: &[GridCell], outline: &PieceOutline) -> SlopedFloor {
+        let (ux, uy) = uphill_unit(sl.dir);
+        let (min_a, span) = slope_span(bin_cells, ux, uy);
+        let m = sl
+            .angle_deg
+            .to_radians()
+            .tan()
+            .clamp(0.0, MAX_SLOPE_GRADIENT);
+        let h_max = (m * span)
+            .min(outline.cavity_depth() - SLOPE_RIM_HEADROOM)
+            .max(0.0);
+        let eff_m = if span > MIN_SLOPE_SPAN {
+            h_max / span
+        } else {
+            0.0
+        };
+        let normal = Vec3::new(-eff_m * ux, -eff_m * uy, 1.0).normalize();
+        assert!(
+            (normal.length() - 1.0).abs() < 1e-5 && normal.z > 0.0,
+            "a sloped floor's normal is a unit vector pointing into the cavity, got {normal:?}"
+        );
+        assert!(
+            eff_m * span <= outline.cavity_depth() - SLOPE_RIM_HEADROOM + COINCIDENT,
+            "a ramp rising {} over a {span} mm run clears the rim by SLOPE_RIM_HEADROOM in a \
+             cavity {} mm deep",
+            eff_m * span,
+            outline.cavity_depth()
+        );
+        SlopedFloor {
+            origin: Vec3::new(0.0, 0.0, outline.floor_z - eff_m * min_a),
+            normal,
+            ux,
+            uy,
+            eff_m,
+        }
+    }
+
+    /// The ramp's height over `pt`, never below the flat floor it starts from.
+    fn z_of(&self, pt: Vec2) -> f32 {
+        self.origin.z + self.eff_m * (self.ux * pt.x + self.uy * pt.y)
+    }
+
+    fn plane(&self) -> PPlaneRef {
+        PPlaneRef::Tilted {
+            origin: self.origin,
+            normal: self.normal,
+        }
+    }
 }
 
 /// The piece's outer profile and everything read off it, from the piece's cells
@@ -122,7 +204,6 @@ fn author_outline(
 ) -> PieceOutline {
     let _g = scope(Metric::PlanOuter);
     let openish = !walls.open.is_empty();
-    let slope = if openish { None } else { slope };
 
     let bin_set = crate::layout::cell_set(bin_cells);
     let seam = |e: &GridEdge| classify_edge_in(&bin_set, *e) == EdgeClass::Internal;
@@ -670,7 +751,7 @@ fn author_standing_wall(
 /// per partial-height wall. Everything else is a plain stack, or -- on a slope
 /// -- a tilted floor with sloped walls, which no stack can express.
 fn emit_cavity_ops(
-    bin_cells: &[GridCell],
+    ramp: Option<&SlopedFloor>,
     outline: &PieceOutline,
     planned: Vec<PlannedCavity>,
 ) -> CavityOps {
@@ -692,7 +773,7 @@ fn emit_cavity_ops(
             banded,
         } = pc;
         if lp.touched() {
-            emit_open_cavity(ci, &lp, &islands, fr, floor_z, total_h, &mut out);
+            emit_open_cavity(ci, &lp, &islands, fr, ramp, floor_z, total_h, &mut out);
             continue;
         }
         if let Some(bd) = banded {
@@ -707,8 +788,8 @@ fn emit_cavity_ops(
             ));
             continue;
         }
-        match outline.slope {
-            Some(sl) => emit_sloped_cavity(ci, &lp, &islands, sl, bin_cells, outline, &mut out),
+        match ramp {
+            Some(ramp) => emit_sloped_cavity(ci, &lp, &islands, ramp, outline, &mut out),
             None => {
                 let (stack, opts, tops, rim, blends) =
                     plan_cavity_flat(&lp.segs, &islands, floor_z, total_h, fr);
@@ -737,15 +818,22 @@ fn emit_cavity_ops(
 /// compartment's. The segments the outer walk replaced are the ones with no wall
 /// left to roll against; every other floor-wall edge still gets its fillet, and
 /// the chain runs out on the mouth.
+#[allow(clippy::too_many_arguments)]
 fn emit_open_cavity(
     ci: usize,
     lp: &CavityLoop,
     islands: &[Island],
     fr: f32,
+    ramp: Option<&SlopedFloor>,
     floor_z: f32,
     total_h: f32,
     out: &mut CavityOps,
 ) {
+    assert!(
+        islands.iter().all(|i| i.top.is_none()) || ramp.is_none(),
+        "a sloped bin takes no inner wall, so every island an opened compartment on one carries \
+         is an enclosed hole and stands to the rim; cavity {ci} has one with a top"
+    );
     for isl in islands {
         out.island_tops.push(isl.segs.clone());
     }
@@ -753,10 +841,13 @@ fn emit_open_cavity(
     out.ops.push((
         format!("cavity {ci} (open): floor"),
         POp::PlanarFace {
-            plane: PPlaneRef::Z {
-                z: floor_z,
-                up: true,
-            },
+            plane: ramp.map_or(
+                PPlaneRef::Z {
+                    z: floor_z,
+                    up: true,
+                },
+                |r| r.plane(),
+            ),
             outer: (lp.segs.clone(), true),
             holes: floor_holes,
         },
@@ -764,15 +855,32 @@ fn emit_open_cavity(
     for (ii, isl) in islands.iter().enumerate() {
         out.ops.push((
             format!("cavity {ci} (open): tower {ii}"),
-            POp::WallFaces {
-                lower: isl.segs.clone(),
-                upper: isl.segs.clone(),
-                z0: floor_z,
-                z1: total_h,
-                outward: true,
+            match ramp {
+                Some(r) => POp::SlopedWall {
+                    lower: isl.segs.clone(),
+                    upper: isl.segs.clone(),
+                    lower_plane: r.plane(),
+                    upper_plane: PPlaneRef::Z {
+                        z: total_h,
+                        up: true,
+                    },
+                    outward: true,
+                },
+                None => POp::WallFaces {
+                    lower: isl.segs.clone(),
+                    upper: isl.segs.clone(),
+                    z0: floor_z,
+                    z1: total_h,
+                    outward: true,
+                },
             },
         ));
     }
+    assert!(
+        ramp.is_none() || fr <= MIN_USEFUL_BLEND,
+        "a sloped floor takes no fillet -- `buildable_floor_fillet` zeroes it -- so an opened \
+         compartment on a ramp asks for none, got {fr} in cavity {ci}"
+    );
     if fr > MIN_USEFUL_BLEND {
         let walled: Vec<bool> = lp.coincident.iter().map(|&c| !c).collect();
         for (s, keep) in lp.segs.iter().zip(blendable_segs(&lp.segs, &walled)) {
@@ -801,8 +909,7 @@ fn emit_sloped_cavity(
     ci: usize,
     lp: &CavityLoop,
     islands: &[Island],
-    sl: BinSlope,
-    bin_cells: &[GridCell],
+    ramp: &SlopedFloor,
     outline: &PieceOutline,
     out: &mut CavityOps,
 ) {
@@ -812,39 +919,8 @@ fn emit_sloped_cavity(
             out.island_tops.push(isl.segs.clone());
         }
     }
-    let (ux, uy) = uphill_unit(sl.dir);
-    let (min_a, span) = slope_span(bin_cells, ux, uy);
-    let m = sl
-        .angle_deg
-        .to_radians()
-        .tan()
-        .clamp(0.0, MAX_SLOPE_GRADIENT);
-    let h_max = (m * span)
-        .min(outline.cavity_depth() - SLOPE_RIM_HEADROOM)
-        .max(0.0);
-    let eff_m = if span > MIN_SLOPE_SPAN {
-        h_max / span
-    } else {
-        0.0
-    };
-    let z_of = |pt: Vec2| floor_z + eff_m * (ux * pt.x + uy * pt.y - min_a);
-    let origin = Vec3::new(
-        lp.segs[0].start().x,
-        lp.segs[0].start().y,
-        z_of(lp.segs[0].start()),
-    );
-    let normal = Vec3::new(-eff_m * ux, -eff_m * uy, 1.0).normalize();
-    assert!(
-        (normal.length() - 1.0).abs() < 1e-5 && normal.z > 0.0,
-        "a sloped floor's normal is a unit vector pointing into the cavity, got {normal:?}"
-    );
-    assert!(
-        eff_m * span <= outline.cavity_depth() - SLOPE_RIM_HEADROOM + COINCIDENT,
-        "a ramp rising {} over a {span} mm run clears the rim by SLOPE_RIM_HEADROOM in a cavity          {} mm deep",
-        eff_m * span,
-        outline.cavity_depth()
-    );
-    let floor_plane = PPlaneRef::Tilted { origin, normal };
+    let z_of = |pt: Vec2| ramp.z_of(pt);
+    let floor_plane = ramp.plane();
     let top_plane = PPlaneRef::Z {
         z: total_h,
         up: true,
@@ -1048,8 +1124,10 @@ fn emit_pegs(p: &Params, pegs: &[PegRings], tag: &str, prog: &mut Program) {
 /// The rim is the piece's top face: the outer walls as outers, island tops as
 /// outers of their own, and every cavity opening as a hole of the smallest
 /// outer containing it.
+#[allow(clippy::too_many_arguments)]
 fn emit_base_and_rim(
     outline: &PieceOutline,
+    ramp: Option<&SlopedFloor>,
     pegs: &[PegRings],
     wall_loops: Vec<Vec<Seg>>,
     cavity_ops: CavityOps,
@@ -1132,11 +1210,36 @@ fn emit_base_and_rim(
         );
     }
 
+    // A sloped bin's opened compartments put their floor on the ramp, so the
+    // standing wall stands on the ramp too and a plinth carries the outline from
+    // the flat floor up to it. Swept prismatically from `floor_z` instead, the
+    // wall's *inner* surface would go on existing below the ramp, where both
+    // sides of it are material.
+    if let Some(ramp) = ramp
+        && outline.openish
+    {
+        for (li, (segs, _)) in outer_rings.iter().enumerate() {
+            prog.push(
+                format!("{tag}: ramp plinth {li}"),
+                POp::SlopedWall {
+                    lower: segs.clone(),
+                    upper: segs.clone(),
+                    lower_plane: PPlaneRef::Z {
+                        z: floor_z,
+                        up: true,
+                    },
+                    upper_plane: ramp.plane(),
+                    outward: true,
+                },
+            );
+        }
+    }
+
     for (label, op) in cavity_ops.ops {
         prog.push(format!("{tag}: {label}"), op);
     }
 
-    emit_wall_sectors(&wall_loops, floor_z, total_h, tag, prog);
+    emit_wall_sectors(&wall_loops, ramp, floor_z, total_h, tag, prog);
 
     let top_walls: Vec<Vec<Seg>> = if outline.openish {
         wall_loops
@@ -1177,6 +1280,7 @@ fn emit_base_and_rim(
 /// the wall and the base met at `floor_z` with opposing normals.
 fn emit_wall_sectors(
     wall_loops: &[Vec<Seg>],
+    ramp: Option<&SlopedFloor>,
     floor_z: f32,
     total_h: f32,
     tag: &str,
@@ -1194,14 +1298,27 @@ fn emit_wall_sectors(
             loop_area(sl) != 0.0,
             "{tag}: wall sector {si} encloses no area"
         );
+        let top = PPlaneRef::Z {
+            z: total_h,
+            up: true,
+        };
         prog.push(
             format!("{tag}: wall sector {si}"),
-            POp::Wall {
-                lower: sl.clone(),
-                upper: sl.clone(),
-                z0: floor_z,
-                z1: total_h,
-                outward: true,
+            match ramp {
+                Some(ramp) => POp::SlopedWall {
+                    lower: sl.clone(),
+                    upper: sl.clone(),
+                    lower_plane: ramp.plane(),
+                    upper_plane: top,
+                    outward: true,
+                },
+                None => POp::Wall {
+                    lower: sl.clone(),
+                    upper: sl.clone(),
+                    z0: floor_z,
+                    z1: total_h,
+                    outward: true,
+                },
             },
         );
     }
