@@ -506,10 +506,17 @@ fn one_closed_loop(pieces: Vec<(Seg, ())>) -> Vec<Seg> {
 /// Each entry with the blend radius it can actually carry, for the compartment
 /// and for every island in it.
 ///
-/// Four things take a radius away, and the widest requested is `fr`. An arc the
-/// ball would degenerate on clamps it to that arc's own radius less
-/// `MIN_TORUS_MAJOR`, convex arcs binding the compartment and concave ones the
-/// islands. A passage narrower than twice the radius clamps it to what fits. A
+/// Four things take a radius away, and the widest requested is `fr`. An arc no
+/// wider than the ball plus `MIN_TORUS_MAJOR` clamps it to that arc's own radius
+/// less `MIN_TORUS_MAJOR`, convex arcs binding the compartment and concave ones
+/// the islands. That bound is deliberately **one-sided** and deliberately not
+/// `blend_radius_along`'s degeneracy band: in theory a ball wider than the
+/// corner it rolls into is an ordinary spindle torus and only the band is
+/// unbuildable, and relaxing it to the band was tried -- it takes
+/// `fuzz_wall_openings` 0 to 9/150 and `fuzz_stripped_polyominoes` 0 to 26/150,
+/// blends across a 0.066 mm corner arriving as self-intersecting faces and
+/// tessellation leaks. A compartment carrying an arc the ball cannot roll along
+/// therefore still gives up its fillet entirely. A passage narrower than twice the radius clamps it to what fits. A
 /// sharp corner terminates a blend chain rather than continuing it, so a loop
 /// carrying one takes no fillet -- except when the corner is the pinch a wall
 /// opening leaves, where the chain runs out onto the mouth and the rest of the

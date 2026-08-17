@@ -216,6 +216,17 @@ pub fn is_convex_arc(shape: &[Seg], s: &Seg) -> bool {
     }
 }
 
+/// The smallest corner arc worth inscribing: below it the arc is shorter than
+/// `topo`'s weld quantum, so its two tangent points are one vertex as far as the
+/// builder is concerned and the corner is square in the solid whatever the
+/// sketch says. **Every** entry point that rounds a corner honours it, or two
+/// roundings of the same corner disagree about whether it is an arc at all --
+/// `rectregion::shape_loop` emitted a 0.066 mm arc where `round_sharp_corners`
+/// would have left the corner sharp, and a hair-thin *arc* is not a chain
+/// terminator the way a sharp corner is, so it dragged a whole compartment's
+/// 2.48 mm floor fillet down to its own radius instead of ending the chain.
+pub const MIN_ARC_R: f32 = 0.1;
+
 /// `segs` with an arc inscribed at every sharp corner between two straight
 /// runs: radius `convex_r` where the loop turns away from its material and
 /// `concave_r` where it turns into it, both read off the loop's own winding, and
@@ -266,7 +277,6 @@ pub fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<S
         arc_r[i] = r;
         trim[i] = r * tan_half[i];
     }
-    const MIN_ARC_R: f32 = 0.1;
     const USABLE: f32 = 0.98;
     let mut changed = true;
     while changed {

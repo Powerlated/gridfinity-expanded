@@ -1040,6 +1040,66 @@ mod tests {
         }
     }
 
+    /// One opening may not cost a bin *every* blend request it has, including
+    /// the ones in compartments the opening is nowhere near.
+    ///
+    /// Shrunk out of `fuzz_openings_and_inner_walls`, whose only defect this
+    /// was: opening the top edge of a 2x3 takes it from 38 requested / 38 landed
+    /// to **0 requested**, which `FILLET_FAILED` calls perfectly clean because a
+    /// report of nothing asked and nothing refused is vacuously clean.
+    #[test]
+    fn an_opening_does_not_cost_the_far_compartments_their_blend_request() {
+        let bin = |open: Vec<GridEdge>| {
+            let p = gridfinity::Params {
+                bins: vec![LogicalBin {
+                    cells: cells(&[(1, 0), (1, 1), (1, 2), (2, 0), (2, 1), (2, 2)]),
+                    ..Default::default()
+                }],
+                open_edges: open,
+                divider_edges: vec![
+                    GridEdge {
+                        x: 1,
+                        y: 2,
+                        orientation: Orientation::H,
+                    },
+                    GridEdge {
+                        x: 2,
+                        y: 1,
+                        orientation: Orientation::V,
+                    },
+                ],
+                inner_walls: vec![gridfinity::InnerWall {
+                    x1: -10.0,
+                    y1: 63.0,
+                    x2: 136.0,
+                    y2: 63.0,
+                    width: 2.2,
+                    height: None,
+                }],
+                ..gridfinity::Params::default()
+            };
+            gridfinity::try_build_reporting(&p).expect("the bin builds")
+        };
+        let (_, closed) = bin(Vec::new());
+        assert!(
+            closed.made() > 0,
+            "the fixture only says anything if the closed bin rounds something: {closed:?}"
+        );
+        let (_, opened) = bin(vec![GridEdge {
+            x: 1,
+            y: 3,
+            orientation: Orientation::H,
+        }]);
+        assert!(
+            opened.made() > 0,
+            "one opening on the far side left the bin asking for {} blend(s) where closed it \
+             asks {} and lands {}",
+            opened.requested,
+            closed.requested,
+            closed.made()
+        );
+    }
+
     #[test]
     fn carving_a_middle_cell_splits_the_rim_into_two_faces_not_a_hole() {
         carve_conserves_volume(

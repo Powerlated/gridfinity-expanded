@@ -1,5 +1,5 @@
 use crate::kernel::math::Vec2;
-use crate::kernel::round::short_arc;
+use crate::kernel::round::{MIN_ARC_R, short_arc};
 use crate::kernel::sketch::{Seg, point_in_polygon, polygon_area};
 use std::collections::HashMap;
 
@@ -256,6 +256,11 @@ pub fn shape_loop(lp: &TracedLoop, style: &LoopStyle) -> Vec<Seg> {
                 radius[i] *= f;
                 radius[j] *= f;
             }
+        }
+    }
+    for r in &mut radius {
+        if *r < MIN_ARC_R {
+            *r = 0.0;
         }
     }
 
