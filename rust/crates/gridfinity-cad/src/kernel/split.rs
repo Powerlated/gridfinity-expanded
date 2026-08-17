@@ -65,8 +65,132 @@ pub fn curve_plane_params(curve: &Curve, t0: f32, t1: f32, plane: &Surface) -> V
                 .filter(|&t| within(t))
                 .collect()
         }
-        Curve::TorusSection { .. } => Vec::new(),
+        Curve::TorusSection {
+            center,
+            axis,
+            ref_dir,
+            major,
+            minor,
+            offset,
+            branch,
+        } => torus_section_roots(
+            center, axis, ref_dir, major, minor, offset, branch, normal, c, lo, hi,
+        )
+        .into_iter()
+        .filter(|&t| within(t))
+        .collect(),
     }
+}
+
+/// `root` shifted by whole turns into `[lo, hi]`, and `None` when no whole
+/// number of turns lands it there.
+fn wrap_into(root: f32, lo: f32, hi: f32) -> Option<f32> {
+    let mut t = root;
+    let two_pi = std::f32::consts::TAU;
+    while t < lo {
+        t += two_pi;
+    }
+    while t > hi {
+        t -= two_pi;
+    }
+    (t >= lo).then_some(t)
+}
+
+/// Minor angles at which a torus section crosses the plane `x . n = c`, before
+/// the caller's range filter.
+///
+/// A `TorusSection` never crosses **the plane that cut it out** -- it lies in
+/// that plane -- and this used to answer every plane with that one fact. It is
+/// false for any other plane of a multi-plane cut, and the case is ordinary: a
+/// piece carved out of an L turns a corner while a connector is running along a
+/// reentrant floor fillet's section, so the section has to hand over to the next
+/// plane of the prism and nothing reported where.
+///
+/// Writing `point(t)` out with `rad . cos u = offset` substituted, a point of the
+/// section is `center + offset . d0 + branch . sqrt(rad^2 - offset^2) . d1 +
+/// minor . sin t . axis` for `rad = major + minor . cos t` and `(d0, d1)` the
+/// section plane's own frame. Dotting that with `n` gives
+///
+/// ```text
+/// A . sqrt(rad^2 - offset^2) + B . sin t = K
+/// A = branch . (d1 . n)   B = minor . (axis . n)   K = c - center . n - offset . (d0 . n)
+/// ```
+///
+/// which is closed form in each of the two families the kernel produces, and a
+/// quartic in `cos t` in between:
+///
+/// - **`n` perpendicular to the axis** (`B = 0`), every plane of a `Cut::prism`
+///   swept along the torus's own axis: `sqrt(rad^2 - offset^2) = K / A` forces
+///   `rad^2 = offset^2 + (K/A)^2`, so `cos t = (R - major) / minor` for that one
+///   `R >= 0`. Only `+R` is a root: `torus_section_exists` bounds the curve to
+///   `rad > 0`, and the caller must not sample it outside that.
+/// - **`n` along the axis** (`A = 0`): `sin t = K / B` directly.
+///
+/// The square root is non-negative, so `K / A < 0` in the first family means the
+/// plane is crossed by the *other* branch of the section and not by this one --
+/// no root, rather than a root of the squared equation that does not satisfy the
+/// original.
+#[allow(clippy::too_many_arguments)]
+fn torus_section_roots(
+    center: Vec3,
+    axis: Vec3,
+    ref_dir: Vec3,
+    major: f32,
+    minor: f32,
+    offset: f32,
+    branch: f32,
+    n: Vec3,
+    c: f32,
+    lo: f32,
+    hi: f32,
+) -> Vec<f32> {
+    assert!(
+        minor > 0.0,
+        "a torus section's minor radius is the blend radius it was rolled with and is positive, \
+         got {minor}"
+    );
+    let (d0, d1) = radial_frame(axis, ref_dir);
+    let a_coef = branch * d1.dot(n);
+    let b_coef = minor * axis.dot(n);
+    let k = c - center.dot(n) - offset * d0.dot(n);
+
+    let roots: Vec<f32> = if b_coef.abs() < ON_PLANE {
+        if a_coef.abs() < ON_PLANE {
+            return Vec::new();
+        }
+        let s = k / a_coef;
+        if s < 0.0 {
+            return Vec::new();
+        }
+        let r = (offset * offset + s * s).sqrt();
+        let cos_t = (r - major) / minor;
+        if cos_t.abs() > 1.0 {
+            return Vec::new();
+        }
+        let base = cos_t.acos();
+        vec![base, -base]
+    } else if a_coef.abs() < ON_PLANE {
+        let s = k / b_coef;
+        if s.abs() > 1.0 {
+            return Vec::new();
+        }
+        let base = s.asin();
+        vec![base, std::f32::consts::PI - base]
+    } else {
+        panic!(
+            "a torus section against a plane oblique to its axis is a quartic in cos t and is \
+             not solved: axis {axis:?} against plane normal {n:?}, which meet at a cosine of {}",
+            axis.dot(n)
+        )
+    };
+
+    let mut out: Vec<f32> = roots
+        .into_iter()
+        .filter_map(|r| wrap_into(r, lo, hi))
+        .collect();
+    out.sort_by(f32::total_cmp);
+    out.dedup_by(|x, y| (*x - *y).abs() < ON_PLANE);
+    out
 }
 
 fn harmonic_roots(a: f32, b: f32, rhs: f32, lo: f32, hi: f32) -> Vec<f32> {
@@ -80,20 +204,10 @@ fn harmonic_roots(a: f32, b: f32, rhs: f32, lo: f32, hi: f32) -> Vec<f32> {
     }
     let phase = b.atan2(a);
     let base = ratio.acos();
-    let mut out = Vec::new();
-    for root in [phase + base, phase - base] {
-        let mut t = root;
-        let two_pi = std::f32::consts::TAU;
-        while t < lo {
-            t += two_pi;
-        }
-        while t > hi {
-            t -= two_pi;
-        }
-        if t >= lo {
-            out.push(t);
-        }
-    }
+    let mut out: Vec<f32> = [phase + base, phase - base]
+        .into_iter()
+        .filter_map(|root| wrap_into(root, lo, hi))
+        .collect();
     out.sort_by(f32::total_cmp);
     out.dedup_by(|x, y| (*x - *y).abs() < ON_PLANE);
     out
@@ -347,6 +461,38 @@ fn section_curves_through(surface: &Surface, plane: &Surface, from: Vec3) -> Vec
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Why no connector left `from` along the cut, as one line per plane of the cut
+/// that passes through `from`: what `surface` and that plane meet in, and how
+/// many of those curves ran through `from` itself.
+///
+/// The refusal it feeds used to say "no closed-form section curve", which is
+/// only one of the two things that reach it -- a pair the curve set cannot name
+/// and a section that exists but led nowhere are the same `None` at the call
+/// site and want opposite fixes, one a new `Curve` variant and one a bug in the
+/// walk. Naming the surface pair and the outcome separates them at the point of
+/// failure instead of leaving it to be guessed downstream.
+fn no_connector_reason(surface: &Surface, cut: &Cut, from: Vec3) -> String {
+    let mut out = String::new();
+    for pi in cut.planes_at(from) {
+        let isect = intersect_surfaces(surface, &cut.planes[pi].surface);
+        let through = section_curves_through(surface, &cut.planes[pi].surface, from).len();
+        let what = match &isect {
+            Intersection::Curves(cs) => {
+                format!("{} curve(s), {through} of them through the point", cs.len())
+            }
+            Intersection::Unsupported(why) => format!("unsupported: {why}"),
+            Intersection::Empty => "empty".to_string(),
+            Intersection::Coincident => "coincident".to_string(),
+            Intersection::Tangent(p) => format!("tangent at {p:?}"),
+        };
+        out.push_str(&format!(
+            "\n  plane {pi} {:?} meets the face: {what}",
+            cut.planes[pi].surface
+        ));
+    }
+    out
 }
 
 /// Directed advance from `from` to `to` along `curve` travelling towards `dir`.
@@ -620,7 +766,12 @@ fn close_chains(
                 ..
             }) = best
             else {
-                return Err("no closed-form section curve for a face the cut crosses".into());
+                return Err(format!(
+                    "no connector along the cut from {:?} on face surface {surface:?}: the chain \
+                     reached the cut surface but nothing carried it onward{}",
+                    chain.end,
+                    no_connector_reason(surface, cut, chain.end)
+                ));
             };
             let target = match stop {
                 Stop::Edge(p) => p,
@@ -1047,6 +1198,82 @@ mod tests {
     fn a_torus_section_already_lies_in_the_plane_so_it_never_crosses() {
         let curve = Curve::torus_section(Vec3::ZERO, Vec3::Z, Vec3::X, 3.0, 10.0, 2.0, 1.0);
         assert!(curve_plane_params(&curve, -PI, PI, &plane_x(3.0)).is_empty());
+    }
+
+    /// The section a torus was cut into by one plane, against a *second* plane.
+    ///
+    /// Every root has to satisfy both surfaces at once, so each is checked
+    /// against the plane and against the torus's own spine -- landing on the
+    /// plane alone would be satisfied by a root of the squared equation that the
+    /// original does not have.
+    fn assert_on_plane_and_torus(
+        curve: &Curve,
+        params: &[f32],
+        plane: &Surface,
+        center: Vec3,
+        axis: Vec3,
+        major: f32,
+        minor: f32,
+    ) {
+        for &t in params {
+            assert!(
+                Curve::torus_section_exists(major, minor, 3.0, t),
+                "t={t} is outside the section's own domain"
+            );
+            let p = curve.point(t);
+            let d = plane.signed_distance(p);
+            assert!(d.abs() < 1e-3, "t={t} lands {d} off the plane");
+            let rel = p - center;
+            let h = rel.dot(axis);
+            let spine = ((rel - axis * h).length() - major).hypot(h);
+            assert!(
+                (spine - minor).abs() < 1e-3,
+                "t={t} lands {spine} from the spine, not the minor radius {minor}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_torus_section_crosses_the_next_plane_of_a_prism_twice() {
+        let curve = Curve::torus_section(Vec3::ZERO, Vec3::Z, Vec3::X, 3.0, 10.0, 2.0, 1.0);
+        let plane = Surface::plane(Vec3::new(0.0, 9.0, 0.0), Vec3::Y);
+        let params = curve_plane_params(&curve, -PI, PI, &plane);
+        assert_eq!(
+            params.len(),
+            2,
+            "the section reaches out to y=11.6 and back, so a plane at y=9 cuts it \
+             twice: {params:?}"
+        );
+        assert_on_plane_and_torus(&curve, &params, &plane, Vec3::ZERO, Vec3::Z, 10.0, 2.0);
+    }
+
+    #[test]
+    fn a_plane_past_the_reach_of_a_torus_section_is_not_crossed() {
+        let curve = Curve::torus_section(Vec3::ZERO, Vec3::Z, Vec3::X, 3.0, 10.0, 2.0, 1.0);
+        let plane = Surface::plane(Vec3::new(0.0, 20.0, 0.0), Vec3::Y);
+        assert!(curve_plane_params(&curve, -PI, PI, &plane).is_empty());
+    }
+
+    #[test]
+    fn a_torus_section_crosses_a_plane_square_on_to_its_axis_where_its_height_says() {
+        let curve = Curve::torus_section(Vec3::ZERO, Vec3::Z, Vec3::X, 3.0, 10.0, 2.0, 1.0);
+        let plane = Surface::plane_z(1.0);
+        let params = curve_plane_params(&curve, -PI, PI, &plane);
+        assert_eq!(
+            params.len(),
+            2,
+            "the section rises to z=2 and falls back, so z=1 is met on the way up \
+             and on the way down: {params:?}"
+        );
+        assert_on_plane_and_torus(&curve, &params, &plane, Vec3::ZERO, Vec3::Z, 10.0, 2.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "quartic in cos t")]
+    fn a_plane_oblique_to_a_torus_sections_axis_is_refused_rather_than_missed() {
+        let curve = Curve::torus_section(Vec3::ZERO, Vec3::Z, Vec3::X, 3.0, 10.0, 2.0, 1.0);
+        let plane = Surface::plane(Vec3::ZERO, Vec3::new(0.0, 1.0, 1.0).normalize());
+        curve_plane_params(&curve, -PI, PI, &plane);
     }
 
     #[test]

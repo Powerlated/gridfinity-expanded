@@ -870,6 +870,48 @@ mod tests {
         }
     }
 
+    /// A cut through a bin whose floor fillet is wider than its cavity corner
+    /// still finds a connector along every face it crosses.
+    ///
+    /// Shrunk out of `fuzz_split_pieces`, which this was the only failure of:
+    /// `floor_fillet` 4.0 against `cavity_corner_radius` 3.5 puts a blend on the
+    /// reentrant corner of an L, and the split plane runs straight through it.
+    #[test]
+    fn a_cut_through_a_corner_blend_wider_than_its_corner_carves() {
+        let p = gridfinity::Params {
+            bins: vec![LogicalBin {
+                cells: cells(&[(1, 0), (2, 0), (2, 1)]),
+                split_lines: vec![SplitLine {
+                    axis: Axis::Y,
+                    index: 1,
+                }],
+                ..Default::default()
+            }],
+            height_units: 1,
+            wall_thickness: 0.7,
+            cavity_corner_radius: 3.5,
+            floor_fillet: 4.0,
+            ..gridfinity::Params::default()
+        };
+        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).expect("the bin builds");
+        let parts = layout::partition_cells(&p.bins[0].cells, &p.bins[0].split_lines);
+        assert_eq!(parts.len(), 2, "one split line cuts the L in two");
+        let vol = |s: &Solid| signed_volume(&tessellate(s, 6).to_mesh());
+        let mut sum = 0.0;
+        for (i, part) in parts.iter().enumerate() {
+            let piece = gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &part.cells)
+                .unwrap_or_else(|e| panic!("piece {i}: {e}"));
+            piece.validate().unwrap_or_else(|e| panic!("piece {i}: {e}"));
+            assert_watertight(&tessellate(&piece, 6).to_mesh());
+            sum += vol(&piece);
+        }
+        let whole_v = vol(&whole);
+        assert!(
+            (sum - whole_v).abs() < 1e-2 * whole_v.abs(),
+            "the pieces partition the bin: {sum} mm^3 against {whole_v} mm^3"
+        );
+    }
+
     #[test]
     fn a_staircase_piece_carves_to_its_cells_not_its_bounding_box() {
         let p = gridfinity::Params {

@@ -53,7 +53,7 @@ const BUDGET: &[(&str, usize)] = &[
     ("kernel/rectregion.rs", 2),
     ("kernel/region2d.rs", 3),
     ("kernel/slab.rs", 1),
-    ("kernel/split.rs", 6),
+    ("kernel/split.rs", 5),
     ("kernel/tess.rs", 2),
     ("kernel/topo.rs", 2),
     ("layout.rs", 1),
