@@ -195,8 +195,11 @@ fn fillet_edges_with(
         return Err(format!("blend: rebuilt solid invalid: {e}"));
     }
     for fid in 0..s.faces.len() {
-        if crate::kernel::audit::face_loops_self_intersect(&s, fid) {
-            return Err(format!("blend: face {fid}'s boundary crosses itself"));
+        if let Some(x) = crate::kernel::audit::face_loop_self_crossing(&s, fid) {
+            return Err(format!(
+                "blend: face {fid}'s boundary crosses itself on {:?}: {x}",
+                s.faces[fid].surface
+            ));
         }
     }
     Ok(s)

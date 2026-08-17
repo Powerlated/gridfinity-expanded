@@ -217,12 +217,37 @@ pub fn tessellation_leaks(tess: &crate::kernel::tess::Tessellation) -> Vec<TessL
     leaks
 }
 
+/// Where a face's boundary crosses itself, as the two offending runs in world
+/// millimetres, and `None` when it does not.
+///
+/// The two runs are what a caller has to see: "face N's boundary crosses
+/// itself" says a blend was refused and nothing about which part of it doubled
+/// back, and a refusal is read far from where the loop was authored.
+pub struct SelfCrossing {
+    pub a: (Vec3, Vec3),
+    pub b: (Vec3, Vec3),
+}
+
+impl std::fmt::Display for SelfCrossing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the run {:?} -> {:?} crosses the run {:?} -> {:?}",
+            self.a.0, self.a.1, self.b.0, self.b.1
+        )
+    }
+}
+
 pub fn face_loops_self_intersect(solid: &Solid, fid: usize) -> bool {
+    face_loop_self_crossing(solid, fid).is_some()
+}
+
+pub fn face_loop_self_crossing(solid: &Solid, fid: usize) -> Option<SelfCrossing> {
     use crate::kernel::math::Vec2;
     const PER_EDGE: usize = 4;
     let face = &solid.faces[fid];
     if matches!(face.surface, Surface::Sphere { .. }) {
-        return false;
+        return None;
     }
     let prep = face.surface.prepare();
     let planar = matches!(face.surface, Surface::Plane { .. });
@@ -298,11 +323,15 @@ pub fn face_loops_self_intersect(solid: &Solid, fid: usize) -> bool {
             let (d1, d2) = (side(p, q, r), side(p, q, t));
             let (d3, d4) = (side(r, t, p), side(r, t, q));
             if d1 * d2 < 0.0 && d3 * d4 < 0.0 {
-                return true;
+                let at = |uv: Vec2| face.surface.point((uv.x, uv.y));
+                return Some(SelfCrossing {
+                    a: (at(p), at(q)),
+                    b: (at(r), at(t)),
+                });
             }
         }
     }
-    false
+    None
 }
 
 fn audit_manifold(solid: &Solid, defects: &mut Vec<Defect>) {
