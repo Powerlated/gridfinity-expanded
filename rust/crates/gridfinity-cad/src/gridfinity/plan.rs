@@ -371,12 +371,23 @@ fn carve_full_walls(
 /// `outline_b` is the same boundary cut at the same points, which is what the
 /// band above the wall is built from. Both are re-chained, and a boundary that
 /// does not chain back into the one loop it was is a defect rather than a case.
+///
+/// **A sloped bin takes none of them**, the same rule `carve_full_walls` holds
+/// full-height walls to and for the same reason: every one of these is carved
+/// as a z-prism whose bottom ring sits at a flat `floor_z`, and a tilted floor
+/// is not there. The guard used to sit between the two branches, so the island
+/// branch -- a wall lying wholly inside one compartment -- reached a sloped bin
+/// anyway and left an edge along the wall unpaired at the rim. It is both
+/// classes `fuzz_params_broad` still had on a slope.
 fn band_partial_walls(
     p: &Params,
     entries: &mut [(CavityLoop, Vec<Island>, Option<Banded>)],
     fr: f32,
     outline: &PieceOutline,
 ) {
+    if outline.slope.is_some() {
+        return;
+    }
     let partial_walls: Vec<(&InnerWall, Vec<Seg>, f32)> = p
         .inner_walls
         .iter()
@@ -418,9 +429,6 @@ fn band_partial_walls(
                     top: Some(t),
                     fr: 0.0,
                 });
-                continue 'walls;
-            }
-            if outline.slope.is_some() {
                 continue 'walls;
             }
             let bd = band.get_or_insert_with(|| Banded {

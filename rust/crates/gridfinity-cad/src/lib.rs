@@ -1512,6 +1512,68 @@ mod tests {
         }
     }
 
+    /// A sloped bin takes no inner wall at all -- the wall is carved as a
+    /// z-prism whose bottom ring sits at a flat `floor_z`, and a tilted floor is
+    /// not there -- so a sloped bin must *build*, without the wall, rather than
+    /// emit unsound geometry.
+    ///
+    /// Shrunk out of `fuzz_params_broad`, where both remaining sloped classes
+    /// are a partial-height wall reaching a sloped bin anyway.
+    #[test]
+    fn a_sloped_bin_drops_a_partial_height_wall_instead_of_leaking() {
+        for (shape, slope, units, wall) in [
+            (
+                &[(0, 0), (0, 1), (1, 1), (2, 1)][..],
+                BinSlope {
+                    angle_deg: 18.0,
+                    dir: SlopeDir::PlusX,
+                },
+                2u32,
+                gridfinity::InnerWall {
+                    x1: 6.5,
+                    y1: 10.5,
+                    x2: 101.5,
+                    y2: 60.5,
+                    width: 1.4,
+                    height: Some(6.0),
+                },
+            ),
+            (
+                &[(0, 1), (0, 2), (1, 0), (1, 1), (1, 2)][..],
+                BinSlope {
+                    angle_deg: 14.0,
+                    dir: SlopeDir::MinusX,
+                },
+                1,
+                gridfinity::InnerWall {
+                    x1: 48.5,
+                    y1: 122.0,
+                    x2: 55.0,
+                    y2: 31.5,
+                    width: 3.4,
+                    height: Some(3.5),
+                },
+            ),
+        ] {
+            let p = gridfinity::Params {
+                bins: vec![LogicalBin {
+                    cells: cells(shape),
+                    slope: Some(slope),
+                    ..Default::default()
+                }],
+                height_units: units,
+                inner_walls: vec![wall],
+                ..gridfinity::Params::default()
+            };
+            let solid = gridfinity::try_build(&p)
+                .unwrap_or_else(|e| panic!("{shape:?} on a {slope:?} slope: {e}"));
+            solid
+                .validate()
+                .unwrap_or_else(|e| panic!("{shape:?} on a {slope:?} slope: {e}"));
+            assert_watertight(&tessellate(&solid, 6).to_mesh());
+        }
+    }
+
     #[test]
     fn sloped_floor_displaces_volume() {
         let flat = tessellate(&gridfinity::build(&gridfinity::Params::default()), 8).to_mesh();
