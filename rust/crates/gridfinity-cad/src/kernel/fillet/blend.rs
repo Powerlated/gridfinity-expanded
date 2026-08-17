@@ -110,7 +110,7 @@ pub(super) fn build_all(
             let land = |plane| {
                 runout_on(&blend.surface, cv, r, tap, tbp, plane, away).map(|(a, b, _)| (a, b))
             };
-            let end = plan_runout_end(solid, v, e, fa, fb, edge_faces, away, land)?;
+            let end = plan_runout_end(solid, v, e, fa, fb, edge_faces, away, land);
             let (ta_new, tb_new, arc) = match end {
                 RunoutEnd::Flat { .. } => (tap, tbp, if at_v0 { blend.ca0 } else { blend.ca1 }),
                 RunoutEnd::Absorb { face } | RunoutEnd::Cap { fa_side: face, .. } => {

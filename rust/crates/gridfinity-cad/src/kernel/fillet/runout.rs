@@ -181,13 +181,25 @@ pub(super) fn swallowed_end(t: Vec3, ed: &Edge, solid: &Solid, v: usize) -> Opti
 /// blend's own two and anything coplanar with them, and returns `Absorb` when
 /// exactly one of those can take the trim curve, `Cap` when the faces either side
 /// of the corner are a distinct coplanar pair, and `Flat`, pointing `away`, when
-/// neither holds -- so it always yields an end unless `land` itself errors.
+/// neither holds -- so it **always** yields an end, and cannot fail.
 /// `land` maps a candidate's plane to where the blend's two touchdowns run out
 /// on it, and is called only for the planar candidates actually in the running.
 /// `Flat` is always available because the ball's two touchdowns and the corner
 /// they retreat from are three points of one plane -- the plane of the ball's own
 /// connect arc -- whatever the blend rolled along; it is the end of a fillet that
 /// runs out of wall rather than into a face, and it retreats nothing.
+///
+/// **A plane `land` refuses is a rejected candidate, not a failure.** Both
+/// `Absorb` and `Cap` are trimmed by the blend's exact section of the chosen
+/// plane, so a plane whose section does not exist -- the terminating plane
+/// standing past the narrowest ring a torus blend's trim curve would have to
+/// cross, an oblique plane whose section is a quartic, a blend running along the
+/// plane rather than into it -- offers neither end and the ladder must fall
+/// through to `Flat`. Propagating that error instead aborted the whole ladder,
+/// and since `fillet_best_effort` drops a chain that errors, one unreachable
+/// plane cost the chain its blend outright: 7/150 of `fuzz_stripped_polyominoes`
+/// at seed 7 and 3/150 of `fuzz_inner_walls`, every one of them a chain that had
+/// a flat end available.
 ///
 /// Several candidates in one plane are not an ambiguity about *where* the blend
 /// ends: the bin's outer wall is cut into bands by the peg profile and three of
@@ -207,7 +219,7 @@ pub(super) fn plan_runout_end(
     ef: &EdgeFaces,
     away: Vec3,
     land: impl Fn((Vec3, Vec3)) -> Result<(Vec3, Vec3), String>,
-) -> Result<RunoutEnd, String> {
+) -> RunoutEnd {
     let flat = RunoutEnd::Flat { away };
     let mut cands = Vec::new();
     for fi in faces_at_vertex(solid, v) {
@@ -221,8 +233,15 @@ pub(super) fn plan_runout_end(
         cands.push(fi);
     }
     if cands.is_empty() {
-        return Ok(flat);
+        return flat;
     }
+    // Both `Absorb` and `Cap` are trimmed by the blend's section of the face's
+    // plane, so a plane the section cannot be taken on offers neither end. That
+    // is a rejected candidate and not a failure: `Flat` is always available and
+    // is what "a chain that can end nowhere ends flat" means.
+    let lands = |fi: usize| -> Option<(Vec3, Vec3)> {
+        as_plane(&solid.faces[fi].surface).and_then(|pl| land(pl).ok())
+    };
     let cap_at = |cands: &[usize]| -> Option<RunoutEnd> {
         let pick = |xs: &[usize]| -> Option<usize> {
             let hit: Vec<usize> = xs.iter().copied().filter(|c| cands.contains(c)).collect();
@@ -230,30 +249,25 @@ pub(super) fn plan_runout_end(
         };
         let a = pick(&across_at(solid, v, fa, e, ef))?;
         let b = pick(&across_at(solid, v, fb, e, ef))?;
-        (a != b && coplanar(&solid.faces[a].surface, &solid.faces[b].surface)).then_some(
-            RunoutEnd::Cap {
+        (a != b && coplanar(&solid.faces[a].surface, &solid.faces[b].surface) && lands(a).is_some())
+            .then_some(RunoutEnd::Cap {
                 fa_side: a,
                 fb_side: b,
-            },
-        )
+            })
     };
 
     if cands.len() == 1 {
-        if let Some((ta, tb)) = as_plane(&solid.faces[cands[0]].surface)
-            .map(&land)
-            .transpose()?
+        if let Some((ta, tb)) = lands(cands[0])
             && absorb_fits(solid, cands[0], v, ta, tb)
         {
-            return Ok(RunoutEnd::Absorb { face: cands[0] });
+            return RunoutEnd::Absorb { face: cands[0] };
         }
-        return Ok(cap_at(&cands).unwrap_or(flat));
+        return cap_at(&cands).unwrap_or(flat);
     }
-    let plane = as_plane(&solid.faces[cands[0]].surface);
     let one_plane = cands[1..]
         .iter()
         .all(|&c| coplanar(&solid.faces[c].surface, &solid.faces[cands[0]].surface));
-    if let (true, Some(plane)) = (one_plane, plane) {
-        let (ta, tb) = land(plane)?;
+    if let (true, Some((ta, tb))) = (one_plane, lands(cands[0])) {
         let at = (ta + tb) * 0.5;
         let inside: Vec<usize> = cands
             .iter()
@@ -261,15 +275,15 @@ pub(super) fn plan_runout_end(
             .filter(|&c| planar_face_contains(solid, c, at) && absorb_fits(solid, c, v, ta, tb))
             .collect();
         if inside.len() == 1 {
-            return Ok(RunoutEnd::Absorb { face: inside[0] });
+            return RunoutEnd::Absorb { face: inside[0] };
         }
         if inside.is_empty()
             && let Some(cap) = cap_at(&cands)
         {
-            return Ok(cap);
+            return cap;
         }
     }
-    Ok(cap_at(&cands).unwrap_or(flat))
+    cap_at(&cands).unwrap_or(flat)
 }
 
 /// Whether face `ft` can absorb a blend that retreats to `ta` and `tb`: true
