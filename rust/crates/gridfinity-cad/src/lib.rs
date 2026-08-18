@@ -14,6 +14,7 @@ pub use kernel::audit::{
 pub use kernel::mesh::Mesh;
 pub use kernel::tess::{Tessellation, tessellate, tessellate_shell};
 pub use kernel::topo::Solid;
+pub use kernel::xt::to_xt_text;
 
 #[cfg(test)]
 #[global_allocator]

@@ -417,14 +417,14 @@ Two crates (`Cargo.toml` = virtual workspace, edition 2024, resolver 3):
 
 Inside `gridfinity-cad`:
 
-- `src/kernel/` — `math`, `geom`, `sketch`, `topo`, `build`, `fillet`, `tess`, `planar`, `mesh`, plus 2D loop and region work: `round` (tangency + corner rounding on a seg loop), `nesting` (which loops sit inside which), `region2d`, `rectregion`. **Nothing here knows about Gridfinity**; dependency direction is one-way, no kernel module imports from the model layer. Paths `crate::kernel::topo`, `gridfinity_cad::kernel::geom`.
+- `src/kernel/` — `math`, `geom`, `sketch`, `topo`, `build`, `fillet`, `tess`, `planar`, `mesh`, `xt`, plus 2D loop and region work: `round` (tangency + corner rounding on a seg loop), `nesting` (which loops sit inside which), `region2d`, `rectregion`. **Nothing here knows about Gridfinity**; dependency direction is one-way, no kernel module imports from the model layer. Paths `crate::kernel::topo`, `gridfinity_cad::kernel::geom`.
 - `src/` — `gridfinity/` (the model, twelve modules), `layout` (grid cells/edges), `region` (polyomino boundary tracing, grid-coupled), `printers` (bed fitting, pure logic).
 
 `Mesh`, `Solid`, `Tessellation`/`tessellate`, `Params` stay re-exported at the crate root, so the GUI is unaffected by the split.
 
 ## Engine architecture
 
-Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet` → `tess` → `mesh` → STL.** Paths under `src/kernel/` unless noted.
+Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet` → `tess` → `mesh` → STL**, or the same B-rep straight out as Parasolid XT via **`xt`** — no tessellation on that path. Paths under `src/kernel/` unless noted.
 
 ### `geom.rs`
 
@@ -479,6 +479,20 @@ Rebuild is **local**: an edge changes if blended or if either endpoint moves, a 
 **How far along an edge a blend reaches belongs to the edge, not to the face asking.** Both faces sharing an edge rebuild independently and the results must weld; disagreement interns two edges and the solid opens along the seam, surfacing far away as `edge N used fwd=1 bwd=0`. `move_vertex` decided it by distance to the *asking face's* surface — a partial-height inner wall meeting the perimeter puts **both** tangent points on the wall's side plane, so that face's test is a tie while the cavity-wall face across the same edge sees only `ta` on itself and picks it. Measures against the edge's own supporting curve now (`dist_to_curve`, closed form for `Line` and `Circle`), which both faces compute identically because the curve belongs to neither.
 
 The assertion is the real deliverable, not the fix: `rebuild_loop` records every edge's terminal point keyed by `(edge, vertex)` and fails naming the two faces that differ. The quantity must be the point where the edge *stops being wall and becomes blend*, because a face reaches it two ways — one retreats its endpoint there, the other keeps the corner and splits the edge there — and comparing raw endpoints calls that legitimate pair a defect. Fires nowhere across all eight profiles now.
+
+### `xt/` — Parasolid transmit writer
+
+Analytic B-rep out as a `.x_t` text file (schema `SCH_1200000_12006`, manual at repo root): the format every major CAD system imports, carrying exactly what the kernel holds — exact planes/cylinders/cones/spheres/tori, exact lines/circles/ellipses. `to_xt_text(&[&Solid])` is the whole public surface, re-exported at the crate root and called by `gridfinity-wasm`'s `export_parasolid` (same `build_bin_solid`/`carve_to_cells` pairing as `generate_geometry`, zero tessellation). Four files: `text` — index allocation, field encoding, record splitting, unit crossing; `surf` — `Surface`/`Curve` → node parameters (cone half picking, ellipse principal axes, spindle-torus sheet sign); `isect` — `Curve::TorusSection` → INTERSECTION + CHART + two LIMITs, the one kernel curve with no analytic node; `topo` — one `Solid` → BODY/REGION/SHELL/FACE/LOOP/FIN/EDGE/VERTEX/POINT.
+
+**Metres, converted in exactly one place.** Transmit files carry no units; every Parasolid application reads them as metres (`res_size` 1000, `res_linear` 1e-8). `text::Writer::dist`/`pos` divide by `MM_PER_M`; `real`/`dir` do not — ratios and directions carry no length. Measured f32 deviation of kernel points from the emitted analytic forms: **3.1e-9 m** surface, 2.4e-9 m curve, on `rect(1,1)` — *inside* the declared 1e-8 m, so no tolerant-vertex machinery is needed; if a real reader ever rejects on tolerance, the spec-blessed fix is TRIMMED_CURVE edge curves, a follow-up.
+
+**A solid body's boundary appears twice.** One REGION per connected shell (material inside) plus one infinite void REGION; each shell is written twice — into its solid region with faces as back-faces, into the void region with the same faces as front-faces. That is what FACE.shell/front_shell and SHELL.face/front_face are for. `encloses_material` decides which way a shell faces by reading the outward normal at the shell's +x extreme: positive → material inside, negative → the shell bounds a void (refused — needs containment analysis). Its tie tolerance is `EXTREME_TIE_MM = 1e-3`: an `f32` ulp at 42 mm is 3.8e-6, and the first version's `1e-6` epsilon rounded away entirely, so every sample at the extreme compared `x > x` and a split L read as a void.
+
+**Edge curves carry no parameter range** — the two vertices bound them, and the curve node's `sense` says whether the edge runs with the curve's own parameter. A `TorusSection` edge becomes INTERSECTION: the two meeting faces' surfaces, a chart of `curve.point` samples ordered along the natural tangent (cross product of the *sensed* surface normals), and an `'L'` limit at each end. `base_parameter` 0 / `base_scale` 1; the C1 chordal parameterisation is the reader's to recompute — only pvecs are transmitted. Both referenced surfaces need GEOMETRIC_OWNER ring nodes back to the intersection, doubly-linked per shared surface.
+
+**The tests are the format's first reader.** `xt/mod.rs` re-parses the emitted text character-level and schema-driven — a char or null takes no trailing space, so the next number runs hard against it (`?10` in the manual's own example) and whitespace tokenization desyncs. Checks: indices 1..=n unique/complete, every pointer resolves, region/shell/face chains close doubly-linked, each body exactly one void region, back-face and front-face chains each cover every face once, two fins per edge with opposite senses, per-type field counts. `a_split_l_shaped_bin_writes_its_torus_sections_as_exact_intersections` pins the INTERSECTION path — straight rectangular splits never produce a `TorusSection`; the carve planes only cross the reentrant corner's fillet torus on L-shaped pieces.
+
+Refusals (all `Err`, surfaced with bin/body context by the wasm boundary): a cone face spanning its apex, a spindle-torus face crossing the axis its sheets meet on, a torus-section edge not meeting two distinct faces, a shell bounding a void. Body naming (SDL/TYSA_NAME attributes) deliberately out of scope.
 
 ### `tess.rs`
 

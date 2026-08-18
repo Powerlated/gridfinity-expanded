@@ -106,6 +106,27 @@ pub fn generate_geometry(bins: JsValue) -> Result<JsValue, JsValue> {
 }
 
 #[wasm_bindgen]
+pub fn export_parasolid(bins: JsValue) -> Result<String, JsValue> {
+    let bins: Vec<BinParams> = serde_wasm_bindgen::from_value(bins)
+        .map_err(|e| JsValue::from_str(&format!("invalid bin parameters: {e}")))?;
+
+    let mut solids: Vec<gridfinity_cad::Solid> = Vec::new();
+    for bin in &bins {
+        let params = bin.to_params();
+        let whole = gridfinity::build_bin_solid(&params, &bin.cells, None)
+            .map_err(|e| JsValue::from_str(&format!("bin {}: {e}", bin.bin_id)))?;
+        for piece_cells in &bin.pieces {
+            let solid = gridfinity::carve_to_cells(&whole, &bin.cells, piece_cells)
+                .map_err(|e| JsValue::from_str(&format!("bin {}: {e}", bin.bin_id)))?;
+            solids.push(solid);
+        }
+    }
+    let bodies: Vec<&gridfinity_cad::Solid> = solids.iter().collect();
+    gridfinity_cad::to_xt_text(&bodies)
+        .map_err(|e| JsValue::from_str(&format!("parasolid export: {e}")))
+}
+
+#[wasm_bindgen]
 pub fn badapple_frame_count() -> usize {
     gridfinity_cad::badapple::frame_count()
 }

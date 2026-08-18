@@ -25,6 +25,7 @@ import init, {
   badapple_frame_count,
   badapple_frame_vertices,
   create_viewer,
+  export_parasolid,
   generate_geometry,
 } from '../../wasm/gridfinity_wasm.js';
 import type { BadAppleClip, Bin, BinParameters } from '../types';
@@ -61,6 +62,16 @@ export function initKernel(source?: string | BufferSource): Promise<GeometryKern
  */
 export function generateGeometry(_kernel: GeometryKernel, bins: BinParameters[]): Bin[] {
   return generate_geometry(bins) as Bin[];
+}
+
+/**
+ * Builds every piece's solid again and returns all of them as one Parasolid
+ * XT transmit file: an analytic B-rep, one body per printable piece, in
+ * `toPrintableObjects` order. Nothing is tessellated on this path — the file
+ * carries the exact surfaces and curves the kernel built.
+ */
+export function exportParasolid(_kernel: GeometryKernel, bins: BinParameters[]): string {
+  return export_parasolid(bins);
 }
 
 export function badAppleClip(_kernel: GeometryKernel): BadAppleClip {

@@ -50,7 +50,7 @@ export default function App() {
             onChange={(value) => setAppMode(value as AppMode)}
             data={MODES}
           />
-          <ExportMenu bins={bins} generating={generating} />
+          <ExportMenu design={design} bins={bins} generating={generating} />
         </Group>
       </AppShell.Header>
       <AppShell.Navbar className="app-panel">

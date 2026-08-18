@@ -15,9 +15,9 @@ React 19 + Vite 6 + TypeScript app generating printable Gridfinity STLs. "GUI" i
 ## Structure
 
 - `src/main.tsx` mounts; `src/App.tsx` = Mantine AppShell; `src/store.ts` = Zustand state + design commands; `src/theme.ts` = Mantine defaults.
-- `src/lib/`: `types.ts` contracts, `gridfinitySpec.ts` normative dimensions, `coordinates.ts` editor→generation transforms, `binParameters.ts` per-bin worker input, `geometryCache.ts` triangle cache, `preview.ts` viewer layout, `edges.ts`, `cuts.ts` cut planning, `printers.ts` fit, `geometry/`, `export/printableObjects.ts` splitting+naming, `export/stl.ts`.
+- `src/lib/`: `types.ts` contracts, `gridfinitySpec.ts` normative dimensions, `coordinates.ts` editor→generation transforms, `binParameters.ts` per-bin worker input, `geometryCache.ts` triangle cache, `preview.ts` viewer layout, `edges.ts`, `cuts.ts` cut planning, `printers.ts` fit, `geometry/`, `export/printableObjects.ts` splitting+naming, `export/stl.ts`, `export/parasolid.ts` XT worker round trip + download.
 - `src/lib/project/`: the drawer-fitting Projects feature — `rects.ts` rectilinear geometry, `drawer.ts` drawer→grid+packing area, `pack.ts` the optimizer, `walls.ts` placements→dividers, `layout.ts` the drawer bin, `defaults.ts`, `storage.ts` localStorage.
-- Geometry runs in `src/workers/geometry.worker.ts` via `src/hooks/useBinGeometry.ts`; layout optimization in `src/workers/pack.worker.ts` via `src/hooks/usePackLayout.ts`.
+- Geometry runs in `src/workers/geometry.worker.ts` via `src/hooks/useBinGeometry.ts`; layout optimization in `src/workers/pack.worker.ts` via `src/hooks/usePackLayout.ts`; Parasolid export in a short-lived `src/workers/export.worker.ts`, spawned per download by `src/lib/export/parasolid.ts` — deliberately not the geometry worker, whose pool and leading-edge scheduling must not gain a second message type.
 - `src/components/`: left panel = Shape/Walls/Cuts editors; right panel = Dimensions/Features/Printer-fit/Display accordions; `viewer/ModelViewer.tsx` hosts the Rust renderer. `project/` holds the Project mode panels and canvases.
 - `rust/` is the geometry kernel and renderer workspace; see `rust/CLAUDE.md`.
 - Scripts in `scripts/`; Vitest beside source as `*.test.ts`; browser tests in `e2e/`.
@@ -82,7 +82,7 @@ A *project* is a drawer plus the objects to organize in it. The pipeline is draw
 - **`select` is not a branch — it evaluates every operand.** `select(a / b, fallback, b != 0)` still divides by zero, and the resulting NaN is free to reach the result through whatever arithmetic the backend lowers `select` to. Guard a division with `if`, or remove it. `no_select_guards_a_division_it_has_already_evaluated` fails the build on the pattern.
 - **The GI bounce reads the frame it just wrote.** That feedback loop is contractive in magnitude (`GI_BOUNCE_STRENGTH` < 1) but not in NaN: one non-finite pixel re-seeds itself every frame and spreads by the sample radius, so the history sample is rejected against `GI_BOUNCE_HISTORY_CEILING` first. Every comparison against a NaN is false, which is what makes that one test reject it. Anything else that samples the previous frame needs the same guard.
 
-Changing the geometry pipeline (`src/lib/geometry/`, `src/lib/project/`, `src/workers/geometry.worker.ts`, `src/workers/pack.worker.ts`, `src/hooks/useBinGeometry.ts`, `src/hooks/usePackLayout.ts`, `src/lib/{binParameters,coordinates,geometryCache,preview,cuts,gridfinitySpec,edges}.ts`, `src/lib/export/printableObjects.ts`) or the viewer (`src/components/viewer/ModelViewer.tsx`, `rust/crates/gridfinity-render/`, `rust/crates/gridfinity-wasm/src/viewer.rs`) requires updating this guide in the same change.
+Changing the geometry pipeline (`src/lib/geometry/`, `src/lib/project/`, `src/workers/geometry.worker.ts`, `src/workers/pack.worker.ts`, `src/workers/export.worker.ts`, `src/hooks/useBinGeometry.ts`, `src/hooks/usePackLayout.ts`, `src/lib/{binParameters,coordinates,geometryCache,preview,cuts,gridfinitySpec,edges}.ts`, `src/lib/export/printableObjects.ts`, `src/lib/export/parasolid.ts`) or the viewer (`src/components/viewer/ModelViewer.tsx`, `rust/crates/gridfinity-render/`, `rust/crates/gridfinity-wasm/src/viewer.rs`) requires updating this guide in the same change.
 
 ## Validation
 
@@ -135,7 +135,7 @@ Work in a dedicated feature branch in a new worktree off latest `origin/main`, n
 
 ## Known Limitations
 
-STL is the only wired export format.
+**Two wired export formats: STL (triangles, per part) and Parasolid X_T (analytic B-rep, one multi-body file).** The X_T button rebuilds each bin once via `build_bin_solid`/`carve_to_cells` — the same pairing `generate_geometry` uses — and hands every piece's `Solid` to the kernel's `to_xt_text`; nothing on that path is tessellated. The file is unitless metres (`mm / 1000`, `res_size` 1000, `res_linear` 1e-8); measured f32 deviation of kernel points from the emitted analytic forms is ~3e-9 m, inside the declared resolution. A kernel refusal (a cone face reaching its apex, a spindle-torus face crossing the axis, an internal void) surfaces as red text beside the buttons rather than a download. See `rust/CLAUDE.md`'s `xt/` section.
 
 **A sloped bin takes no inner walls.** Its cavity is not a z-prism, so the island a free-form wall is
 carved as cannot meet the tilted floor; the walls are dropped and the bin builds without them. See

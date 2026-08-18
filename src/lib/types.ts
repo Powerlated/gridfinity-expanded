@@ -184,6 +184,14 @@ export type GenerateGeometryResponse =
   | { ok: true; revision: number; bins: Bin[] }
   | { ok: false; revision: number; error: string };
 
+export interface ExportParasolidRequest {
+  bins: BinParameters[];
+}
+
+export type ExportParasolidResponse =
+  | { ok: true; xt: string }
+  | { ok: false; error: string };
+
 export interface BadAppleRequest {
   frame: number;
 }
