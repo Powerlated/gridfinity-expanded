@@ -141,6 +141,10 @@ STL is the only wired export format.
 carved as cannot meet the tilted floor; the walls are dropped and the bin builds without them. See
 `rust/CLAUDE.md`.
 
+**An opened compartment takes no inner wall.** A wall the user drew across a compartment that has a
+wall opening is dropped, full-height or partial-height; the bin builds without it. See
+`rust/CLAUDE.md`.
+
 **A sloped bin does take wall openings, and keeps its ramp.** It used to drop the slope for the whole
 piece the moment any edge was open — a flat part for a user who asked for a ramp, built cleanly
 enough that nothing but a fuzz profile saw it. The opened compartment's floor lies in the ramp now,

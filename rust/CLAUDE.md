@@ -350,6 +350,14 @@ The patch is a full `t × t` square subtracted at a piece's reentrant corner, ex
 
 **Measured against the profile table.** `fuzz_wall_openings`, `fuzz_tidy_inner_walls`, `fuzz_bin_shapes` stay green; `fuzz_inner_walls` (23/150), `fuzz_openings_and_inner_walls` (6/150), `fuzz_split_pieces` (1/120) unmoved. `fuzz_params_broad` **24/400 → 22/400** (two `OPENING_LOSES_FILLET`). `fuzz_stripped_polyominoes` retires its `edge 314 used fwd=2 bwd=2` manifold class outright — 4 defects → 3 at the same 15/150, that case now failing in an existing class. Its repro was a divider junction: the staircase was costing a bin its manifoldness.
 
+### An opened compartment takes no inner wall
+
+Both `carve_full_walls` and `band_partial_walls` skip a compartment the opening touched, so a wall the user drew across one silently disappears. It is a real feature loss and it is the `OPENING_LOSES_FILLET` class still on `fuzz_params_broad` (×2/400): a partial wall's *ramp* is the only blend a bin with `cavity_corner_radius: 0` asks for, and dropping the wall drops the request, so the closed build lands 1 and the opened build asks 0.
+
+Both guards are load-bearing, for the same reason and not the one the comment gave. **Full-height:** removing it panics `total_h hole without a containing face` — carving an opened compartment leaves a rim hole the containment pass cannot place. **Partial-height, crossing the boundary:** the band machinery walls the whole loop, and an opened loop's coincident runs have no wall to emit — that is exactly what `emit_open_cavity` leaves to the standing wall — so the stack walls the doorway shut.
+
+**Partial-height, wholly inside the compartment, was tried and does not pay.** That branch makes an ordinary `Island` with a `top`, which needs nothing from the bands, and `emit_open_cavity` was given the tower-to-`top` plus top cap it lacked. The lib gate stayed green and `fuzz_params_broad` went **7/400 → 9/400**: the class above went 2 → 3 and a new `Bin is not geometrically sound` appeared. Reverted. The repro that motivated it is a *crossing* wall anyway, so the branch it fixes is not the branch the fuzzer is failing on.
+
 ### An opened sloped bin keeps its ramp
 
 `author_outline` used to do `let slope = if openish { None } else { slope }` — any open edge anywhere on the piece and the whole bin's floor came out **flat**. It built, validated and tessellated cleanly, so nothing but `fuzz_params_broad`'s floor-fillet comparison ever saw it, as a bin going from no cavity floor at all to three unrounded ones (×5/400).
@@ -609,6 +617,7 @@ When adding geometry, keep the manifold invariant: any edge a new face introduce
 
 - **A sloped bin takes no inner walls.** Cavity is not a z-prism, so the island a free-form wall is carved as cannot meet the tilted floor; walls dropped, bin builds without them. Full-height and partial-height alike, and the partial-height guard is `band_partial_walls`'s first statement so *both* of its branches are covered.
 - **A sloped bin's cavity corners are square**, and its wall is clamped to `SLOPED_MIN_WALL`. `ring_on_plane` can express the rounding now (an arc on a tilted plane is an ellipse); re-rounding the sloped cavity on that is untried.
+- **An opened compartment takes no inner wall**, full-height or partial. Both guards are load-bearing; see above.
 - **A reentrant corner is rounded only when both its edges are walled.** See `corner_walled`.
 - **A wall opening onto an enclosed hole's boundary is ignored.** `layout::effective_walls` drops it.
 - **A piece enclosed on all four sides is refused**, not mangled.
