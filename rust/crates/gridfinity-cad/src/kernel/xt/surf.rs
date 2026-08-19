@@ -19,8 +19,8 @@
 //! would otherwise surface as a rejected file in someone's CAD system fails
 //! here, naming the surface.
 
-use crate::kernel::geom::{Curve, Surface, perp_unit, radial_frame};
-use crate::kernel::math::Vec3;
+use crate::kernel::geom::{Curve, Surface};
+use crate::kernel::math::{Dir, Vec3};
 use crate::kernel::xt::text::{self, Index, Writer};
 
 /// How far a point the kernel says is on a surface or curve may sit from the
@@ -49,34 +49,34 @@ pub struct GeomLinks {
 pub enum XtSurface {
     Plane {
         pvec: Vec3,
-        normal: Vec3,
-        x_axis: Vec3,
+        normal: Dir,
+        x_axis: Dir,
     },
     Cylinder {
         pvec: Vec3,
-        axis: Vec3,
+        axis: Dir,
         radius: f32,
-        x_axis: Vec3,
+        x_axis: Dir,
     },
     Cone {
         pvec: Vec3,
-        axis: Vec3,
+        axis: Dir,
         radius: f32,
         half_angle: f32,
-        x_axis: Vec3,
+        x_axis: Dir,
     },
     Sphere {
         centre: Vec3,
         radius: f32,
-        axis: Vec3,
-        x_axis: Vec3,
+        axis: Dir,
+        x_axis: Dir,
     },
     Torus {
         centre: Vec3,
-        axis: Vec3,
+        axis: Dir,
         major: f32,
         minor: f32,
-        x_axis: Vec3,
+        x_axis: Dir,
     },
 }
 
@@ -98,12 +98,11 @@ pub fn of_surface(surface: &Surface, samples: &[Vec3]) -> Result<XtSurface, Stri
         Surface::Plane {
             origin,
             normal,
-            u_dir,
-            ..
+            x_axis,
         } => XtSurface::Plane {
             pvec: origin,
-            normal: normal.normalize(),
-            x_axis: perp_unit(normal.normalize(), u_dir),
+            normal,
+            x_axis,
         },
         Surface::Cylinder {
             base,
@@ -114,9 +113,9 @@ pub fn of_surface(surface: &Surface, samples: &[Vec3]) -> Result<XtSurface, Stri
             assert!(radius > 0.0, "a cylinder's radius must be positive, got {radius}");
             XtSurface::Cylinder {
                 pvec: base,
-                axis: axis.normalize(),
+                axis,
                 radius,
-                x_axis: radial_frame(axis.normalize(), ref_dir).0,
+                x_axis: ref_dir,
             }
         }
         Surface::Cone {
@@ -124,7 +123,7 @@ pub fn of_surface(surface: &Surface, samples: &[Vec3]) -> Result<XtSurface, Stri
             axis,
             half_angle,
             ref_dir,
-        } => cone_of(apex, axis.normalize(), half_angle, ref_dir, samples)?,
+        } => cone_of(apex, axis, half_angle, ref_dir, samples)?,
         Surface::Sphere {
             center,
             axis,
@@ -135,8 +134,8 @@ pub fn of_surface(surface: &Surface, samples: &[Vec3]) -> Result<XtSurface, Stri
             XtSurface::Sphere {
                 centre: center,
                 radius,
-                axis: axis.normalize(),
-                x_axis: radial_frame(axis.normalize(), ref_dir).0,
+                axis,
+                x_axis: ref_dir,
             }
         }
         Surface::Torus {
@@ -145,7 +144,7 @@ pub fn of_surface(surface: &Surface, samples: &[Vec3]) -> Result<XtSurface, Stri
             major_r,
             minor_r,
             ref_dir,
-        } => torus_of(center, axis.normalize(), major_r, minor_r, ref_dir, samples)?,
+        } => torus_of(center, axis, major_r, minor_r, ref_dir, samples)?,
     };
     for &p in samples {
         let d = out.distance(p);
@@ -169,16 +168,16 @@ pub fn of_surface(surface: &Surface, samples: &[Vec3]) -> Result<XtSurface, Stri
 /// has no such point and is refused.
 fn cone_of(
     apex: Vec3,
-    axis: Vec3,
+    axis: Dir,
     half_angle: f32,
-    ref_dir: Vec3,
+    ref_dir: Dir,
     samples: &[Vec3],
 ) -> Result<XtSurface, String> {
     assert!(
         half_angle > 0.0 && half_angle < std::f32::consts::FRAC_PI_2,
         "a cone's half angle lies strictly between zero and a quarter turn, got {half_angle}"
     );
-    let along: Vec<f32> = samples.iter().map(|&p| (p - apex).dot(axis)).collect();
+    let along: Vec<f32> = samples.iter().map(|&p| (p - apex).dot(*axis)).collect();
     let (lo, hi) = along.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(l, h), &v| {
         (l.min(v), h.max(v))
     });
@@ -190,11 +189,11 @@ fn cone_of(
     let side = if hi > 0.0 { 1.0 } else { -1.0 };
     let mid = (lo + hi) * 0.5;
     Ok(XtSurface::Cone {
-        pvec: apex + axis * mid,
-        axis: -side * axis,
+        pvec: apex + *axis * mid,
+        axis: if side > 0.0 { -axis } else { axis },
         radius: mid.abs() * half_angle.tan(),
         half_angle,
-        x_axis: perp_unit(axis, ref_dir),
+        x_axis: ref_dir,
     })
 }
 
@@ -208,10 +207,10 @@ fn cone_of(
 /// vanishes, and is refused.
 fn torus_of(
     centre: Vec3,
-    axis: Vec3,
+    axis: Dir,
     major: f32,
     minor: f32,
-    ref_dir: Vec3,
+    ref_dir: Dir,
     samples: &[Vec3],
 ) -> Result<XtSurface, String> {
     assert!(
@@ -220,8 +219,8 @@ fn torus_of(
     );
     let sheet = |p: Vec3| -> f32 {
         let d = p - centre;
-        let along = d.dot(axis);
-        let perp = (d - axis * along).length();
+        let along = d.dot(*axis);
+        let perp = (d - *axis * along).length();
         let near = ((perp - major).powi(2) + along * along).sqrt() - minor;
         let far = ((perp + major).powi(2) + along * along).sqrt() - minor;
         if near.abs() <= far.abs() { 1.0 } else { -1.0 }
@@ -238,7 +237,7 @@ fn torus_of(
         axis,
         major: first * major,
         minor,
-        x_axis: radial_frame(axis, ref_dir).0,
+        x_axis: ref_dir,
     })
 }
 
@@ -269,10 +268,10 @@ impl XtSurface {
     /// -- the implicit form of the very parameters that get written.
     pub fn distance(&self, p: Vec3) -> f32 {
         match *self {
-            XtSurface::Plane { pvec, normal, .. } => (p - pvec).dot(normal),
+            XtSurface::Plane { pvec, normal, .. } => (p - pvec).dot(*normal),
             XtSurface::Cylinder {
                 pvec, axis, radius, ..
-            } => radial(p - pvec, axis).1 - radius,
+            } => radial(p - pvec, *axis).1 - radius,
             XtSurface::Cone {
                 pvec,
                 axis,
@@ -282,8 +281,8 @@ impl XtSurface {
             } => {
                 let (sin_half, cos_half) = half_angle.sin_cos();
                 let d = p - pvec;
-                let (_, perp) = radial(d, axis);
-                perp * cos_half + d.dot(axis) * sin_half - radius * cos_half
+                let (_, perp) = radial(d, *axis);
+                perp * cos_half + d.dot(*axis) * sin_half - radius * cos_half
             }
             XtSurface::Sphere { centre, radius, .. } => (p - centre).length() - radius,
             XtSurface::Torus {
@@ -294,8 +293,8 @@ impl XtSurface {
                 ..
             } => {
                 let d = p - centre;
-                let along = d.dot(axis);
-                let (_, perp) = radial(d, axis);
+                let along = d.dot(*axis);
+                let (_, perp) = radial(d, *axis);
                 ((perp - major).powi(2) + along * along).sqrt() - minor
             }
         }
@@ -322,8 +321,8 @@ impl XtSurface {
     /// when they do not.
     pub fn natural_normal(&self, p: Vec3) -> Vec3 {
         match *self {
-            XtSurface::Plane { normal, .. } => normal,
-            XtSurface::Cylinder { pvec, axis, .. } => radial(p - pvec, axis).0,
+            XtSurface::Plane { normal, .. } => *normal,
+            XtSurface::Cylinder { pvec, axis, .. } => radial(p - pvec, *axis).0,
             XtSurface::Cone {
                 pvec,
                 axis,
@@ -331,7 +330,7 @@ impl XtSurface {
                 ..
             } => {
                 let (sin_half, cos_half) = half_angle.sin_cos();
-                -(cos_half * radial(p - pvec, axis).0 + sin_half * axis).normalize()
+                -(cos_half * radial(p - pvec, *axis).0 + sin_half * *axis).normalize()
             }
             XtSurface::Sphere { centre, .. } => (p - centre).normalize(),
             XtSurface::Torus {
@@ -340,7 +339,7 @@ impl XtSurface {
                 major,
                 ..
             } => {
-                let spine = centre + radial(p - centre, axis).0 * major;
+                let spine = centre + radial(p - centre, *axis).0 * major;
                 (p - spine).normalize()
             }
         }
@@ -372,7 +371,7 @@ impl XtSurface {
             } => {
                 w.pos(pvec);
                 w.dir(normal);
-                w.dir_perp(x_axis, normal);
+                w.dir(x_axis);
             }
             XtSurface::Cylinder {
                 pvec,
@@ -383,7 +382,7 @@ impl XtSurface {
                 w.pos(pvec);
                 w.dir(axis);
                 w.dist(radius);
-                w.dir_perp(x_axis, axis);
+                w.dir(x_axis);
             }
             XtSurface::Cone {
                 pvec,
@@ -403,7 +402,7 @@ impl XtSurface {
                 w.dist(radius);
                 w.real(sin_half);
                 w.real(cos_half);
-                w.dir_perp(x_axis, axis);
+                w.dir(x_axis);
             }
             XtSurface::Sphere {
                 centre,
@@ -414,7 +413,7 @@ impl XtSurface {
                 w.pos(centre);
                 w.dist(radius);
                 w.dir(axis);
-                w.dir_perp(x_axis, axis);
+                w.dir(x_axis);
             }
             XtSurface::Torus {
                 centre,
@@ -427,7 +426,7 @@ impl XtSurface {
                 w.dir(axis);
                 w.dist(major);
                 w.dist(minor);
-                w.dir_perp(x_axis, axis);
+                w.dir(x_axis);
             }
         }
     }
@@ -451,18 +450,18 @@ pub fn kernel_normal(surface: &Surface, p: Vec3) -> Vec3 {
 pub enum XtCurve {
     Line {
         pvec: Vec3,
-        direction: Vec3,
+        direction: Dir,
     },
     Circle {
         centre: Vec3,
-        normal: Vec3,
-        x_axis: Vec3,
+        normal: Dir,
+        x_axis: Dir,
         radius: f32,
     },
     Ellipse {
         centre: Vec3,
-        normal: Vec3,
-        x_axis: Vec3,
+        normal: Dir,
+        x_axis: Dir,
         major: f32,
         minor: f32,
     },
@@ -474,36 +473,27 @@ pub enum XtCurve {
 /// intersection of the two surfaces it lies on instead.
 pub fn of_curve(curve: &Curve) -> Option<XtCurve> {
     match *curve {
-        Curve::Line { p0, dir } => {
-            assert!(
-                dir.length() > 1e-6,
-                "a line curve carries the direction it runs in, got {dir:?} at {p0:?}"
-            );
-            Some(XtCurve::Line {
-                pvec: p0,
-                direction: dir.normalize(),
-            })
-        }
+        Curve::Line { p0, dir } => Some(XtCurve::Line {
+            pvec: p0,
+            direction: dir,
+        }),
         Curve::Circle {
             center,
             axis,
             radius,
             ref_dir,
-        } => {
-            let axis = axis.normalize();
-            Some(XtCurve::Circle {
-                centre: center,
-                normal: axis,
-                x_axis: radial_frame(axis, ref_dir).0,
-                radius,
-            })
-        }
+        } => Some(XtCurve::Circle {
+            centre: center,
+            normal: axis,
+            x_axis: ref_dir,
+            radius,
+        }),
         Curve::Ellipse { center, a, b } => {
             let (x_axis, major, minor, normal) = principal_axes(a, b);
             Some(XtCurve::Ellipse {
                 centre: center,
-                normal,
-                x_axis,
+                normal: Dir::new(normal),
+                x_axis: Dir::new(x_axis).perp_to(Dir::new(normal)),
                 major,
                 minor,
             })
@@ -561,7 +551,7 @@ impl XtCurve {
         match *self {
             XtCurve::Line { pvec, direction } => {
                 let d = p - pvec;
-                (d - direction * d.dot(direction)).length()
+                (d - *direction * d.dot(*direction)).length()
             }
             XtCurve::Circle {
                 centre,
@@ -570,8 +560,8 @@ impl XtCurve {
                 ..
             } => {
                 let d = p - centre;
-                let along = d.dot(normal);
-                ((d - normal * along).length() - radius).hypot(along)
+                let along = d.dot(*normal);
+                ((d - *normal * along).length() - radius).hypot(along)
             }
             XtCurve::Ellipse {
                 centre,
@@ -581,10 +571,10 @@ impl XtCurve {
                 minor,
             } => {
                 let d = p - centre;
-                let y_axis = normal.cross(x_axis);
-                let (u, v) = (d.dot(x_axis) / major, d.dot(y_axis) / minor);
+                let y_axis = normal.cross(*x_axis);
+                let (u, v) = (d.dot(*x_axis) / major, d.dot(y_axis) / minor);
                 let scale = u.hypot(v).max(1e-9);
-                let on = centre + x_axis * (major * u / scale) + y_axis * (minor * v / scale);
+                let on = centre + *x_axis * (major * u / scale) + y_axis * (minor * v / scale);
                 (p - on).length()
             }
         }
@@ -604,7 +594,7 @@ impl XtCurve {
     /// increases in, which the emitted `sense` is measured against.
     pub fn tangent(&self, p: Vec3) -> Vec3 {
         match *self {
-            XtCurve::Line { direction, .. } => direction,
+            XtCurve::Line { direction, .. } => *direction,
             XtCurve::Circle { centre, normal, .. } => normal.cross(p - centre).normalize(),
             XtCurve::Ellipse {
                 centre,
@@ -614,9 +604,9 @@ impl XtCurve {
                 minor,
             } => {
                 let d = p - centre;
-                let y_axis = normal.cross(x_axis);
-                let (cos_t, sin_t) = (d.dot(x_axis) / major, d.dot(y_axis) / minor);
-                (y_axis * (minor * cos_t) - x_axis * (major * sin_t)).normalize()
+                let y_axis = normal.cross(*x_axis);
+                let (cos_t, sin_t) = (d.dot(*x_axis) / major, d.dot(y_axis) / minor);
+                (y_axis * (minor * cos_t) - *x_axis * (major * sin_t)).normalize()
             }
         }
     }
@@ -652,7 +642,7 @@ impl XtCurve {
             } => {
                 w.pos(centre);
                 w.dir(normal);
-                w.dir_perp(x_axis, normal);
+                w.dir(x_axis);
                 w.dist(radius);
             }
             XtCurve::Ellipse {
@@ -664,7 +654,7 @@ impl XtCurve {
             } => {
                 w.pos(centre);
                 w.dir(normal);
-                w.dir_perp(x_axis, normal);
+                w.dir(x_axis);
                 w.dist(major);
                 w.dist(minor);
             }

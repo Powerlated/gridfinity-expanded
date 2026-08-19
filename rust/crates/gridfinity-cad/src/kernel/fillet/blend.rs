@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::kernel::curvedge::{CurvEdge, as_plane};
 use crate::kernel::geom::{Curve, Surface};
-use crate::kernel::math::{Vec3, wrap_pi};
+use crate::kernel::math::{Dir, Vec3, wrap_pi};
 use crate::kernel::topo::{Edge, EdgeFaces, EdgeId, Solid};
 
 use super::corner::Corner;
@@ -197,15 +197,10 @@ fn build_cyl_blend(
         t1: (tb_p1 - tb_p0).length(),
     };
 
-    let ca0 = connect_arc(cv0, dir, ta_p0, tb_p0)?;
-    let ca1 = connect_arc(cv1, dir, ta_p1, tb_p1)?;
+    let ca0 = connect_arc(cv0, *dir, ta_p0, tb_p0)?;
+    let ca1 = connect_arc(cv1, *dir, ta_p1, tb_p1)?;
 
-    let surface = Surface::Cylinder {
-        base: cv0,
-        axis: dir,
-        radius: r,
-        ref_dir,
-    };
+    let surface = Surface::cylinder(cv0, *dir, r, ref_dir);
     let sense = surface.normal(surface.project(ta_p0)).dot(na0) > 0.0;
 
     Ok(Fillet {
@@ -233,8 +228,8 @@ fn build_cyl_blend(
 /// then `p0` and `p1` coincide and cannot tell 2pi from 0.
 fn circle_span(
     center: Vec3,
-    axis: Vec3,
-    ref_dir: Vec3,
+    axis: Dir,
+    ref_dir: Dir,
     p0: Vec3,
     p1: Vec3,
     src: (f32, f32),
@@ -309,9 +304,9 @@ fn build_torus_blend(
     };
     let _ = (edge_center, edge_radius);
 
-    let ta_center = torus_center + torus_axis * (ta_p0 - torus_center).dot(torus_axis);
+    let ta_center = torus_center + *torus_axis * (ta_p0 - torus_center).dot(*torus_axis);
     let ta_r = (ta_p0 - ta_center).length();
-    let tb_center = torus_center + torus_axis * (tb_p0 - torus_center).dot(torus_axis);
+    let tb_center = torus_center + *torus_axis * (tb_p0 - torus_center).dot(*torus_axis);
     let tb_r = (tb_p0 - tb_center).length();
     let (ta_t0, ta_t1) = circle_span(ta_center, torus_axis, ref_dir, ta_p0, ta_p1, (a0, a1));
     let (tb_t0, tb_t1) = circle_span(tb_center, torus_axis, ref_dir, tb_p0, tb_p1, (a0, a1));
@@ -339,7 +334,7 @@ fn build_torus_blend(
     let p0 = ed.curve.point(a0);
     let tan_at = |p: Vec3| {
         let v = p - torus_center;
-        let perp = v - torus_axis * v.dot(torus_axis);
+        let perp = v - *torus_axis * v.dot(*torus_axis);
         torus_axis.cross(perp.normalize_or(Vec3::X))
     };
     let ca0 = connect_arc(cv0, tan_at(p0), ta_p0, tb_p0)?;
@@ -406,12 +401,7 @@ fn connect_arc(center: Vec3, along: Vec3, from_pt: Vec3, to_pt: Vec3) -> Result<
         a
     };
     Ok(CurvEdge {
-        curve: Curve::Circle {
-            center,
-            axis,
-            radius: (from_pt - center).length(),
-            ref_dir,
-        },
+        curve: Curve::circle(center, axis, (from_pt - center).length(), ref_dir),
         t0: 0.0,
         t1: sweep,
     })
@@ -440,18 +430,13 @@ mod tests {
     #[test]
     fn circle_span_lands_on_its_own_endpoints_not_the_source_edges() {
         let center = Vec3::new(80.0, 4.0, 23.7);
-        let axis = Vec3::Z;
-        let ref_dir = Vec3::X;
+        let axis = Dir::new(Vec3::Z);
+        let ref_dir = Dir::new(Vec3::X);
         let p0 = Vec3::new(80.0, 5.45, 23.7);
         let p1 = Vec3::new(78.55, 4.0, 23.7);
         let src = (0.0, -std::f32::consts::FRAC_PI_2);
         let (t0, t1) = circle_span(center, axis, ref_dir, p0, p1, src);
-        let c = Curve::Circle {
-            center,
-            axis,
-            radius: 1.45,
-            ref_dir,
-        };
+        let c = Curve::circle(center, *axis, 1.45, *ref_dir);
         assert!(approx(c.point(t0), p0), "span start {:?}", c.point(t0));
         assert!(approx(c.point(t1), p1), "span end {:?}", c.point(t1));
     }
@@ -461,7 +446,7 @@ mod tests {
         let center = Vec3::ZERO;
         let p = Vec3::new(3.0, 0.0, 0.0);
         let src = (0.0, std::f32::consts::TAU);
-        let (t0, t1) = circle_span(center, Vec3::Z, Vec3::X, p, p, src);
+        let (t0, t1) = circle_span(center, Dir::new(Vec3::Z), Dir::new(Vec3::X), p, p, src);
         assert!(
             (t1 - t0 - std::f32::consts::TAU).abs() < 1e-4,
             "sweep {}",

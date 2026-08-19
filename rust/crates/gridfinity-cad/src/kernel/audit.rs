@@ -778,12 +778,12 @@ fn face_outward_normal(solid: &Solid, fi: usize, p: Vec3) -> Vec3 {
 
 fn dist_to_surface(p: Vec3, s: Surface) -> f32 {
     match s {
-        Surface::Plane { origin, normal, .. } => (p - origin).dot(normal).abs(),
+        Surface::Plane { origin, normal, .. } => (p - origin).dot(*normal).abs(),
         Surface::Cylinder {
             base, axis, radius, ..
         } => {
             let rel = p - base;
-            let radial = rel - axis * rel.dot(axis);
+            let radial = rel - *axis * rel.dot(*axis);
             (radial.length() - radius).abs()
         }
         Surface::Cone {
@@ -793,8 +793,8 @@ fn dist_to_surface(p: Vec3, s: Surface) -> f32 {
             ..
         } => {
             let rel = p - apex;
-            let along = rel.dot(axis);
-            let perp = (rel - axis * along).length();
+            let along = rel.dot(*axis);
+            let perp = (rel - *axis * along).length();
             let r = rel.length();
             if r < 1e-9 {
                 0.0

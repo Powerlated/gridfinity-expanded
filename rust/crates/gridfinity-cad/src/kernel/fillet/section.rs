@@ -39,7 +39,7 @@ pub(super) fn runout_on(
                 (radius - r).abs() <= END_AGREE,
                 "blend runout: the blend cylinder's radius {radius} is not the blend radius {r}"
             );
-            runout_cyl(cv, axis, r, ta_p, tb_p, plane)
+            runout_cyl(cv, *axis, r, ta_p, tb_p, plane)
         }
         Surface::Torus {
             center,
@@ -52,7 +52,7 @@ pub(super) fn runout_on(
                 (minor_r - r).abs() <= END_AGREE,
                 "blend runout: the blend torus's minor radius {minor_r} is not the blend radius {r}"
             );
-            runout_torus(center, axis, major_r, r, cv, ta_p, tb_p, plane, away)
+            runout_torus(center, *axis, major_r, r, cv, ta_p, tb_p, plane, away)
         }
         _ => Err(format!(
             "blend runout: no section curve for a {surface:?} blend"

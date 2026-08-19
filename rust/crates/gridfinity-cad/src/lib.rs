@@ -2288,12 +2288,11 @@ mod audit_tests {
         let front = Loop::new(vec![(e01, false), (e51, false), (e45, true), (e04, false)]);
         b.face(Surface::plane_z(0.0), true, bottom, vec![]);
         b.face(
-            Surface::Plane {
-                origin: Vec3::new(0.0, 0.0, 0.0),
-                normal: Vec3::new(0.0, -1.0, 0.0),
-                u_dir: Vec3::new(1.0, 0.0, 0.0),
-                v_dir: Vec3::new(0.0, 0.0, 1.0),
-            },
+            Surface::plane_with_x(
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+            ),
             true,
             front,
             vec![],

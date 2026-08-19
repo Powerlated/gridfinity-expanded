@@ -1,138 +1,173 @@
-use crate::kernel::math::Vec3;
+//! The kernel's analytic surfaces and curves, and the frame arithmetic they
+//! share.
+//!
+//! Every surface and curve here is exact: a closed-form `point`, `normal` and
+//! `project` over its own parameters, with no sampling and no approximation
+//! anywhere below the tessellator. The set is deliberately the set a Parasolid
+//! transmit file can name -- plane, cylinder, cone, sphere, torus; line, circle,
+//! ellipse -- plus `TorusSection`, the one curve that has no analytic node and
+//! is written as an intersection instead.
+//!
+//! **Directions are `Dir`, not `Vec3`**: unit in `f64`, established once at
+//! construction. A rotational surface additionally stores its `ref_dir` already
+//! perpendicular to its axis, which is what makes `radial_frame` a read rather
+//! than a solve and what lets a writer emit the reference direction verbatim.
+
+use crate::kernel::math::{Dir, Vec3};
 use std::f32::consts::PI;
 
 pub type Uv = (f32, f32);
 
-pub fn perp_unit(axis: Vec3, hint: Vec3) -> Vec3 {
-    let d = hint - axis * hint.dot(axis);
+/// The unit direction perpendicular to `axis` that lies nearest `hint`, or an
+/// arbitrary perpendicular where `hint` is parallel to the axis and names none.
+pub fn perp_unit(axis: Dir, hint: Vec3) -> Dir {
+    let a = axis.vec();
+    let d = hint - a * hint.dot(a);
     if d.length_squared() < 1e-12 {
-        let a = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
-        (a - axis * a.dot(axis)).normalize()
+        let fallback = if a.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+        Dir::new(fallback - a * fallback.dot(a)).perp_to(axis)
     } else {
-        d.normalize()
+        Dir::new(d).perp_to(axis)
     }
 }
 
-pub fn radial_frame(axis: Vec3, ref_dir: Vec3) -> (Vec3, Vec3) {
-    let d0 = perp_unit(axis, ref_dir);
-    let d1 = axis.cross(d0);
-    (d0, d1)
+/// The two radial basis vectors of a rotational surface or curve about `axis`,
+/// with `u = 0` along `ref_dir`.
+///
+/// `ref_dir` is already perpendicular to `axis` -- every constructor here stores
+/// it that way -- so this is a read and a cross product, not an
+/// orthogonalisation. The pair is returned in `f32` because it feeds the
+/// kernel's own arithmetic; a caller needing the exact reference direction takes
+/// it off the surface.
+pub fn radial_frame(axis: Dir, ref_dir: Dir) -> (Vec3, Vec3) {
+    (ref_dir.vec(), axis.cross_exact(ref_dir).vec())
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum Surface {
     Plane {
         origin: Vec3,
-        normal: Vec3,
-        u_dir: Vec3,
-        v_dir: Vec3,
+        normal: Dir,
+        x_axis: Dir,
     },
     Cylinder {
         base: Vec3,
-        axis: Vec3,
+        axis: Dir,
         radius: f32,
-        ref_dir: Vec3,
+        ref_dir: Dir,
     },
     Cone {
         apex: Vec3,
-        axis: Vec3,
+        axis: Dir,
         half_angle: f32,
-        ref_dir: Vec3,
+        ref_dir: Dir,
     },
     Torus {
         center: Vec3,
-        axis: Vec3,
+        axis: Dir,
         major_r: f32,
         minor_r: f32,
-        ref_dir: Vec3,
+        ref_dir: Dir,
     },
     Sphere {
         center: Vec3,
-        axis: Vec3,
+        axis: Dir,
         radius: f32,
-        ref_dir: Vec3,
+        ref_dir: Dir,
     },
 }
 
 impl Surface {
+    /// The plane through `origin` with the given normal, taking an arbitrary
+    /// reference direction in it.
     pub fn plane(origin: Vec3, normal: Vec3) -> Surface {
-        // `normalize` on a zero or non-finite vector yields NaN, and a plane
-        // carrying a NaN normal is accepted everywhere: `sin.max(1e-9)` hides
-        // it in the blend, and it surfaces much later as a non-finite vertex in
-        // the builder. Refuse it where it is made, so the caller that computed
-        // the degenerate direction is the one named.
-        assert!(
-            normal.is_finite() && normal.length_squared() > 1e-24,
-            "plane at {origin:?} has a degenerate normal {normal:?}"
-        );
-        let normal = normal.normalize();
-        let a = if normal.z.abs() < 0.9 {
-            Vec3::Z
-        } else {
-            Vec3::X
-        };
-        let u_dir = a.cross(normal).normalize();
-        let v_dir = normal.cross(u_dir);
+        let normal = Dir::new(normal);
+        let hint = if normal.vec().z.abs() < 0.9 { Vec3::Z } else { Vec3::X };
         Surface::Plane {
             origin,
             normal,
-            u_dir,
-            v_dir,
+            x_axis: perp_unit(normal, hint.cross(normal.vec())),
+        }
+    }
+
+    /// The plane through `origin` whose in-plane `u` runs along `x_hint`,
+    /// for a caller whose 2D work is stated in a frame it chose.
+    pub fn plane_with_x(origin: Vec3, normal: Vec3, x_hint: Vec3) -> Surface {
+        let normal = Dir::new(normal);
+        Surface::Plane {
+            origin,
+            normal,
+            x_axis: perp_unit(normal, x_hint),
         }
     }
 
     pub fn plane_z(z: f32) -> Surface {
         Surface::Plane {
             origin: Vec3::new(0.0, 0.0, z),
-            normal: Vec3::Z,
-            u_dir: Vec3::X,
-            v_dir: Vec3::Y,
+            normal: Dir::from_f64([0.0, 0.0, 1.0]),
+            x_axis: Dir::from_f64([1.0, 0.0, 0.0]),
         }
+    }
+
+    /// The in-plane basis a plane's `(u, v)` are measured along, `v` being the
+    /// normal crossed into `u`. Not stored: one cross product of two exact
+    /// directions, so keeping it would be a second copy of the same fact.
+    pub fn plane_axes(&self) -> (Vec3, Vec3) {
+        let Surface::Plane { normal, x_axis, .. } = *self else {
+            panic!("only a plane has an in-plane basis, got {self:?}");
+        };
+        (x_axis.vec(), normal.cross_exact(x_axis).vec())
     }
 
     pub fn cylinder_z(base: Vec3, radius: f32) -> Surface {
-        Surface::Cylinder {
-            base,
-            axis: Vec3::Z,
-            radius,
-            ref_dir: Vec3::X,
-        }
+        Surface::cylinder(base, Vec3::Z, radius, Vec3::X)
     }
 
     pub fn cylinder(base: Vec3, axis: Vec3, radius: f32, ref_dir: Vec3) -> Surface {
+        let axis = Dir::new(axis);
         Surface::Cylinder {
             base,
             axis,
             radius,
-            ref_dir,
+            ref_dir: perp_unit(axis, ref_dir),
         }
     }
 
     pub fn cone_z(apex: Vec3, half_angle: f32) -> Surface {
+        Surface::cone(apex, Vec3::Z, half_angle, Vec3::X)
+    }
+
+    pub fn cone(apex: Vec3, axis: Vec3, half_angle: f32, ref_dir: Vec3) -> Surface {
+        let axis = Dir::new(axis);
         Surface::Cone {
             apex,
-            axis: Vec3::Z,
+            axis,
             half_angle,
-            ref_dir: Vec3::X,
+            ref_dir: perp_unit(axis, ref_dir),
         }
     }
 
     pub fn torus_z(center: Vec3, major_r: f32, minor_r: f32) -> Surface {
+        Surface::torus(center, Vec3::Z, major_r, minor_r, Vec3::X)
+    }
+
+    pub fn torus(center: Vec3, axis: Vec3, major_r: f32, minor_r: f32, ref_dir: Vec3) -> Surface {
+        let axis = Dir::new(axis);
         Surface::Torus {
             center,
-            axis: Vec3::Z,
+            axis,
             major_r,
             minor_r,
-            ref_dir: Vec3::X,
+            ref_dir: perp_unit(axis, ref_dir),
         }
     }
 
     pub fn sphere(center: Vec3, radius: f32) -> Surface {
         Surface::Sphere {
             center,
-            axis: Vec3::Z,
+            axis: Dir::from_f64([0.0, 0.0, 1.0]),
             radius,
-            ref_dir: Vec3::X,
+            ref_dir: Dir::from_f64([1.0, 0.0, 0.0]),
         }
     }
 
@@ -141,18 +176,13 @@ impl Surface {
         u.cos() * d0 + u.sin() * d1
     }
 
-    fn point_r(&self, radial: Vec3, uv: Uv) -> Vec3 {
+    fn point_r(&self, radial: Vec3, uv: Uv, basis: (Vec3, Vec3)) -> Vec3 {
         let (u, v) = uv;
         match *self {
-            Surface::Plane {
-                origin,
-                u_dir,
-                v_dir,
-                ..
-            } => origin + u * u_dir + v * v_dir,
+            Surface::Plane { origin, .. } => origin + u * basis.0 + v * basis.1,
             Surface::Cylinder {
                 base, axis, radius, ..
-            } => base + radius * radial + v * axis,
+            } => base + radius * radial + v * axis.vec(),
             Surface::Cone {
                 apex,
                 axis,
@@ -160,7 +190,7 @@ impl Surface {
                 ..
             } => {
                 let r = v.abs() * half_angle.tan();
-                apex + v * axis + r * radial
+                apex + v * axis.vec() + r * radial
             }
             Surface::Torus {
                 center,
@@ -168,28 +198,34 @@ impl Surface {
                 major_r,
                 minor_r,
                 ..
-            } => center + (major_r + minor_r * v.cos()) * radial + minor_r * v.sin() * axis,
+            } => {
+                center + (major_r + minor_r * v.cos()) * radial + minor_r * v.sin() * axis.vec()
+            }
             Surface::Sphere {
                 center,
                 axis,
                 radius,
                 ..
-            } => center + radius * (v.sin() * radial + v.cos() * axis),
+            } => center + radius * (v.sin() * radial + v.cos() * axis.vec()),
         }
     }
 
     fn normal_r(&self, radial: Vec3, v: f32) -> Vec3 {
         match *self {
-            Surface::Plane { normal, .. } => normal,
+            Surface::Plane { normal, .. } => normal.vec(),
             Surface::Cylinder { .. } => radial.normalize(),
             Surface::Cone {
                 axis, half_angle, ..
             } => {
                 let sgn = if v >= 0.0 { -1.0 } else { 1.0 };
-                (half_angle.cos() * radial + sgn * half_angle.sin() * axis).normalize()
+                (half_angle.cos() * radial + sgn * half_angle.sin() * axis.vec()).normalize()
             }
-            Surface::Torus { axis, .. } => (v.cos() * radial + v.sin() * axis).normalize(),
-            Surface::Sphere { axis, .. } => (v.sin() * radial + v.cos() * axis).normalize(),
+            Surface::Torus { axis, .. } => {
+                (v.cos() * radial + v.sin() * axis.vec()).normalize()
+            }
+            Surface::Sphere { axis, .. } => {
+                (v.sin() * radial + v.cos() * axis.vec()).normalize()
+            }
         }
     }
 
@@ -202,7 +238,7 @@ impl Surface {
     }
 
     fn point_f(&self, uv: Uv, d0: Vec3, d1: Vec3) -> Vec3 {
-        self.point_r(Surface::radial_at(uv.0, d0, d1), uv)
+        self.point_r(Surface::radial_at(uv.0, d0, d1), uv, (d0, d1))
     }
 
     fn normal_f(&self, uv: Uv, d0: Vec3, d1: Vec3) -> Vec3 {
@@ -211,11 +247,11 @@ impl Surface {
 
     pub fn signed_distance(&self, p: Vec3) -> f32 {
         match *self {
-            Surface::Plane { origin, normal, .. } => (p - origin).dot(normal),
+            Surface::Plane { origin, normal, .. } => (p - origin).dot(normal.vec()),
             Surface::Cylinder {
                 base, axis, radius, ..
             } => {
-                let d = p - base;
+                let (d, axis) = (p - base, axis.vec());
                 (d - axis * d.dot(axis)).length() - radius
             }
             Surface::Sphere { center, radius, .. } => (p - center).length() - radius,
@@ -225,7 +261,7 @@ impl Surface {
                 half_angle,
                 ..
             } => {
-                let d = p - apex;
+                let (d, axis) = (p - apex, axis.vec());
                 let along = d.dot(axis);
                 let perp = (d - axis * along).length();
                 perp * half_angle.cos() - along.abs() * half_angle.sin()
@@ -237,7 +273,7 @@ impl Surface {
                 minor_r,
                 ..
             } => {
-                let d = p - center;
+                let (d, axis) = (p - center, axis.vec());
                 let along = d.dot(axis);
                 let perp = (d - axis * along).length();
                 let near = ((perp - major_r).powi(2) + along * along).sqrt() - minor_r;
@@ -252,9 +288,9 @@ impl Surface {
 
     pub fn gradient(&self, p: Vec3) -> Vec3 {
         match *self {
-            Surface::Plane { normal, .. } => normal,
+            Surface::Plane { normal, .. } => normal.vec(),
             Surface::Cylinder { base, axis, .. } => {
-                let d = p - base;
+                let (d, axis) = (p - base, axis.vec());
                 (d - axis * d.dot(axis)).normalize_or(axis)
             }
             Surface::Sphere { center, .. } => (p - center).normalize_or(Vec3::Z),
@@ -264,7 +300,7 @@ impl Surface {
                 half_angle,
                 ..
             } => {
-                let d = p - apex;
+                let (d, axis) = (p - apex, axis.vec());
                 let along = d.dot(axis);
                 let radial = (d - axis * along).normalize_or(Vec3::ZERO);
                 if radial == Vec3::ZERO {
@@ -279,7 +315,7 @@ impl Surface {
                 major_r,
                 ..
             } => {
-                let d = p - center;
+                let (d, axis) = (p - center, axis.vec());
                 let along = d.dot(axis);
                 let radial = (d - axis * along).normalize_or(Vec3::ZERO);
                 if radial == Vec3::ZERO {
@@ -303,14 +339,9 @@ impl Surface {
 
     fn project_f(&self, p: Vec3, d0: Vec3, d1: Vec3) -> Uv {
         match *self {
-            Surface::Plane {
-                origin,
-                u_dir,
-                v_dir,
-                ..
-            } => {
+            Surface::Plane { origin, .. } => {
                 let d = p - origin;
-                (d.dot(u_dir), d.dot(v_dir))
+                (d.dot(d0), d.dot(d1))
             }
             Surface::Cylinder {
                 base,
@@ -320,7 +351,7 @@ impl Surface {
             } => {
                 let rel = p - base;
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
-                (u, rel.dot(axis))
+                (u, rel.dot(axis.vec()))
             }
             Surface::Cone {
                 apex,
@@ -330,7 +361,7 @@ impl Surface {
             } => {
                 let rel = p - apex;
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
-                (u, rel.dot(axis))
+                (u, rel.dot(axis.vec()))
             }
             Surface::Torus {
                 center,
@@ -343,7 +374,7 @@ impl Surface {
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
                 let radial = u.cos() * d0 + u.sin() * d1;
                 let ring = rel.dot(radial) - major_r;
-                let v = wrap_angle(rel.dot(axis).atan2(ring));
+                let v = wrap_angle(rel.dot(axis.vec()).atan2(ring));
                 (u, v)
             }
             Surface::Sphere {
@@ -353,7 +384,7 @@ impl Surface {
                 ref_dir: _,
             } => {
                 let rel = (p - center) / radius;
-                let v = rel.dot(axis).clamp(-1.0, 1.0).acos();
+                let v = rel.dot(axis.vec()).clamp(-1.0, 1.0).acos();
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
                 (u, v)
             }
@@ -364,7 +395,7 @@ impl Surface {
 impl Surface {
     pub fn frame(&self) -> (Vec3, Vec3) {
         match *self {
-            Surface::Plane { .. } => (Vec3::ZERO, Vec3::ZERO),
+            Surface::Plane { .. } => self.plane_axes(),
             Surface::Cylinder { axis, ref_dir, .. }
             | Surface::Cone { axis, ref_dir, .. }
             | Surface::Torus { axis, ref_dir, .. }
@@ -425,7 +456,7 @@ impl Prepared {
 
     #[inline]
     pub fn point_at(&self, radial: Vec3, uv: Uv) -> Vec3 {
-        self.surface.point_r(radial, uv)
+        self.surface.point_r(radial, uv, (self.d0, self.d1))
     }
 
     #[inline]
@@ -451,13 +482,13 @@ fn wrap_angle(a: f32) -> f32 {
 pub enum Curve {
     Line {
         p0: Vec3,
-        dir: Vec3,
+        dir: Dir,
     },
     Circle {
         center: Vec3,
-        axis: Vec3,
+        axis: Dir,
         radius: f32,
-        ref_dir: Vec3,
+        ref_dir: Dir,
     },
     Ellipse {
         center: Vec3,
@@ -466,8 +497,8 @@ pub enum Curve {
     },
     TorusSection {
         center: Vec3,
-        axis: Vec3,
-        ref_dir: Vec3,
+        axis: Dir,
+        ref_dir: Dir,
         major: f32,
         minor: f32,
         offset: f32,
@@ -477,24 +508,35 @@ pub enum Curve {
 
 impl Curve {
     pub fn line(a: Vec3, b: Vec3) -> Curve {
+        assert!(
+            a != b,
+            "a line curve runs between two distinct points, but both ends are {a:?}"
+        );
         Curve::Line {
             p0: a,
-            dir: (b - a).normalize_or_zero(),
+            dir: Dir::new(b - a),
         }
     }
 
     pub fn circle_z(center: Vec3, radius: f32) -> Curve {
+        Curve::circle(center, Vec3::Z, radius, Vec3::X)
+    }
+
+    /// The circle of `radius` about `center` in the plane through it normal to
+    /// `axis`, with its parameter measured from the projection of `ref_dir`.
+    pub fn circle(center: Vec3, axis: Vec3, radius: f32, ref_dir: Vec3) -> Curve {
+        let axis = Dir::new(axis);
         Curve::Circle {
             center,
-            axis: Vec3::Z,
+            axis,
             radius,
-            ref_dir: Vec3::X,
+            ref_dir: perp_unit(axis, ref_dir),
         }
     }
 
     pub fn point(&self, t: f32) -> Vec3 {
         match *self {
-            Curve::Line { p0, dir } => p0 + t * dir,
+            Curve::Line { p0, dir } => p0 + t * dir.vec(),
             Curve::Circle {
                 center,
                 axis,
@@ -518,7 +560,7 @@ impl Curve {
                 let rad = major + minor * t.cos();
                 let cos_u = (offset / rad).clamp(-1.0, 1.0);
                 let sin_u = branch * (1.0 - cos_u * cos_u).max(0.0).sqrt();
-                center + rad * (cos_u * d0 + sin_u * d1) + minor * t.sin() * axis
+                center + rad * (cos_u * d0 + sin_u * d1) + minor * t.sin() * axis.vec()
             }
         }
     }
@@ -528,7 +570,7 @@ impl Curve {
     /// parameterisation is stationary there.
     pub fn tangent(&self, t: f32) -> Vec3 {
         match *self {
-            Curve::Line { dir, .. } => dir,
+            Curve::Line { dir, .. } => dir.vec(),
             Curve::Circle {
                 axis,
                 radius,
@@ -565,7 +607,7 @@ impl Curve {
                 };
                 d_rad * (cos_u * d0 + sin_u * d1)
                     + rad * (d_cos_u * d0 + d_sin_u * d1)
-                    + minor * t.cos() * axis
+                    + minor * t.cos() * axis.vec()
             }
         }
     }
@@ -579,10 +621,11 @@ impl Curve {
         minor: f32,
         branch: f32,
     ) -> Curve {
+        let axis = Dir::new(axis);
         Curve::TorusSection {
             center,
-            axis: axis.normalize(),
-            ref_dir: plane_normal.normalize(),
+            axis,
+            ref_dir: Dir::new(plane_normal).perp_to(axis),
             major,
             minor,
             offset: plane_offset,

@@ -18,7 +18,7 @@
 //! are `Tangent(p)`, all three distinguished at `TOL`.
 
 use crate::kernel::geom::{Curve, Surface, perp_unit};
-use crate::kernel::math::Vec3;
+use crate::kernel::math::{Dir, Vec3};
 
 /// How near two quantities in world millimetres must be to count as equal
 /// here -- a plane's distance from a sphere's surface, a cross product's length
@@ -93,7 +93,7 @@ pub fn intersect_surfaces(a: &Surface, b: &Surface) -> Intersection {
 /// reaching for it has already established by dispatch that `s` is a `Plane`.
 fn plane_parts(s: &Surface) -> (Vec3, Vec3) {
     match *s {
-        Surface::Plane { origin, normal, .. } => (origin, normal),
+        Surface::Plane { origin, normal, .. } => (origin, *normal),
         _ => unreachable!("plane expected"),
     }
 }
@@ -122,7 +122,7 @@ fn plane_plane(a: &Surface, b: &Surface) -> Intersection {
     let p0 = n1 * ((d1 - d2 * c) / denom) + n2 * ((d2 - d1 * c) / denom);
     Intersection::Curves(vec![Curve::Line {
         p0,
-        dir: dir.normalize(),
+        dir: Dir::new(dir.normalize()),
     }])
 }
 
@@ -149,9 +149,9 @@ fn plane_sphere(pl: &Surface, sp: &Surface) -> Intersection {
     let r = (radius * radius - d * d).max(0.0).sqrt();
     Intersection::Curves(vec![Curve::Circle {
         center: foot,
-        axis: n,
+        axis: Dir::new(n),
         radius: r,
-        ref_dir: perp_unit(n, Vec3::X),
+        ref_dir: perp_unit(Dir::new(n), Vec3::X),
     }])
 }
 
@@ -199,12 +199,7 @@ fn sphere_sphere(a: &Surface, b: &Surface) -> Intersection {
     if h2 <= TOL * TOL {
         return Intersection::Tangent(foot);
     }
-    Intersection::Curves(vec![Curve::Circle {
-        center: foot,
-        axis,
-        radius: h2.sqrt(),
-        ref_dir: perp_unit(axis, Vec3::X),
-    }])
+    Intersection::Curves(vec![Curve::circle(foot, axis, h2.sqrt(), Vec3::X)])
 }
 
 /// A plane against a cylinder: one to two curves, whichever conic section the
@@ -254,7 +249,7 @@ fn plane_cylinder(pl: &Surface, cy: &Surface) -> Intersection {
     }
 
     let t = -pl.signed_distance(base) / cos_t;
-    let center = base + axis * t;
+    let center = base + *axis * t;
     let minor = axis.cross(n).normalize();
     if cos_t.abs() > 1.0 - TOL {
         return Intersection::Curves(vec![Curve::Circle {
@@ -304,7 +299,7 @@ fn plane_cone(pl: &Surface, co: &Surface) -> Intersection {
             return Intersection::Tangent(apex);
         }
         return Intersection::Curves(vec![Curve::Circle {
-            center: apex + axis * h,
+            center: apex + *axis * h,
             axis,
             radius: r,
             ref_dir: perp_unit(axis, Vec3::X),
@@ -318,17 +313,17 @@ fn plane_cone(pl: &Surface, co: &Surface) -> Intersection {
 
     let minor_dir = axis.cross(n).normalize();
     let tilt = n.cross(minor_dir).normalize();
-    let Some(p1) = cone_generator_hit(apex, axis, half_angle, pl, tilt) else {
+    let Some(p1) = cone_generator_hit(apex, *axis, half_angle, pl, tilt) else {
         return Intersection::Unsupported("cone section endpoints are not both finite");
     };
-    let Some(p2) = cone_generator_hit(apex, axis, half_angle, pl, -tilt) else {
+    let Some(p2) = cone_generator_hit(apex, *axis, half_angle, pl, -tilt) else {
         return Intersection::Unsupported("cone section endpoints are not both finite");
     };
     let center = (p1 + p2) * 0.5;
     let semi_major = (p2 - p1).length() * 0.5;
-    let h = (center - apex).dot(axis);
+    let h = (center - apex).dot(*axis);
     let r_at_c = h.abs() * half_angle.tan();
-    let off = (center - apex - axis * h).length();
+    let off = (center - apex - *axis * h).length();
     let semi_minor_sq = r_at_c * r_at_c - off * off;
     if semi_minor_sq <= TOL {
         return Intersection::Unsupported("degenerate cone section");
@@ -357,9 +352,9 @@ fn cone_generator_hit(
     dir: Vec3,
 ) -> Option<Vec3> {
     let (_, n) = plane_parts(pl);
-    let radial = perp_unit(axis, dir);
+    let radial = perp_unit(Dir::new(axis), dir);
     for sign in [1.0f32, -1.0] {
-        let g = axis * sign * half_angle.cos() + radial * half_angle.sin();
+        let g = axis * sign * half_angle.cos() + *radial * half_angle.sin();
         let denom = g.dot(n);
         if denom.abs() < TOL {
             continue;
@@ -400,13 +395,13 @@ fn cylinder_cylinder(a: &Surface, b: &Surface) -> Intersection {
     else {
         unreachable!()
     };
-    if a1.cross(a2).length() > TOL {
+    if a1.cross(*a2).length() > TOL {
         return Intersection::Unsupported(
             "non-parallel cylinder/cylinder is a quartic space curve",
         );
     }
     let d = b2 - b1;
-    let off = d - a1 * d.dot(a1);
+    let off = d - *a1 * d.dot(*a1);
     if off.length() < TOL {
         return if (r1 - r2).abs() < TOL {
             Intersection::Coincident
@@ -477,7 +472,7 @@ fn plane_torus(a: &Surface, b: &Surface) -> Intersection {
             [1.0f32, -1.0]
                 .iter()
                 .map(|&branch| {
-                    Curve::torus_section(center, axis, n, offset, major_r, minor_r, branch)
+                    Curve::torus_section(center, *axis, n, offset, major_r, minor_r, branch)
                 })
                 .collect(),
         );
@@ -492,7 +487,7 @@ fn plane_torus(a: &Surface, b: &Surface) -> Intersection {
         return Intersection::Empty;
     }
     let dr = (minor_r * minor_r - h * h).max(0.0).sqrt();
-    let plane_center = center + axis * h;
+    let plane_center = center + *axis * h;
     let ref_dir = perp_unit(axis, Vec3::X);
     if dr < TOL {
         return Intersection::Curves(vec![Curve::Circle {

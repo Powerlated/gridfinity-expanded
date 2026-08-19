@@ -204,7 +204,7 @@ fn tess_faces(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
 
         let prep = face.surface.prepare();
         let flat_normal = match face.surface {
-            crate::kernel::geom::Surface::Plane { normal, .. } => Some(normal * sign),
+            crate::kernel::geom::Surface::Plane { normal, .. } => Some(*normal * sign),
             _ => None,
         };
         for lp in solid.face_loops(fi) {

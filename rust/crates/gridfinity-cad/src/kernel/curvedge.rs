@@ -24,7 +24,7 @@ pub struct CurvEdge {
 
 pub fn as_plane(s: &Surface) -> Option<(Vec3, Vec3)> {
     if let Surface::Plane { origin, normal, .. } = s {
-        Some((*origin, *normal))
+        Some((*origin, (**normal)))
     } else {
         None
     }
@@ -66,7 +66,7 @@ pub fn emit_edge(
             axis,
             radius,
             ref_dir,
-        } => b.arc(vs, ve, center, axis, radius, ref_dir, t0, t1),
+        } => b.arc(vs, ve, center, *axis, radius, *ref_dir, t0, t1),
         Curve::Ellipse { center, a, b: eb } => b.ellipse(vs, ve, center, a, eb, t0, t1),
         Curve::TorusSection { .. } => b.torus_section(vs, ve, curve, t0, t1),
     }

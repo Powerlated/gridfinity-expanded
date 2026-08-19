@@ -1,6 +1,6 @@
 use crate::kernel::geom::{Curve, Surface};
 use crate::kernel::hash::FxHashMap;
-use crate::kernel::math::{Vec3, WELD_NEAR_SQ, weld_key};
+use crate::kernel::math::{Dir, Vec3, WELD_NEAR_SQ, weld_key};
 
 pub type VertexId = usize;
 pub type EdgeId = usize;
@@ -439,7 +439,7 @@ impl Solid {
             out.edges[e] = Edge {
                 curve: Curve::Line {
                     p0: pa,
-                    dir: (pz - pa).normalize_or_zero(),
+                    dir: Dir::new((pz - pa).normalize_or_zero()),
                 },
                 t0: 0.0,
                 t1: (pz - pa).length(),
@@ -915,15 +915,12 @@ impl Builder {
     pub fn line(&mut self, a: VertexId, b: VertexId) -> (EdgeId, bool) {
         let (pa, pb) = (self.verts[a].point, self.verts[b].point);
         let mid = (pa + pb) * 0.5;
-        self.edge_between(a, b, mid, || {
-            let dir = (pb - pa).normalize_or_zero();
-            Edge {
-                curve: Curve::Line { p0: pa, dir },
-                t0: 0.0,
-                t1: (pb - pa).length(),
-                v0: a,
-                v1: b,
-            }
+        self.edge_between(a, b, mid, || Edge {
+            curve: Curve::line(pa, pb),
+            t0: 0.0,
+            t1: (pb - pa).length(),
+            v0: a,
+            v1: b,
         })
     }
 
@@ -939,12 +936,7 @@ impl Builder {
         a1: f32,
     ) -> (EdgeId, bool) {
         crate::kernel::perf::count(crate::kernel::perf::Metric::BuilderArc);
-        let curve = Curve::Circle {
-            center,
-            axis,
-            radius,
-            ref_dir,
-        };
+        let curve = Curve::circle(center, axis, radius, ref_dir);
         let mid = curve.point((a0 + a1) * 0.5);
         self.edge_between(a, b, mid, || Edge {
             curve,

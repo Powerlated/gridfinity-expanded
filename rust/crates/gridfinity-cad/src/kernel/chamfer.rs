@@ -10,7 +10,7 @@
 
 use crate::kernel::curvedge::{CurvEdge, as_plane, emit_curv, emit_edge, loop_edge_dir};
 use crate::kernel::geom::{Curve, Surface};
-use crate::kernel::math::Vec3;
+use crate::kernel::math::{Dir, Vec3};
 use crate::kernel::topo::{Builder, EdgeId, Loop, Solid};
 use std::collections::HashMap;
 
@@ -143,7 +143,7 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
         let ta = CurvEdge {
             curve: Curve::Line {
                 p0: ta_p0,
-                dir: edge_dir,
+                dir: Dir::new(edge_dir),
             },
             t0: 0.0,
             t1: (ta_p1 - ta_p0).length(),
@@ -151,7 +151,7 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
         let tb = CurvEdge {
             curve: Curve::Line {
                 p0: tb_p0,
-                dir: edge_dir,
+                dir: Dir::new(edge_dir),
             },
             t0: 0.0,
             t1: (tb_p1 - tb_p0).length(),
@@ -221,12 +221,12 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
                 c.tb_p0 = corner_b;
                 c.ca0 = line_curve(corner_a, corner_b);
                 c.ta = CurvEdge {
-                    curve: Curve::Line { p0: corner_a, dir },
+                    curve: Curve::Line { p0: corner_a, dir: Dir::new(dir) },
                     t0: 0.0,
                     t1: (c.ta_p1 - corner_a).length(),
                 };
                 c.tb = CurvEdge {
-                    curve: Curve::Line { p0: corner_b, dir },
+                    curve: Curve::Line { p0: corner_b, dir: Dir::new(dir) },
                     t0: 0.0,
                     t1: (c.tb_p1 - corner_b).length(),
                 };
@@ -235,12 +235,12 @@ pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<S
                 c.tb_p1 = corner_b;
                 c.ca1 = line_curve(corner_a, corner_b);
                 c.ta = CurvEdge {
-                    curve: Curve::Line { p0: c.ta_p0, dir },
+                    curve: Curve::Line { p0: c.ta_p0, dir: Dir::new(dir) },
                     t0: 0.0,
                     t1: (corner_a - c.ta_p0).length(),
                 };
                 c.tb = CurvEdge {
-                    curve: Curve::Line { p0: c.tb_p0, dir },
+                    curve: Curve::Line { p0: c.tb_p0, dir: Dir::new(dir) },
                     t0: 0.0,
                     t1: (corner_b - c.tb_p0).length(),
                 };
@@ -361,9 +361,8 @@ fn intersect_lines(p0: Vec3, d0: Vec3, p1: Vec3, d1: Vec3) -> Option<Vec3> {
 }
 
 fn line_curve(a: Vec3, b: Vec3) -> CurvEdge {
-    let dir = (b - a).normalize_or(Vec3::X);
     CurvEdge {
-        curve: Curve::Line { p0: a, dir },
+        curve: Curve::line(a, b),
         t0: 0.0,
         t1: (b - a).length(),
     }

@@ -1,7 +1,7 @@
 use crate::kernel::curvedge::emit_edge;
 use crate::kernel::geom::{Curve, Surface, radial_frame};
 use crate::kernel::isect::{Intersection, intersect_surfaces};
-use crate::kernel::math::{Vec2, Vec3};
+use crate::kernel::math::{Dir, Vec2, Vec3};
 use crate::kernel::sketch::{point_in_polygon, polygon_area};
 use crate::kernel::topo::{Builder, EdgeId, Solid, VertexId};
 
@@ -31,14 +31,14 @@ pub fn curve_plane_params(curve: &Curve, t0: f32, t1: f32, plane: &Surface) -> V
     let Surface::Plane { origin, normal, .. } = *plane else {
         return Vec::new();
     };
-    let c = origin.dot(normal);
+    let c = origin.dot(*normal);
     match *curve {
         Curve::Line { p0, dir } => {
-            let denom = dir.dot(normal);
+            let denom = dir.dot(*normal);
             if denom.abs() < ON_PLANE {
                 return Vec::new();
             }
-            let t = (c - p0.dot(normal)) / denom;
+            let t = (c - p0.dot(*normal)) / denom;
             if within(t) { vec![t] } else { Vec::new() }
         }
         Curve::Circle {
@@ -49,9 +49,9 @@ pub fn curve_plane_params(curve: &Curve, t0: f32, t1: f32, plane: &Surface) -> V
         } => {
             let (d0, d1) = radial_frame(axis, ref_dir);
             harmonic_roots(
-                radius * d0.dot(normal),
-                radius * d1.dot(normal),
-                c - center.dot(normal),
+                radius * d0.dot(*normal),
+                radius * d1.dot(*normal),
+                c - center.dot(*normal),
                 lo,
                 hi,
             )
@@ -60,7 +60,7 @@ pub fn curve_plane_params(curve: &Curve, t0: f32, t1: f32, plane: &Surface) -> V
             .collect()
         }
         Curve::Ellipse { center, a, b } => {
-            harmonic_roots(a.dot(normal), b.dot(normal), c - center.dot(normal), lo, hi)
+            harmonic_roots(a.dot(*normal), b.dot(*normal), c - center.dot(*normal), lo, hi)
                 .into_iter()
                 .filter(|&t| within(t))
                 .collect()
@@ -74,7 +74,7 @@ pub fn curve_plane_params(curve: &Curve, t0: f32, t1: f32, plane: &Surface) -> V
             offset,
             branch,
         } => torus_section_roots(
-            center, axis, ref_dir, major, minor, offset, branch, normal, c, lo, hi,
+            center, axis, ref_dir, major, minor, offset, branch, *normal, c, lo, hi,
         )
         .into_iter()
         .filter(|&t| within(t))
@@ -133,8 +133,8 @@ fn wrap_into(root: f32, lo: f32, hi: f32) -> Option<f32> {
 #[allow(clippy::too_many_arguments)]
 fn torus_section_roots(
     center: Vec3,
-    axis: Vec3,
-    ref_dir: Vec3,
+    axis: Dir,
+    ref_dir: Dir,
     major: f32,
     minor: f32,
     offset: f32,
@@ -215,7 +215,7 @@ fn harmonic_roots(a: f32, b: f32, rhs: f32, lo: f32, hi: f32) -> Vec<f32> {
 
 pub fn param_of(curve: &Curve, p: Vec3) -> f32 {
     match *curve {
-        Curve::Line { p0, dir } => (p - p0).dot(dir),
+        Curve::Line { p0, dir } => (p - p0).dot(*dir),
         Curve::Circle {
             center,
             axis,
@@ -239,8 +239,8 @@ pub fn param_of(curve: &Curve, p: Vec3) -> f32 {
             ..
         } => {
             let v = p - center;
-            let along = v.dot(axis);
-            let radial = (v - axis * along).length();
+            let along = v.dot(*axis);
+            let radial = (v - *axis * along).length();
             (along / minor.max(1e-12)).atan2((radial - major) / minor.max(1e-12))
         }
     }
@@ -326,7 +326,7 @@ impl Cut {
             planes: vec![CutPlane {
                 surface: *plane,
                 origin,
-                discard_normal,
+                discard_normal: *discard_normal,
                 span: None,
             }],
             region: None,
@@ -560,7 +560,7 @@ fn runs_along_cut(cut: &Cut, curve: &Curve, from: Vec3, signed: f32) -> bool {
 
 fn plane_normal(surface: &Surface) -> Vec3 {
     match *surface {
-        Surface::Plane { normal, .. } => normal,
+        Surface::Plane { normal, .. } => *normal,
         _ => Vec3::ZERO,
     }
 }
@@ -1080,10 +1080,7 @@ fn emit_caps(
     }
 
     let surface = Surface::plane(origin, outward);
-    let (u_dir, v_dir) = match surface {
-        Surface::Plane { u_dir, v_dir, .. } => (u_dir, v_dir),
-        _ => unreachable!(),
-    };
+    let (u_dir, v_dir) = surface.plane_axes();
     let to_2d = |p: Vec3| Vec2::new(p.dot(u_dir), p.dot(v_dir));
     let poly = |lp: &[(EdgeId, bool)]| -> Vec<Vec2> {
         lp.iter()
@@ -1444,7 +1441,7 @@ mod tests {
                 };
                 let c = (tri.pos[0] + tri.pos[1] + tri.pos[2]) / 3.0;
                 let v = c - base;
-                let d = (v - axis * v.dot(axis)).length();
+                let d = (v - *axis * v.dot(*axis)).length();
                 assert!(
                     (d - radius).abs() < 0.05,
                     "a cylinder triangle sits {d} from the axis, not {radius}"

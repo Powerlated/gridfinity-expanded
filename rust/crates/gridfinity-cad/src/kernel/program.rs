@@ -1167,7 +1167,7 @@ mod tests {
             Surface::Plane { normal, .. } => {
                 assert!(
                     normal.x.abs() > 0.1 && normal.z.abs() > 0.1,
-                    "tilted normal {normal}"
+                    "tilted normal {normal:?}"
                 );
             }
             _ => panic!("expected a Plane surface"),

@@ -13,7 +13,7 @@
 //! declares, here and nowhere else: `dist` and `pos` convert, `real` and `dir`
 //! do not.
 
-use crate::kernel::math::Vec3;
+use crate::kernel::math::{Dir, Vec3};
 
 /// A node's position in the file's node sequence, which is what every pointer
 /// field is written as. Index 0 is the null pointer and index 1 is the root.
@@ -71,10 +71,6 @@ const HEADER_RECORD_WIDTH: usize = 80;
 /// eight orders looser -- the bound is tight because it can be, and a violation
 /// means the arithmetic was done in `f32` somewhere it should not have been.
 pub const UNIT_RESIDUE: f64 = 1.0e-15;
-
-/// How far a reference direction may lean out of perpendicular before it is the
-/// caller's frame that is wrong rather than the cast's precision.
-const PERP_TOL: f64 = 1.0e-4;
 
 pub struct Writer {
     out: String,
@@ -169,46 +165,17 @@ impl Writer {
         }
     }
 
-    /// A `vector` field carrying a direction, which the format requires to be a
-    /// unit vector and which carries no length to convert.
+    /// A `vector` field carrying a direction, written as the three components
+    /// the direction already holds.
     ///
-    /// Normalised in `f64`, not in the kernel's `f32`: the file declares a
-    /// linear resolution of 1e-8 and an `f32` unit vector is unit only to about
-    /// 6e-8, so a direction normalised before the cast reaches a reader as a
-    /// vector it measures as non-unit by six times its own resolution.
-    pub fn dir(&mut self, d: Vec3) {
-        for c in unit64(d, "a direction field") {
-            self.real(c);
-        }
-    }
-
-    /// A `vector` field carrying the reference direction of a surface or curve
-    /// whose axis was written as `axis`, which the format requires to be a unit
-    /// vector perpendicular to that axis.
-    ///
-    /// Re-orthogonalised against `axis` in `f64` for the same reason `dir`
-    /// re-normalises there. The `f32` input must already be perpendicular to
-    /// within `PERP_TOL`, so this refines a frame the caller built rather than
-    /// correcting one it got wrong.
-    pub fn dir_perp(&mut self, d: Vec3, axis: Vec3) {
-        let a = unit64(axis, "the axis a reference direction is perpendicular to");
-        let x = unit64(d, "a reference direction field");
-        let dot = a[0] * x[0] + a[1] * x[1] + a[2] * x[2];
-        assert!(
-            dot.abs() < PERP_TOL,
-            "a reference direction is perpendicular to its axis, but {d:?} and {axis:?} meet at \
-             a cosine of {dot}"
-        );
-        let p = [x[0] - a[0] * dot, x[1] - a[1] * dot, x[2] - a[2] * dot];
-        let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
-        let unit = [p[0] / len, p[1] / len, p[2] / len];
-        let residual = a[0] * unit[0] + a[1] * unit[1] + a[2] * unit[2];
-        assert!(
-            residual.abs() <= UNIT_RESIDUE,
-            "one Gram-Schmidt step leaves a direction perpendicular to f64 precision, but {unit:?} \
-             meets {a:?} at a cosine of {residual}"
-        );
-        for c in unit {
+    /// Nothing is normalised here. A `Dir` is unit in `f64` by construction and
+    /// a surface's reference direction is perpendicular to its axis by the same,
+    /// which is the whole reason those are `Dir`s: the file declares a linear
+    /// resolution of 1e-8 and an `f32` unit vector is unit only to about 6.7e-8,
+    /// so a direction that reached this point still needing repair would be one
+    /// the kernel had already got wrong.
+    pub fn dir(&mut self, d: Dir) {
+        for c in d.components() {
             self.real(c);
         }
     }
@@ -317,31 +284,6 @@ impl Writer {
     }
 }
 
-/// `d` as an `f64` unit vector, normalised in `f64` after the cast.
-///
-/// `what` names the field for the message when the `f32` input is not already a
-/// unit vector to `f32` precision, which is a defect in whoever built it rather
-/// than something normalising can repair.
-fn unit64(d: Vec3, what: &str) -> [f64; 3] {
-    assert!(d.is_finite(), "{what} cannot carry the non-finite direction {d:?}");
-    let v = [d.x as f64, d.y as f64, d.z as f64];
-    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    assert!(
-        (len - 1.0).abs() < 1e-4,
-        "{what} must be a unit vector, got {d:?} of length {len}"
-    );
-    let unit = [v[0] / len, v[1] / len, v[2] / len];
-    let residue =
-        (unit[0] * unit[0] + unit[1] * unit[1] + unit[2] * unit[2]).sqrt() - 1.0;
-    assert!(
-        residue.abs() <= UNIT_RESIDUE,
-        "one f64 normalisation leaves a direction unit to f64 precision, but {unit:?} has \
-         length {}",
-        residue + 1.0
-    );
-    unit
-}
-
 /// A double in the shortest decimal form that reads back as the same value,
 /// with an exponent-free spelling for the magnitudes a model is made of.
 fn fmt_real(v: f64) -> String {
@@ -406,7 +348,7 @@ mod tests {
         let mut w = Writer::new();
         let i = w.alloc();
         w.begin(PLANE, i);
-        w.dir(tilted);
+        w.dir(Dir::new(tilted));
         let emitted: Vec<f64> = w
             .out
             .rsplit('\n')
@@ -430,7 +372,7 @@ mod tests {
         let i = w.alloc();
         w.begin(POINT, i);
         w.pos(Vec3::new(42.0, -1.5, 0.0));
-        w.dir(Vec3::X);
+        w.dir(Dir::new(Vec3::X));
         let out = w.out;
         assert!(out.contains("0.042 -0.0015 0"), "positions convert to metres:\n{out}");
         assert!(out.contains("1 0 0"), "directions stay unit vectors:\n{out}");

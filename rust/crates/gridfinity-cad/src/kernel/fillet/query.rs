@@ -15,7 +15,7 @@ pub(super) fn as_cyl(s: &Surface) -> Option<(Vec3, Vec3, f32)> {
         base, axis, radius, ..
     } = s
     {
-        Some((*base, *axis, *radius))
+        Some((*base, (**axis), *radius))
     } else {
         None
     }
@@ -101,7 +101,7 @@ pub(super) fn dist_to_curve(p: Vec3, ed: &Edge, solid: &Solid) -> f32 {
     match ed.curve {
         Curve::Line { p0, dir } => {
             let rel = p - p0;
-            (rel - dir * rel.dot(dir)).length()
+            (rel - *dir * rel.dot(*dir)).length()
         }
         Curve::Circle {
             center,
@@ -110,8 +110,8 @@ pub(super) fn dist_to_curve(p: Vec3, ed: &Edge, solid: &Solid) -> f32 {
             ..
         } => {
             let rel = p - center;
-            let along = rel.dot(axis);
-            let radial = (rel - axis * along).length();
+            let along = rel.dot(*axis);
+            let radial = (rel - *axis * along).length();
             ((radial - radius).powi(2) + along * along).sqrt()
         }
         _ => {
