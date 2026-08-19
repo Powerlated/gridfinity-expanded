@@ -57,6 +57,25 @@ const SCHEMA: &str = "SCH_1200000_12006";
 /// reader ignores the newlines entirely.
 const RECORD_WIDTH: usize = 76;
 
+/// The width every record of the human header is padded to with asterisks, which
+/// is what Parasolid's own writers emit and what a frustrum comparing the
+/// preamble against its expected form for transport corruption sees.
+const HEADER_RECORD_WIDTH: usize = 80;
+
+/// How far the length of an emitted unit vector, or the cosine between two
+/// emitted perpendicular ones, may sit from its exact value.
+///
+/// A few `f64` ulps: the emitted numbers round-trip exactly through the text
+/// form, so this is the residue of one `f64` normalisation and nothing else.
+/// The reader measures these against the file's own 1e-8 resolution, which is
+/// eight orders looser -- the bound is tight because it can be, and a violation
+/// means the arithmetic was done in `f32` somewhere it should not have been.
+pub const UNIT_RESIDUE: f64 = 1.0e-15;
+
+/// How far a reference direction may lean out of perpendicular before it is the
+/// caller's frame that is wrong rather than the cast's precision.
+const PERP_TOL: f64 = 1.0e-4;
+
 pub struct Writer {
     out: String,
     col: usize,
@@ -152,15 +171,45 @@ impl Writer {
 
     /// A `vector` field carrying a direction, which the format requires to be a
     /// unit vector and which carries no length to convert.
+    ///
+    /// Normalised in `f64`, not in the kernel's `f32`: the file declares a
+    /// linear resolution of 1e-8 and an `f32` unit vector is unit only to about
+    /// 6e-8, so a direction normalised before the cast reaches a reader as a
+    /// vector it measures as non-unit by six times its own resolution.
     pub fn dir(&mut self, d: Vec3) {
-        let len = d.length();
+        for c in unit64(d, "a direction field") {
+            self.real(c);
+        }
+    }
+
+    /// A `vector` field carrying the reference direction of a surface or curve
+    /// whose axis was written as `axis`, which the format requires to be a unit
+    /// vector perpendicular to that axis.
+    ///
+    /// Re-orthogonalised against `axis` in `f64` for the same reason `dir`
+    /// re-normalises there. The `f32` input must already be perpendicular to
+    /// within `PERP_TOL`, so this refines a frame the caller built rather than
+    /// correcting one it got wrong.
+    pub fn dir_perp(&mut self, d: Vec3, axis: Vec3) {
+        let a = unit64(axis, "the axis a reference direction is perpendicular to");
+        let x = unit64(d, "a reference direction field");
+        let dot = a[0] * x[0] + a[1] * x[1] + a[2] * x[2];
         assert!(
-            (len - 1.0).abs() < 1e-4,
-            "a direction field must be a unit vector, got {d:?} of length {len}"
+            dot.abs() < PERP_TOL,
+            "a reference direction is perpendicular to its axis, but {d:?} and {axis:?} meet at \
+             a cosine of {dot}"
         );
-        let d = d / len;
-        for c in [d.x, d.y, d.z] {
-            self.real(c as f64);
+        let p = [x[0] - a[0] * dot, x[1] - a[1] * dot, x[2] - a[2] * dot];
+        let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+        let unit = [p[0] / len, p[1] / len, p[2] / len];
+        let residual = a[0] * unit[0] + a[1] * unit[1] + a[2] * unit[2];
+        assert!(
+            residual.abs() <= UNIT_RESIDUE,
+            "one Gram-Schmidt step leaves a direction perpendicular to f64 precision, but {unit:?} \
+             meets {a:?} at a cosine of {residual}"
+        );
+        for c in unit {
+            self.real(c);
         }
     }
 
@@ -224,20 +273,73 @@ impl Writer {
         self.col = 0;
     }
 
+    /// `s` as one header record, right-padded with asterisks to
+    /// `HEADER_RECORD_WIDTH`.
+    fn starred(&mut self, s: &str) {
+        assert!(
+            s.len() <= HEADER_RECORD_WIDTH,
+            "a header record is at most {HEADER_RECORD_WIDTH} characters, and {s:?} is {}",
+            s.len()
+        );
+        self.line(&format!("{s}{}", "*".repeat(HEADER_RECORD_WIDTH - s.len())));
+    }
+
     /// The human header, the text flag sequence and the userfield size, after
     /// which the stream is positioned for the first node.
     fn header(&mut self) {
-        self.line("**ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz***********");
-        self.line("**PARASOLID !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~0123456789***********");
-        self.line("**PART1;APPL=gridfinity-expanded;FORMAT=text;GUISE=transmit;");
-        self.line(&format!("**PART2;SCH={SCHEMA};USFLD_SIZE=0;"));
+        self.starred("**ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+        self.starred("**PARASOLID !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~0123456789");
+        self.line("**PART1;");
+        for pair in [
+            "MC=unknown",
+            "MC_MODEL=unknown",
+            "MC_ID=unknown",
+            "OS=unknown",
+            "OS_RELEASE=unknown",
+            "FRU=gridfinity-expanded",
+            "APPL=gridfinity-expanded",
+            "SITE=unknown",
+            "USER=unknown",
+            "FORMAT=text",
+            "GUISE=transmit",
+        ] {
+            self.line(&format!("{pair};"));
+        }
+        self.line("**PART2;");
+        self.line(&format!("SCH={SCHEMA};"));
+        self.line("USFLD_SIZE=0;");
         self.line("**PART3;");
-        self.line("**END_OF_HEADER*****************************************************");
+        self.starred("**END_OF_HEADER");
         self.line("T");
         self.line(&format!("{} {}", MODELLER_VERSION.len(), MODELLER_VERSION));
         self.line(&format!("{} {}", SCHEMA.len(), SCHEMA));
         self.int(0);
     }
+}
+
+/// `d` as an `f64` unit vector, normalised in `f64` after the cast.
+///
+/// `what` names the field for the message when the `f32` input is not already a
+/// unit vector to `f32` precision, which is a defect in whoever built it rather
+/// than something normalising can repair.
+fn unit64(d: Vec3, what: &str) -> [f64; 3] {
+    assert!(d.is_finite(), "{what} cannot carry the non-finite direction {d:?}");
+    let v = [d.x as f64, d.y as f64, d.z as f64];
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    assert!(
+        (len - 1.0).abs() < 1e-4,
+        "{what} must be a unit vector, got {d:?} of length {len}"
+    );
+    let unit = [v[0] / len, v[1] / len, v[2] / len];
+    let residue =
+        (unit[0] * unit[0] + unit[1] * unit[1] + unit[2] * unit[2]).sqrt() - 1.0;
+    assert!(
+        residue.abs() <= UNIT_RESIDUE,
+        "one f64 normalisation leaves a direction unit to f64 precision, but {unit:?} has \
+         length {}",
+        residue + 1.0
+    );
+    unit
 }
 
 /// A double in the shortest decimal form that reads back as the same value,
@@ -282,6 +384,43 @@ mod tests {
         assert!(
             rejoined.ends_with(" 200"),
             "the final value keeps its leading separator and takes no trailing one"
+        );
+    }
+
+    /// A direction the kernel built in f32 reaches the file unit to f64, which
+    /// an f32 normalisation cannot deliver: the chamfer normal here is unit to
+    /// 6.7e-8 as an f32, six times the 1e-8 the file declares as its resolution,
+    /// and Onshape reported exactly that face as a fault.
+    #[test]
+    fn a_tilted_direction_reaches_the_file_unit_to_f64_not_to_f32() {
+        let tilted = Vec3::new(0.0, -0.5, 0.75f32.sqrt()).normalize();
+        let as_f64 = [tilted.x as f64, tilted.y as f64, tilted.z as f64];
+        let f32_residue =
+            (as_f64.iter().map(|c| c * c).sum::<f64>()).sqrt() - 1.0;
+        assert!(
+            f32_residue.abs() > UNIT_RESIDUE,
+            "the fixture must be a direction f32 cannot make unit in f64, but it is off by \
+             only {f32_residue}"
+        );
+
+        let mut w = Writer::new();
+        let i = w.alloc();
+        w.begin(PLANE, i);
+        w.dir(tilted);
+        let emitted: Vec<f64> = w
+            .out
+            .rsplit('\n')
+            .next()
+            .expect("the writer emits at least one record")
+            .split_whitespace()
+            .rev()
+            .take(3)
+            .map(|t| t.parse().expect("a direction component reads back as a double"))
+            .collect();
+        let residue = (emitted.iter().map(|c| c * c).sum::<f64>()).sqrt() - 1.0;
+        assert!(
+            residue.abs() <= UNIT_RESIDUE,
+            "the emitted direction {emitted:?} must be unit to f64, but is off by {residue}"
         );
     }
 

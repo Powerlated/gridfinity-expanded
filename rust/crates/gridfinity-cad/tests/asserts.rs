@@ -47,6 +47,7 @@ const BUDGET: &[(&str, usize)] = &[
     ("kernel/fillet/mod.rs", 1),
     ("kernel/fillet/runout.rs", 2),
     ("kernel/isect.rs", 4),
+    ("kernel/xt/validate.rs", 7),
     ("kernel/orient.rs", 1),
     ("kernel/planar.rs", 4),
     ("kernel/program.rs", 1),

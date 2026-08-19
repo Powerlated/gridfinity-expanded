@@ -137,6 +137,21 @@ Work in a dedicated feature branch in a new worktree off latest `origin/main`, n
 
 **Two wired export formats: STL (triangles, per part) and Parasolid X_T (analytic B-rep, one multi-body file).** The X_T button rebuilds each bin once via `build_bin_solid`/`carve_to_cells` — the same pairing `generate_geometry` uses — and hands every piece's `Solid` to the kernel's `to_xt_text`; nothing on that path is tessellated. The file is unitless metres (`mm / 1000`, `res_size` 1000, `res_linear` 1e-8); measured f32 deviation of kernel points from the emitted analytic forms is ~3e-9 m, inside the declared resolution. A kernel refusal (a cone face reaching its apex, a spindle-torus face crossing the axis, an internal void) surfaces as red text beside the buttons rather than a download. See `rust/CLAUDE.md`'s `xt/` section.
 
+**Onshape imports all five ladder files clean.** Getting there took two rounds against a real reader, both
+invisible to a green suite: the header had to be padded to the 80-character records a Parasolid frustrum
+writes, and every *tilted* direction had to be normalised in f64 rather than the kernel's f32, which leaves
+a unit vector 6.7e-8 off unit — six times the 1e-8 the file declares as its resolution. Only the second
+faulted geometry, and only on non-axis-aligned normals, so `1-cube` passed while `2`..`5` each faulted on
+a peg chamfer. See `rust/CLAUDE.md` for both, and for the validator tolerances that were loose enough to
+hide the second. **An import is still the acceptance test and it is the user's to run** — nothing in this
+repo can run a Parasolid reader — the writer's own round-trip tests share their author's reading of
+the manual with the writer, so they agree with it rather than checking it. `kernel/xt/reader` and
+`kernel/xt/validate` are the independent restatement (`validate_xt` reports findings; the corruption tests
+prove it catches them), and `writes_the_import_ladder` emits five files differing by one node class each so
+that whichever a CAD system first refuses names the class at fault. Every field table but
+INTERSECTION/CHART/LIMIT has been checked against the manual and is right. Do not assume a new X_T
+behaviour works because the suite is green; the acceptance test is an import, and it is the user's to run.
+
 **A sloped bin takes no inner walls.** Its cavity is not a z-prism, so the island a free-form wall is
 carved as cannot meet the tilted floor; the walls are dropped and the bin builds without them. See
 `rust/CLAUDE.md`.

@@ -62,8 +62,7 @@ pub enum XtSurface {
         pvec: Vec3,
         axis: Vec3,
         radius: f32,
-        sin_half: f32,
-        cos_half: f32,
+        half_angle: f32,
         x_axis: Vec3,
     },
     Sphere {
@@ -194,8 +193,7 @@ fn cone_of(
         pvec: apex + axis * mid,
         axis: -side * axis,
         radius: mid.abs() * half_angle.tan(),
-        sin_half: half_angle.sin(),
-        cos_half: half_angle.cos(),
+        half_angle,
         x_axis: perp_unit(axis, ref_dir),
     })
 }
@@ -279,10 +277,10 @@ impl XtSurface {
                 pvec,
                 axis,
                 radius,
-                sin_half,
-                cos_half,
+                half_angle,
                 ..
             } => {
+                let (sin_half, cos_half) = half_angle.sin_cos();
                 let d = p - pvec;
                 let (_, perp) = radial(d, axis);
                 perp * cos_half + d.dot(axis) * sin_half - radius * cos_half
@@ -329,10 +327,12 @@ impl XtSurface {
             XtSurface::Cone {
                 pvec,
                 axis,
-                sin_half,
-                cos_half,
+                half_angle,
                 ..
-            } => -(cos_half * radial(p - pvec, axis).0 + sin_half * axis).normalize(),
+            } => {
+                let (sin_half, cos_half) = half_angle.sin_cos();
+                -(cos_half * radial(p - pvec, axis).0 + sin_half * axis).normalize()
+            }
             XtSurface::Sphere { centre, .. } => (p - centre).normalize(),
             XtSurface::Torus {
                 centre,
@@ -372,7 +372,7 @@ impl XtSurface {
             } => {
                 w.pos(pvec);
                 w.dir(normal);
-                w.dir(x_axis);
+                w.dir_perp(x_axis, normal);
             }
             XtSurface::Cylinder {
                 pvec,
@@ -383,27 +383,27 @@ impl XtSurface {
                 w.pos(pvec);
                 w.dir(axis);
                 w.dist(radius);
-                w.dir(x_axis);
+                w.dir_perp(x_axis, axis);
             }
             XtSurface::Cone {
                 pvec,
                 axis,
                 radius,
-                sin_half,
-                cos_half,
+                half_angle,
                 x_axis,
             } => {
+                let (sin_half, cos_half) = (half_angle as f64).sin_cos();
                 assert!(
-                    (sin_half * sin_half + cos_half * cos_half - 1.0).abs() < 1e-5,
-                    "a CONE node's half-angle sine and cosine are one angle's, so their squares \
-                     sum to one: sin {sin_half}, cos {cos_half}"
+                    (sin_half * sin_half + cos_half * cos_half - 1.0).abs() <= text::UNIT_RESIDUE,
+                    "a CONE node's half-angle sine and cosine are one f64 angle's, so their \
+                     squares sum to one: sin {sin_half}, cos {cos_half}"
                 );
                 w.pos(pvec);
                 w.dir(axis);
                 w.dist(radius);
-                w.real(sin_half as f64);
-                w.real(cos_half as f64);
-                w.dir(x_axis);
+                w.real(sin_half);
+                w.real(cos_half);
+                w.dir_perp(x_axis, axis);
             }
             XtSurface::Sphere {
                 centre,
@@ -414,7 +414,7 @@ impl XtSurface {
                 w.pos(centre);
                 w.dist(radius);
                 w.dir(axis);
-                w.dir(x_axis);
+                w.dir_perp(x_axis, axis);
             }
             XtSurface::Torus {
                 centre,
@@ -427,7 +427,7 @@ impl XtSurface {
                 w.dir(axis);
                 w.dist(major);
                 w.dist(minor);
-                w.dir(x_axis);
+                w.dir_perp(x_axis, axis);
             }
         }
     }
@@ -652,7 +652,7 @@ impl XtCurve {
             } => {
                 w.pos(centre);
                 w.dir(normal);
-                w.dir(x_axis);
+                w.dir_perp(x_axis, normal);
                 w.dist(radius);
             }
             XtCurve::Ellipse {
@@ -664,7 +664,7 @@ impl XtCurve {
             } => {
                 w.pos(centre);
                 w.dir(normal);
-                w.dir(x_axis);
+                w.dir_perp(x_axis, normal);
                 w.dist(major);
                 w.dist(minor);
             }
