@@ -57,8 +57,9 @@ pub enum Surface {
         ref_dir: Dir,
     },
     Cone {
-        apex: Vec3,
+        pvec: Vec3,
         axis: Dir,
+        radius: f32,
         half_angle: f32,
         ref_dir: Dir,
     },
@@ -133,18 +134,69 @@ impl Surface {
         }
     }
 
+    /// The half-cone whose apex is at `apex` and which opens along +Z, its
+    /// radius reaching `tan(half_angle)` one millimetre above the apex.
     pub fn cone_z(apex: Vec3, half_angle: f32) -> Surface {
-        Surface::cone(apex, Vec3::Z, half_angle, Vec3::X)
+        Surface::cone(
+            apex + Vec3::Z,
+            Vec3::Z,
+            half_angle.tan(),
+            half_angle,
+            Vec3::X,
+        )
     }
 
-    pub fn cone(apex: Vec3, axis: Vec3, half_angle: f32, ref_dir: Vec3) -> Surface {
-        let axis = Dir::new(axis);
+    /// The half-cone of `half_angle` whose radius is `radius` at `pvec` and
+    /// grows along `open`.
+    ///
+    /// One nappe, not two: the surface is the half on the `open` side of the
+    /// apex, which is where `radius` being positive puts `pvec`. That is what
+    /// the format names as a cone and what a face can lie on without its normal
+    /// turning over, so the kernel names it too rather than leaving the choice
+    /// to whoever reads the surface later. `axis` is stored pointing at the
+    /// apex, opposite `open`, as a CONE node carries it.
+    pub fn cone(pvec: Vec3, open: Vec3, radius: f32, half_angle: f32, ref_dir: Vec3) -> Surface {
+        assert!(
+            radius > 0.0,
+            "a cone is named by a positive radius at a point of its axis, got {radius}"
+        );
+        assert!(
+            half_angle > 0.0 && half_angle < std::f32::consts::FRAC_PI_2,
+            "a cone's half angle lies strictly between zero and a quarter turn, got {half_angle}"
+        );
+        let axis = -Dir::new(open);
         Surface::Cone {
-            apex,
+            pvec,
             axis,
+            radius,
             half_angle,
             ref_dir: perp_unit(axis, ref_dir),
         }
+    }
+
+    /// The apex of the cone this surface lies on: the point along `axis` at
+    /// which its radius falls to zero. Derived rather than stored, because
+    /// `pvec` and `radius` already fix it and a second copy could disagree.
+    pub fn cone_apex(&self) -> Vec3 {
+        let Surface::Cone {
+            pvec,
+            axis,
+            radius,
+            half_angle,
+            ..
+        } = *self
+        else {
+            panic!("only a cone has an apex, got {self:?}");
+        };
+        pvec + *axis * (radius / half_angle.tan())
+    }
+
+    /// The direction a cone's radius grows in, away from its apex.
+    pub fn cone_open(&self) -> Dir {
+        let Surface::Cone { axis, .. } = *self else {
+            panic!("only a cone opens, got {self:?}");
+        };
+        -axis
     }
 
     pub fn torus_z(center: Vec3, major_r: f32, minor_r: f32) -> Surface {
@@ -183,14 +235,9 @@ impl Surface {
             Surface::Cylinder {
                 base, axis, radius, ..
             } => base + radius * radial + v * axis.vec(),
-            Surface::Cone {
-                apex,
-                axis,
-                half_angle,
-                ..
-            } => {
-                let r = v.abs() * half_angle.tan();
-                apex + v * axis.vec() + r * radial
+            Surface::Cone { half_angle, .. } => {
+                let r = v * half_angle.tan();
+                self.cone_apex() + v * self.cone_open().vec() + r * radial
             }
             Surface::Torus {
                 center,
@@ -214,11 +261,9 @@ impl Surface {
         match *self {
             Surface::Plane { normal, .. } => normal.vec(),
             Surface::Cylinder { .. } => radial.normalize(),
-            Surface::Cone {
-                axis, half_angle, ..
-            } => {
-                let sgn = if v >= 0.0 { -1.0 } else { 1.0 };
-                (half_angle.cos() * radial + sgn * half_angle.sin() * axis.vec()).normalize()
+            Surface::Cone { half_angle, .. } => {
+                let open = self.cone_open().vec();
+                (half_angle.cos() * radial - half_angle.sin() * open).normalize()
             }
             Surface::Torus { axis, .. } => {
                 (v.cos() * radial + v.sin() * axis.vec()).normalize()
@@ -232,7 +277,7 @@ impl Surface {
     fn normal_ignores_v(&self, v0: f32, v1: f32) -> bool {
         match *self {
             Surface::Plane { .. } | Surface::Cylinder { .. } => true,
-            Surface::Cone { .. } => (v0 >= 0.0) == (v1 >= 0.0),
+            Surface::Cone { .. } => true,
             Surface::Torus { .. } | Surface::Sphere { .. } => false,
         }
     }
@@ -255,16 +300,12 @@ impl Surface {
                 (d - axis * d.dot(axis)).length() - radius
             }
             Surface::Sphere { center, radius, .. } => (p - center).length() - radius,
-            Surface::Cone {
-                apex,
-                axis,
-                half_angle,
-                ..
-            } => {
-                let (d, axis) = (p - apex, axis.vec());
-                let along = d.dot(axis);
-                let perp = (d - axis * along).length();
-                perp * half_angle.cos() - along.abs() * half_angle.sin()
+            Surface::Cone { half_angle, .. } => {
+                let open = self.cone_open().vec();
+                let d = p - self.cone_apex();
+                let along = d.dot(open);
+                let perp = (d - open * along).length();
+                perp * half_angle.cos() - along * half_angle.sin()
             }
             Surface::Torus {
                 center,
@@ -294,20 +335,15 @@ impl Surface {
                 (d - axis * d.dot(axis)).normalize_or(axis)
             }
             Surface::Sphere { center, .. } => (p - center).normalize_or(Vec3::Z),
-            Surface::Cone {
-                apex,
-                axis,
-                half_angle,
-                ..
-            } => {
-                let (d, axis) = (p - apex, axis.vec());
-                let along = d.dot(axis);
-                let radial = (d - axis * along).normalize_or(Vec3::ZERO);
+            Surface::Cone { half_angle, .. } => {
+                let open = self.cone_open().vec();
+                let d = p - self.cone_apex();
+                let along = d.dot(open);
+                let radial = (d - open * along).normalize_or(Vec3::ZERO);
                 if radial == Vec3::ZERO {
-                    return axis;
+                    return open;
                 }
-                let side = if along < 0.0 { -1.0 } else { 1.0 };
-                (radial * half_angle.cos() - axis * side * half_angle.sin()).normalize()
+                (radial * half_angle.cos() - open * half_angle.sin()).normalize()
             }
             Surface::Torus {
                 center,
@@ -353,15 +389,10 @@ impl Surface {
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
                 (u, rel.dot(axis.vec()))
             }
-            Surface::Cone {
-                apex,
-                axis,
-                ref_dir: _,
-                ..
-            } => {
-                let rel = p - apex;
+            Surface::Cone { .. } => {
+                let rel = p - self.cone_apex();
                 let u = wrap_angle(rel.dot(d1).atan2(rel.dot(d0)));
-                (u, rel.dot(axis.vec()))
+                (u, rel.dot(self.cone_open().vec()))
             }
             Surface::Torus {
                 center,

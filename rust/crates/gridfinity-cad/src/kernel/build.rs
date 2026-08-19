@@ -409,6 +409,21 @@ fn cone_or_cylinder(center: Vec2, r0: f32, z0: f32, r1: f32, z1: f32) -> Surface
         return Surface::cylinder_z(vec3_of(center.x, center.y, 0.0), r0);
     }
     let k = (r1 - r0) / (z1 - z0);
-    let z_apex = z0 - r0 / k;
-    Surface::cone_z(vec3_of(center.x, center.y, z_apex), k.abs().atan())
+    let ((z_at, r_at), open) = if r1 > r0 {
+        ((z1, r1), Vec3::Z)
+    } else {
+        ((z0, r0), -Vec3::Z)
+    };
+    assert!(
+        r_at > 0.0,
+        "a cone face is named at the end where it is wider, which has a positive radius, but \
+         the ring pair ({r0} at {z0}, {r1} at {z1}) is widest at {r_at}"
+    );
+    Surface::cone(
+        vec3_of(center.x, center.y, z_at),
+        open,
+        r_at,
+        k.abs().atan(),
+        Vec3::X,
+    )
 }

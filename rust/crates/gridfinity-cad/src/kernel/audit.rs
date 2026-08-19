@@ -786,15 +786,11 @@ fn dist_to_surface(p: Vec3, s: Surface) -> f32 {
             let radial = rel - *axis * rel.dot(*axis);
             (radial.length() - radius).abs()
         }
-        Surface::Cone {
-            apex,
-            axis,
-            half_angle,
-            ..
-        } => {
-            let rel = p - apex;
-            let along = rel.dot(*axis);
-            let perp = (rel - *axis * along).length();
+        Surface::Cone { half_angle, .. } => {
+            let open = s.cone_open().vec();
+            let rel = p - s.cone_apex();
+            let along = rel.dot(open);
+            let perp = (rel - open * along).length();
             let r = rel.length();
             if r < 1e-9 {
                 0.0

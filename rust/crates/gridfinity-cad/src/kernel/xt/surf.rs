@@ -119,11 +119,18 @@ pub fn of_surface(surface: &Surface, samples: &[Vec3]) -> Result<XtSurface, Stri
             }
         }
         Surface::Cone {
-            apex,
+            pvec,
             axis,
+            radius,
             half_angle,
             ref_dir,
-        } => cone_of(apex, axis, half_angle, ref_dir, samples)?,
+        } => XtSurface::Cone {
+            pvec,
+            axis,
+            radius,
+            half_angle,
+            x_axis: ref_dir,
+        },
         Surface::Sphere {
             center,
             axis,
@@ -157,44 +164,6 @@ pub fn of_surface(surface: &Surface, samples: &[Vec3]) -> Result<XtSurface, Stri
         }
     }
     Ok(out)
-}
-
-/// The XT half-cone the face using `samples` lies on, of the kernel's double
-/// cone about `apex`.
-///
-/// XT's axis points away from the half in use and its `radius` is measured at
-/// `pvec`, so the half is named by putting `pvec` in the middle of the axial
-/// span the samples cover. A face reaching the apex, or spanning both halves,
-/// has no such point and is refused.
-fn cone_of(
-    apex: Vec3,
-    axis: Dir,
-    half_angle: f32,
-    ref_dir: Dir,
-    samples: &[Vec3],
-) -> Result<XtSurface, String> {
-    assert!(
-        half_angle > 0.0 && half_angle < std::f32::consts::FRAC_PI_2,
-        "a cone's half angle lies strictly between zero and a quarter turn, got {half_angle}"
-    );
-    let along: Vec<f32> = samples.iter().map(|&p| (p - apex).dot(*axis)).collect();
-    let (lo, hi) = along.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(l, h), &v| {
-        (l.min(v), h.max(v))
-    });
-    if lo <= 0.0 && hi >= 0.0 {
-        return Err(format!(
-            "a face on the cone at {apex:?} reaches its apex, spanning {lo} to {hi} along the axis"
-        ));
-    }
-    let side = if hi > 0.0 { 1.0 } else { -1.0 };
-    let mid = (lo + hi) * 0.5;
-    Ok(XtSurface::Cone {
-        pvec: apex + *axis * mid,
-        axis: if side > 0.0 { -axis } else { axis },
-        radius: mid.abs() * half_angle.tan(),
-        half_angle,
-        x_axis: ref_dir,
-    })
 }
 
 /// The XT torus the face using `samples` lies on.

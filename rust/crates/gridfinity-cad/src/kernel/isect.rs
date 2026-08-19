@@ -281,14 +281,12 @@ fn plane_cylinder(pl: &Surface, cy: &Surface) -> Intersection {
 fn plane_cone(pl: &Surface, co: &Surface) -> Intersection {
     let (_, n) = plane_parts(pl);
     let Surface::Cone {
-        apex,
-        axis,
-        half_angle,
-        ..
+        axis, half_angle, ..
     } = *co
     else {
         unreachable!()
     };
+    let apex = co.cone_apex();
     let cos_t = axis.dot(n).abs();
     let sin_ha = half_angle.sin();
 
@@ -637,7 +635,7 @@ mod tests {
     #[test]
     fn plane_cone_square_on_is_a_circle() {
         let co = Surface::cone_z(Vec3::ZERO, PI / 6.0);
-        let pl = Surface::plane_z(-3.0);
+        let pl = Surface::plane_z(3.0);
         let isect = intersect_surfaces(&pl, &co);
         assert_on_both(&pl, &co, &isect);
         let Curve::Circle { radius, .. } = isect.curves()[0] else {
@@ -653,7 +651,7 @@ mod tests {
     fn plane_cone_closed_section_is_an_ellipse() {
         let co = Surface::cone_z(Vec3::ZERO, PI / 8.0);
         let pl = Surface::plane(
-            Vec3::new(0.0, 0.0, -5.0),
+            Vec3::new(0.0, 0.0, 5.0),
             Vec3::new(0.0, 0.2, 1.0).normalize(),
         );
         let isect = intersect_surfaces(&pl, &co);
@@ -665,7 +663,7 @@ mod tests {
     fn plane_cone_open_section_is_reported_unsupported() {
         let co = Surface::cone_z(Vec3::ZERO, PI / 3.0);
         let pl = Surface::plane(
-            Vec3::new(0.0, 0.0, -5.0),
+            Vec3::new(0.0, 0.0, 5.0),
             Vec3::new(0.0, 1.0, 0.2).normalize(),
         );
         assert!(matches!(
@@ -764,7 +762,7 @@ mod tests {
             ),
             Surface::cylinder_z(Vec3::new(1.0, 0.0, 0.0), 3.0),
             Surface::sphere(Vec3::new(0.0, 1.0, 0.0), 4.0),
-            Surface::cone_z(Vec3::ZERO, PI / 5.0),
+            Surface::cone_z(Vec3::new(0.0, 0.0, -10.0), PI / 5.0),
             Surface::torus_z(Vec3::ZERO, 8.0, 2.0),
         ];
         for s in &surfaces {
