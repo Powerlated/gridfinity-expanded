@@ -202,9 +202,10 @@ fn runout_torus(
         (rel - axis * rel.dot(axis)).length()
     };
     assert!(
-        (spine - major).abs() <= join_agree(minor),
+        (spine - major.abs()).abs() <= join_agree(minor),
         "blend runout: the ball centre {cv:?} stands {spine} from the torus axis, not the \
-         major radius {major}; the ball centre rides the torus's spine, and `reconcile_shared_ends` \
+         major radius {major}, whose sign names the sheet and whose magnitude is the spine's \
+         radius; the ball centre rides the torus's spine, and `reconcile_shared_ends` \
          may move it by at most a MAX_JOIN_KINK's worth"
     );
 
