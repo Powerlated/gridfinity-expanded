@@ -523,8 +523,10 @@ pub enum Curve {
     },
     Ellipse {
         center: Vec3,
-        a: Vec3,
-        b: Vec3,
+        axis: Dir,
+        x_axis: Dir,
+        major: f32,
+        minor: f32,
     },
     TorusSection {
         center: Vec3,
@@ -577,7 +579,16 @@ impl Curve {
                 let (d0, d1) = radial_frame(axis, ref_dir);
                 center + radius * (t.cos() * d0 + t.sin() * d1)
             }
-            Curve::Ellipse { center, a, b } => center + t.cos() * a + t.sin() * b,
+            Curve::Ellipse {
+                center,
+                axis,
+                x_axis,
+                major,
+                minor,
+            } => {
+                let y = axis.cross_exact(x_axis).vec();
+                center + (major * t.cos()) * x_axis.vec() + (minor * t.sin()) * y
+            }
             Curve::TorusSection {
                 center,
                 axis,
@@ -611,7 +622,16 @@ impl Curve {
                 let (d0, d1) = radial_frame(axis, ref_dir);
                 radius * (-t.sin() * d0 + t.cos() * d1)
             }
-            Curve::Ellipse { a, b, .. } => -t.sin() * a + t.cos() * b,
+            Curve::Ellipse {
+                axis,
+                x_axis,
+                major,
+                minor,
+                ..
+            } => {
+                let y = axis.cross_exact(x_axis).vec();
+                -(major * t.sin()) * x_axis.vec() + (minor * t.cos()) * y
+            }
             Curve::TorusSection {
                 axis,
                 ref_dir,
@@ -641,6 +661,93 @@ impl Curve {
                     + minor * t.cos() * axis.vec()
             }
         }
+    }
+
+    /// The ellipse of `major` and `minor` radii centred at `centre`, lying in
+    /// the plane normal to `axis` with its parameter measured from `x_axis`.
+    pub fn ellipse(centre: Vec3, axis: Vec3, x_axis: Vec3, major: f32, minor: f32) -> Curve {
+        assert!(
+            major >= minor && minor > 0.0,
+            "an ellipse is named by its major and then its minor radius, both positive, got \
+             major {major} minor {minor}"
+        );
+        let axis = Dir::new(axis);
+        Curve::Ellipse {
+            center: centre,
+            axis,
+            x_axis: perp_unit(axis, x_axis),
+            major,
+            minor,
+        }
+    }
+
+    /// The ellipse `centre + a cos t + b sin t` restated in principal axes,
+    /// with the parameter range `(t0, t1)` carried onto the new parameter.
+    ///
+    /// `a` and `b` span the ellipse's plane but need be neither orthogonal nor
+    /// ordered by length, which is how a conic section falls out of a solve;
+    /// the format names an ellipse by a perpendicular pair, longer first.
+    /// Rotating the pair by the angle that makes it orthogonal leaves the same
+    /// point set traversed in the same direction and shifts every parameter by
+    /// that same angle, so the range shifts with it -- returning the curve
+    /// without the range would silently move both of its endpoints.
+    pub fn ellipse_from_conjugate(
+        centre: Vec3,
+        a: Vec3,
+        b: Vec3,
+        t0: f32,
+        t1: f32,
+    ) -> (Curve, f32, f32) {
+        let (aa, bb, ab) = (a.dot(a), b.dot(b), a.dot(b));
+        let theta = 0.5 * (2.0 * ab).atan2(aa - bb);
+        let (s, c) = theta.sin_cos();
+        let (mut x, mut y) = (a * c + b * s, b * c - a * s);
+        let mut shift = theta;
+        assert!(
+            x.dot(y).abs() <= 1e-3 * x.length() * y.length(),
+            "rotating an ellipse's axes by {theta} must make them orthogonal, but {x:?} and \
+             {y:?} meet at a cosine of {}",
+            x.dot(y) / (x.length() * y.length())
+        );
+        if x.length() < y.length() {
+            (x, y) = (y, -x);
+            shift += std::f32::consts::FRAC_PI_2;
+        }
+        let normal = x.cross(y);
+        assert!(
+            a.cross(b).dot(normal) > 0.0,
+            "an ellipse's principal axes are reached by a rotation, which cannot reverse the \
+             direction {:?} it is traversed in",
+            a.cross(b)
+        );
+        let out = Curve::ellipse(centre, normal, x, x.length(), y.length());
+        for t in [t0, t1] {
+            let was = centre + t.cos() * a + t.sin() * b;
+            let now = out.point(t - shift);
+            assert!(
+                (now - was).length() <= 1e-3 * (1.0 + was.length()),
+                "restating an ellipse in principal axes moves no point of it, but the end at \
+                 {t} was {was:?} and is {now:?}"
+            );
+        }
+        (out, t0 - shift, t1 - shift)
+    }
+
+    /// A conjugate pair spanning this ellipse, for a caller stating a question
+    /// as `centre + a cos t + b sin t`. Perpendicular, since the stored form
+    /// is, and scaled to the two radii.
+    pub fn conjugate_axes(&self) -> (Vec3, Vec3) {
+        let Curve::Ellipse {
+            axis,
+            x_axis,
+            major,
+            minor,
+            ..
+        } = *self
+        else {
+            panic!("only an ellipse has conjugate axes, got {self:?}");
+        };
+        (x_axis.vec() * major, axis.cross_exact(x_axis).vec() * minor)
     }
 
     pub fn torus_section(

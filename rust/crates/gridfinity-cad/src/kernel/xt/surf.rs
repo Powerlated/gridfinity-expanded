@@ -457,51 +457,21 @@ pub fn of_curve(curve: &Curve) -> Option<XtCurve> {
             x_axis: ref_dir,
             radius,
         }),
-        Curve::Ellipse { center, a, b } => {
-            let (x_axis, major, minor, normal) = principal_axes(a, b);
-            Some(XtCurve::Ellipse {
-                centre: center,
-                normal: Dir::new(normal),
-                x_axis: Dir::new(x_axis).perp_to(Dir::new(normal)),
-                major,
-                minor,
-            })
-        }
+        Curve::Ellipse {
+            center,
+            axis,
+            x_axis,
+            major,
+            minor,
+        } => Some(XtCurve::Ellipse {
+            centre: center,
+            normal: axis,
+            x_axis,
+            major,
+            minor,
+        }),
         Curve::TorusSection { .. } => None,
     }
-}
-
-/// The principal axes of the ellipse `centre + a cos t + b sin t`, as the
-/// (x_axis, major radius, minor radius, normal) an XT ELLIPSE carries.
-///
-/// `a` and `b` span the ellipse's plane but need be neither orthogonal nor
-/// ordered by length. Rotating the pair by the angle that makes it orthogonal
-/// leaves the same point set, traversed in the same direction -- which is why
-/// the normal is taken from `a x b` and survives the rotation -- and swapping a
-/// too-short first axis for the second turns the pair by a further quarter,
-/// preserving that direction rather than reflecting it.
-fn principal_axes(a: Vec3, b: Vec3) -> (Vec3, f32, f32, Vec3) {
-    let (aa, bb, ab) = (a.dot(a), b.dot(b), a.dot(b));
-    let theta = 0.5 * (2.0 * ab).atan2(aa - bb);
-    let (s, c) = theta.sin_cos();
-    let (mut x, mut y) = (a * c + b * s, b * c - a * s);
-    assert!(
-        x.dot(y).abs() <= 1e-3 * x.length() * y.length(),
-        "rotating an ellipse's axes by {theta} must make them orthogonal, but {x:?} and {y:?} \
-         meet at a cosine of {}",
-        x.dot(y) / (x.length() * y.length())
-    );
-    if x.length() < y.length() {
-        (x, y) = (y, -x);
-    }
-    let normal = x.cross(y).normalize();
-    assert!(
-        a.cross(b).dot(normal) > 0.0,
-        "an ellipse's principal axes must be reached by a rotation, which cannot reverse the \
-         direction {:?} it is traversed in",
-        a.cross(b)
-    );
-    (x.normalize(), x.length(), y.length(), normal)
 }
 
 impl XtCurve {

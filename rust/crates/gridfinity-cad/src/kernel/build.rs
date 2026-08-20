@@ -1,4 +1,4 @@
-use crate::kernel::geom::Surface;
+use crate::kernel::geom::{Curve, Surface};
 use crate::kernel::math::{Vec2, Vec3, vec3_of};
 use crate::kernel::sketch::{Seg, Sketch, loop_area, reverse_loop};
 use crate::kernel::topo::{Builder, EdgeId, Loop, Solid, VertexId};
@@ -136,7 +136,9 @@ pub fn ring_on_plane(b: &mut Builder, segs: &[Seg], plane: (Vec3, Vec3)) -> Ring
                              arc's own parameter"
                         );
                     }
-                    b.ellipse(verts[k], verts[k1], c3, ea, eb, a0, a1)
+                    let (curve, s0, s1) =
+                        Curve::ellipse_from_conjugate(c3, ea, eb, a0, a1);
+                    b.ellipse(verts[k], verts[k1], curve, s0, s1)
                 }
             }
         });

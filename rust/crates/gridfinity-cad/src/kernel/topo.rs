@@ -20,6 +20,22 @@ pub struct Edge {
 }
 
 impl Edge {
+    /// Whether the edge runs with its curve's own parameter or against it.
+    ///
+    /// An edge is a span of a curve between two vertices, and which of the two
+    /// the span starts at is all that distinguishes the two directions -- so
+    /// the answer is in the parameter range and nowhere else. A consumer that
+    /// carries no range of its own, as a transmit file's EDGE does not, needs
+    /// exactly this bit alongside the curve.
+    pub fn runs_with_curve(&self) -> bool {
+        assert!(
+            self.t0 != self.t1,
+            "an edge spans a real parameter range, so its ends differ, but both are {}",
+            self.t0
+        );
+        self.t1 > self.t0
+    }
+
     pub fn sample(&self, forward: bool, n: usize) -> Vec<Vec3> {
         let mut out = Vec::with_capacity(n + 1);
         self.sample_into(forward, n, &mut out);
@@ -1204,17 +1220,14 @@ impl Builder {
         &mut self,
         a: VertexId,
         b: VertexId,
-        center: Vec3,
-        ea: Vec3,
-        eb: Vec3,
+        curve: Curve,
         t0: f32,
         t1: f32,
     ) -> (EdgeId, bool) {
-        let curve = Curve::Ellipse {
-            center,
-            a: ea,
-            b: eb,
-        };
+        assert!(
+            matches!(curve, Curve::Ellipse { .. }),
+            "an elliptical edge is built from an ellipse, got {curve:?}"
+        );
         let mid = curve.point((t0 + t1) * 0.5);
         self.edge_between(a, b, mid, || Edge {
             curve,

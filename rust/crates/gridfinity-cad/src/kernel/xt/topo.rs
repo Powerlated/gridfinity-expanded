@@ -695,10 +695,13 @@ fn emit_edges(
                 let travel = edge.curve.tangent((edge.t0 + edge.t1) * 0.5)
                     * (edge.t1 - edge.t0).signum();
                 let agree = travel.normalize().dot(curve.tangent(mid));
+                let with_curve = edge.runs_with_curve();
                 assert!(
-                    agree.abs() > 0.9,
+                    agree.abs() > 0.9 && (agree > 0.0) == with_curve,
                     "edge {e} runs along its own curve, so its direction and the emitted curve's \
-                     tangent must be parallel, but they meet at a cosine of {agree}"
+                     tangent must be parallel and must agree with the way its parameter range \
+                     runs, but they meet at a cosine of {agree} over a range running {}",
+                    if with_curve { "forward" } else { "backward" }
                 );
                 curve.write(
                     w,
@@ -709,7 +712,7 @@ fn emit_edges(
                         next: curve_links[at].0,
                         prev: curve_links[at].1,
                         geometric_owner: 0,
-                        sense: if agree > 0.0 { '+' } else { '-' },
+                        sense: if with_curve { '+' } else { '-' },
                     },
                 );
             }

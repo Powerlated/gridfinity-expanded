@@ -260,11 +260,16 @@ fn plane_cylinder(pl: &Surface, cy: &Surface) -> Intersection {
         }]);
     }
     let major = n.cross(minor).normalize();
-    Intersection::Curves(vec![Curve::Ellipse {
-        center,
-        a: major * (radius / cos_t.abs()),
-        b: minor * radius,
-    }])
+    Intersection::Curves(vec![
+        Curve::ellipse_from_conjugate(
+            center,
+            major * (radius / cos_t.abs()),
+            minor * radius,
+            0.0,
+            0.0,
+        )
+        .0,
+    ])
 }
 
 /// A plane against a cone: the section, but only where the section is closed.
@@ -326,11 +331,16 @@ fn plane_cone(pl: &Surface, co: &Surface) -> Intersection {
     if semi_minor_sq <= TOL {
         return Intersection::Unsupported("degenerate cone section");
     }
-    Intersection::Curves(vec![Curve::Ellipse {
-        center,
-        a: (p2 - p1).normalize() * semi_major,
-        b: minor_dir * semi_minor_sq.sqrt(),
-    }])
+    Intersection::Curves(vec![
+        Curve::ellipse_from_conjugate(
+            center,
+            (p2 - p1).normalize() * semi_major,
+            minor_dir * semi_minor_sq.sqrt(),
+            0.0,
+            0.0,
+        )
+        .0,
+    ])
 }
 
 /// Where the cone's generator leaning towards `dir` meets the plane, or `None`
@@ -612,14 +622,13 @@ mod tests {
         let pl = Surface::plane(Vec3::ZERO, Vec3::new(0.0, 1.0, 1.0).normalize());
         let isect = intersect_surfaces(&pl, &cy);
         assert_on_both(&pl, &cy, &isect);
-        let Curve::Ellipse { a, b, .. } = isect.curves()[0] else {
+        let Curve::Ellipse { major, minor, .. } = isect.curves()[0] else {
             panic!("want an ellipse")
         };
-        assert!((b.length() - 4.0).abs() < 1e-4, "semi-minor {}", b.length());
+        assert!((minor - 4.0).abs() < 1e-4, "semi-minor {minor}");
         assert!(
-            (a.length() - 4.0 * 2.0f32.sqrt()).abs() < 1e-3,
-            "semi-major {}",
-            a.length()
+            (major - 4.0 * 2.0f32.sqrt()).abs() < 1e-3,
+            "semi-major {major}",
         );
     }
 

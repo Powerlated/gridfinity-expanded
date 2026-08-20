@@ -59,7 +59,8 @@ pub fn curve_plane_params(curve: &Curve, t0: f32, t1: f32, plane: &Surface) -> V
             .filter(|&t| within(t))
             .collect()
         }
-        Curve::Ellipse { center, a, b } => {
+        Curve::Ellipse { center, .. } => {
+            let (a, b) = curve.conjugate_axes();
             harmonic_roots(a.dot(*normal), b.dot(*normal), c - center.dot(*normal), lo, hi)
                 .into_iter()
                 .filter(|&t| within(t))
@@ -226,7 +227,8 @@ pub fn param_of(curve: &Curve, p: Vec3) -> f32 {
             let v = p - center;
             v.dot(d1).atan2(v.dot(d0))
         }
-        Curve::Ellipse { center, a, b } => {
+        Curve::Ellipse { center, .. } => {
+            let (a, b) = curve.conjugate_axes();
             let v = p - center;
             let (la, lb) = (a.length_squared().max(1e-12), b.length_squared().max(1e-12));
             (v.dot(b) / lb).atan2(v.dot(a) / la)
@@ -1180,11 +1182,7 @@ mod tests {
 
     #[test]
     fn an_ellipse_crosses_a_secant_plane_twice() {
-        let curve = Curve::Ellipse {
-            center: Vec3::ZERO,
-            a: Vec3::new(6.0, 0.0, 0.0),
-            b: Vec3::new(0.0, 3.0, 0.0),
-        };
+        let curve = Curve::ellipse(Vec3::ZERO, Vec3::Z, Vec3::X, 6.0, 3.0);
         let plane = plane_x(2.0);
         let params = curve_plane_params(&curve, -PI, PI, &plane);
         assert_eq!(params.len(), 2, "{params:?}");
@@ -1278,11 +1276,7 @@ mod tests {
         let curves = [
             Curve::line(Vec3::new(-3.0, 1.0, 2.0), Vec3::new(5.0, 1.0, 2.0)),
             Curve::circle_z(Vec3::new(1.0, -2.0, 3.0), 4.0),
-            Curve::Ellipse {
-                center: Vec3::new(0.5, 0.0, -1.0),
-                a: Vec3::new(6.0, 0.0, 0.0),
-                b: Vec3::new(0.0, 3.0, 0.0),
-            },
+            Curve::ellipse(Vec3::new(0.5, 0.0, -1.0), Vec3::Z, Vec3::X, 6.0, 3.0),
             Curve::torus_section(
                 Vec3::new(2.0, 1.0, 0.0),
                 Vec3::Z,

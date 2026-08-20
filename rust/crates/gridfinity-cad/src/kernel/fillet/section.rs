@@ -90,14 +90,11 @@ fn runout_cyl(
     let b_vec = d * (-r * e2.dot(n) / dn) + e2 * r;
     let u = (tb_p - cv).normalize_or_zero();
     let t1 = u.dot(e2).atan2(u.dot(e1));
+    let (curve, s0, s1) = Curve::ellipse_from_conjugate(onto(cv), a_vec, b_vec, 0.0, t1);
     let arc = CurvEdge {
-        curve: Curve::Ellipse {
-            center: onto(cv),
-            a: a_vec,
-            b: b_vec,
-        },
-        t0: 0.0,
-        t1,
+        curve,
+        t0: s0,
+        t1: s1,
     };
     Ok((onto(ta_p), onto(tb_p), arc))
 }
