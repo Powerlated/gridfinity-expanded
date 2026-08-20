@@ -354,7 +354,6 @@ mod tests {
         let mut max_curve = 0.0f32;
         let used = used_edges(solid);
         let ef = solid.edge_faces();
-        let mut surfaces: Vec<surf::XtSurface> = Vec::with_capacity(solid.faces.len());
         for fi in 0..solid.faces.len() {
             let face = &solid.faces[fi];
             let mut samples: Vec<Vec3> = Vec::new();
@@ -368,12 +367,11 @@ mod tests {
                     );
                 }
             }
-            let xt = surf::of_surface(&face.surface, &samples)
-                .expect("the writer translated this face, so the test can");
+            surf::check_surface(&face.surface, &samples)
+                .expect("the writer wrote this face, so the test can measure it");
             for &p in &samples {
-                max_surface = max_surface.max(xt.distance(p).abs());
+                max_surface = max_surface.max(face.surface.signed_distance(p).abs());
             }
-            surfaces.push(xt);
         }
         for (e, edge) in solid.edges.iter().enumerate() {
             if !used[e] {
@@ -393,7 +391,8 @@ mod tests {
                 None => {
                     for p in points {
                         for &fi in &ef[e] {
-                            max_curve = max_curve.max(surfaces[fi].distance(p).abs());
+                            max_curve = max_curve
+                                .max(solid.faces[fi].surface.signed_distance(p).abs());
                         }
                     }
                 }

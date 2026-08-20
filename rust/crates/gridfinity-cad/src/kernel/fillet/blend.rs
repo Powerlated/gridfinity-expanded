@@ -295,13 +295,8 @@ fn build_torus_blend(
         major > 0.05,
         "blend torus degenerates to a ring: major {major} minor {r}"
     );
-    let surface = Surface::Torus {
-        center: torus_center,
-        axis: torus_axis,
-        major_r: major,
-        minor_r: r,
-        ref_dir,
-    };
+    let surface =
+        Surface::torus_through(torus_center, *torus_axis, major, r, *ref_dir, ta_p0);
     let _ = (edge_center, edge_radius);
 
     let ta_center = torus_center + *torus_axis * (ta_p0 - torus_center).dot(*torus_axis);

@@ -18,7 +18,8 @@
 
 use crate::kernel::geom::Curve;
 use crate::kernel::math::Vec3;
-use crate::kernel::xt::surf::{GeomLinks, ON_GEOMETRY_MM, XtSurface};
+use crate::kernel::geom::Surface;
+use crate::kernel::xt::surf::{self, GeomLinks, ON_GEOMETRY_MM};
 use crate::kernel::xt::text::{self, Index, Writer};
 
 /// Chart points per quarter turn of the section's own parameter, and the fewest
@@ -59,7 +60,7 @@ pub fn plan(
     t0: f32,
     t1: f32,
     ends: (Vec3, Vec3),
-    faces: [(&XtSurface, char); 2],
+    faces: [(&Surface, char); 2],
 ) -> Result<Intersection, String> {
     assert!(
         t0.is_finite() && t1.is_finite() && (t1 - t0).abs() > 0.0,
@@ -74,12 +75,12 @@ pub fn plan(
 
     for (surface, _) in faces {
         for &p in &chart {
-            let d = surface.distance(p);
+            let d = surface.signed_distance(p);
             if d.abs() > ON_GEOMETRY_MM {
                 return Err(format!(
                     "a point of the torus section, {p:?}, stands {d} mm off the {} it is written \
                      as the intersection with",
-                    surface.node_name()
+                    surf::surface_name(surface)
                 ));
             }
         }
@@ -118,8 +119,8 @@ pub fn plan(
 
 /// A surface's normal at `p` as the format's intersection definition uses it:
 /// the natural normal, reversed where the surface's own sense field reverses it.
-fn sensed_normal((surface, sense): (&XtSurface, char), p: Vec3) -> Vec3 {
-    let n = surface.natural_normal(p);
+fn sensed_normal((surface, sense): (&Surface, char), p: Vec3) -> Vec3 {
+    let n = surf::natural_normal(surface, p);
     if sense == '+' { n } else { -n }
 }
 

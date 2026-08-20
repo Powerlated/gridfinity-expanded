@@ -203,7 +203,23 @@ impl Surface {
         Surface::torus(center, Vec3::Z, major_r, minor_r, Vec3::X)
     }
 
+    /// The torus of the given radii about `axis` through `center`.
+    ///
+    /// `major_r` is signed, and its sign names which sheet of the surface this
+    /// is. A torus whose minor radius exceeds its major one -- a spindle, which
+    /// is what a rolling ball leaves at a concave corner -- meets itself on the
+    /// axis and has two: the outer sheet takes the major radius positive, the
+    /// inner one takes it negative, which is what turns that sheet into the
+    /// surface's own outer one. For a ring torus the two coincide and the sign
+    /// is positive. A face cannot span both, its normal vanishing where they
+    /// meet, so the surface names the sheet rather than leaving a later reader
+    /// to infer it from the face.
     pub fn torus(center: Vec3, axis: Vec3, major_r: f32, minor_r: f32, ref_dir: Vec3) -> Surface {
+        assert!(
+            major_r != 0.0 && minor_r > 0.0,
+            "a torus has a non-zero major radius and a positive minor one, got major {major_r} \
+             minor {minor_r}"
+        );
         let axis = Dir::new(axis);
         Surface::Torus {
             center,
@@ -212,6 +228,42 @@ impl Surface {
             minor_r,
             ref_dir: perp_unit(axis, ref_dir),
         }
+    }
+
+    /// The torus of the given radii carrying the point `on`, whose sheet is
+    /// read off that point.
+    ///
+    /// `major_r` is given unsigned, as the geometry that produced it states it;
+    /// this is for the caller that has just solved a rolling-ball corner and
+    /// knows a point of the face but not which sheet of a spindle it landed on.
+    pub fn torus_through(
+        center: Vec3,
+        axis: Vec3,
+        major_r: f32,
+        minor_r: f32,
+        ref_dir: Vec3,
+        on: Vec3,
+    ) -> Surface {
+        assert!(
+            major_r > 0.0,
+            "the sheet is read from the point, so the major radius comes in unsigned and \
+             positive, got {major_r}"
+        );
+        let a = Dir::new(axis);
+        let d = on - center;
+        let along = d.dot(*a);
+        let perp = (d - *a * along).length();
+        let near = ((perp - major_r).powi(2) + along * along).sqrt() - minor_r;
+        let far = ((perp + major_r).powi(2) + along * along).sqrt() - minor_r;
+        let sheet = if near.abs() <= far.abs() { 1.0 } else { -1.0 };
+        let out = Surface::torus(center, axis, sheet * major_r, minor_r, ref_dir);
+        let off = out.signed_distance(on);
+        assert!(
+            off.abs() <= 1e-3,
+            "the point naming a torus's sheet lies on that sheet, but {on:?} stands {off} mm \
+             off the one it chose"
+        );
+        out
     }
 
     pub fn sphere(center: Vec3, radius: f32) -> Surface {
@@ -317,12 +369,7 @@ impl Surface {
                 let (d, axis) = (p - center, axis.vec());
                 let along = d.dot(axis);
                 let perp = (d - axis * along).length();
-                let near = ((perp - major_r).powi(2) + along * along).sqrt() - minor_r;
-                if major_r >= minor_r {
-                    return near;
-                }
-                let far = ((perp + major_r).powi(2) + along * along).sqrt() - minor_r;
-                if near.abs() <= far.abs() { near } else { far }
+                ((perp - major_r).powi(2) + along * along).sqrt() - minor_r
             }
         }
     }

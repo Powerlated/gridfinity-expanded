@@ -23,7 +23,7 @@
 use crate::kernel::geom::{Curve, Surface};
 use crate::kernel::topo::{Solid, VertexId};
 use crate::kernel::xt::isect::{self, Intersection};
-use crate::kernel::xt::surf::{self, GeomLinks, XtCurve, XtSurface, kernel_normal};
+use crate::kernel::xt::surf::{self, GeomLinks, XtCurve};
 use crate::kernel::xt::text::{self, Index, Writer};
 
 /// The size box and linear resolution a body declares. A transmit file carries
@@ -44,10 +44,10 @@ enum EdgeGeometry {
     Section(Intersection),
 }
 
-/// The face-side data every emitted face needs: its surface as XT states it, and
-/// the sense relating that surface's natural normal to the kernel's.
+/// The face-side data every emitted face needs: the sense relating the emitted
+/// surface's natural normal to the face's own outward one. The surface itself
+/// is the kernel's, written as it stands.
 struct FaceGeometry {
-    surface: XtSurface,
     sense: char,
 }
 
@@ -120,32 +120,32 @@ fn used_edges(solid: &Solid) -> Vec<bool> {
     used
 }
 
-/// Every face's surface as XT states it, with the sense that makes the emitted
-/// surface's natural normal answer the kernel's.
+/// Every face's surface sense: the one that makes the emitted surface's natural
+/// normal answer the kernel's outward one.
 ///
-/// The pair is what the format asks for: a face's normal is its surface's
-/// natural normal when the face and surface senses agree and the reverse when
-/// they do not, so writing the face's own sense unchanged and putting the
-/// difference between the two normals in the surface's sense reproduces the
-/// kernel's outward normal exactly.
+/// A face's normal is its surface's natural normal when the face and surface
+/// senses agree and the reverse when they do not, so writing the face's own
+/// sense unchanged and putting the difference between the two normals in the
+/// surface's sense reproduces the kernel's outward normal exactly. That
+/// difference is a property of the surface's variant rather than of the face --
+/// only a cone's natural normal opposes the kernel's gradient -- so no face is
+/// sampled to decide it, only to check that its points lie on it.
 fn face_geometry(solid: &Solid) -> Result<Vec<FaceGeometry>, String> {
     let mut out = Vec::with_capacity(solid.faces.len());
     for (fi, face) in solid.faces.iter().enumerate() {
         let samples = solid.face_points(fi);
-        let surface = surf::of_surface(&face.surface, &samples)
-            .map_err(|e| format!("face {fi}: {e}"))?;
+        surf::check_surface(&face.surface, &samples).map_err(|e| format!("face {fi}: {e}"))?;
+        let opposes = surf::natural_normal_opposes_gradient(&face.surface);
         let p = samples[0];
-        let (natural, kernel) = (surface.natural_normal(p), kernel_normal(&face.surface, p));
-        let agree = natural.dot(kernel);
+        let agree = surf::natural_normal(&face.surface, p).dot(face.surface.gradient(p).normalize());
         assert!(
-            agree.abs() > 0.99,
-            "face {fi}'s surface is written as a {} whose natural normal {natural:?} must be the \
-             kernel's {kernel:?} up to sign, but they meet at a cosine of {agree}",
-            surface.node_name()
+            (agree > 0.0) != opposes && agree.abs() > 0.99,
+            "face {fi}'s {} has a natural normal that is the kernel's gradient up to a sign the \
+             variant fixes, but they meet at a cosine of {agree}",
+            surf::surface_name(&face.surface)
         );
         out.push(FaceGeometry {
-            surface,
-            sense: if agree > 0.0 { '+' } else { '-' },
+            sense: if opposes { '-' } else { '+' },
         });
     }
     Ok(out)
@@ -189,8 +189,8 @@ fn edge_geometry(
             ));
         }
         let pair = [
-            (&geometry[faces[0]].surface, geometry[faces[0]].sense),
-            (&geometry[faces[1]].surface, geometry[faces[1]].sense),
+            (&solid.faces[faces[0]].surface, geometry[faces[0]].sense),
+            (&solid.faces[faces[1]].surface, geometry[faces[1]].sense),
         ];
         let ends = (solid.vertex(edge.v0), solid.vertex(edge.v1));
         let plan = isect::plan(&edge.curve, edge.t0, edge.t1, ends, pair)
@@ -598,8 +598,9 @@ fn emit_faces(
         w.ptr(links[fi].1);
         w.ptr(ids.void_shell[c]);
 
-        geometry[fi].surface.write(
+        surf::write_surface(
             w,
+            &solid.faces[fi].surface,
             ids.surface[fi],
             &GeomLinks {
                 node_id: ids.surface[fi] as i64,

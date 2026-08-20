@@ -1,23 +1,19 @@
-//! The kernel's analytic geometry restated in the parameters an XT surface or
-//! curve node carries.
+//! The kernel's analytic geometry written as the surface and curve nodes of a
+//! transmit file.
 //!
-//! Each `XtSurface` and `XtCurve` holds exactly the fields the format defines
-//! for that node and nothing else, so `write` is a transcription and every
-//! decision about *how* to say a kernel `Surface` or `Curve` in XT terms is made
-//! in `of_surface` / `of_curve`. Three of those decisions are not one-to-one.
-//! A kernel cone is a double cone about its apex and XT's is a half named by a
-//! point on its axis, a radius there, and an axis pointing *away* from the half
-//! in use, so the face's own samples pick the half. A kernel ellipse is any
-//! `centre + a cos t + b sin t` and XT's is a pair of principal axes, so the
-//! pair is rotated until it is orthogonal. And a kernel torus face may sit on
-//! either sheet of a spindle, which XT names as separate surfaces through the
-//! sign of the major radius.
+//! There is no restatement here and no second copy of the geometry. A kernel
+//! `Surface` carries exactly the fields the format's PLANE, CYLINDER, CONE,
+//! SPHERE and TORUS carry, in the same terms -- a cone is one nappe named by a
+//! point, a radius there and an axis toward the apex; a torus names its sheet
+//! by the sign of its major radius; every direction is already unit in `f64`
+//! and every reference direction already perpendicular to its axis -- so
+//! `write_surface` is a transcription of the fields in schema order. The one
+//! decision left is which way the node's natural normal points relative to the
+//! kernel's gradient, and `natural_normal_opposes_gradient` answers it from the
+//! variant alone rather than by sampling the face.
 //!
-//! `distance` and `natural_normal` restate each emitted node's own implicit
-//! equation and its `dP/du x dP/dv`. They exist to be asserted against the
-//! kernel's answer at points the face really contains: a mistranslation that
-//! would otherwise surface as a rejected file in someone's CAD system fails
-//! here, naming the surface.
+//! `Curve` is the same story for LINE, CIRCLE and ELLIPSE. `TorusSection` has
+//! no analytic node and `isect` writes it as an intersection instead.
 
 use crate::kernel::geom::{Curve, Surface};
 use crate::kernel::math::{Dir, Vec3};
@@ -46,77 +42,123 @@ pub struct GeomLinks {
     pub sense: char,
 }
 
-pub enum XtSurface {
-    Plane {
-        pvec: Vec3,
-        normal: Dir,
-        x_axis: Dir,
-    },
-    Cylinder {
-        pvec: Vec3,
-        axis: Dir,
-        radius: f32,
-        x_axis: Dir,
-    },
-    Cone {
-        pvec: Vec3,
-        axis: Dir,
-        radius: f32,
-        half_angle: f32,
-        x_axis: Dir,
-    },
-    Sphere {
-        centre: Vec3,
-        radius: f32,
-        axis: Dir,
-        x_axis: Dir,
-    },
-    Torus {
-        centre: Vec3,
-        axis: Dir,
-        major: f32,
-        minor: f32,
-        x_axis: Dir,
-    },
+/// Whether the format's natural normal for this surface's node points opposite
+/// the kernel's `gradient`, which is what the emitted surface sense reconciles.
+///
+/// The format defines a surface's natural normal as `dP/du x dP/dv` of its own
+/// parametric form. For a plane, cylinder, sphere and torus that is the
+/// outward gradient the kernel already computes. For a cone it is
+/// `-(cos(half) * radial + sin(half) * axis)` and the kernel's is
+/// `cos(half) * radial - sin(half) * open`, and `axis` is `-open` -- so the two
+/// are exact negatives, for every point of every cone. It is a property of the
+/// variant, not of the face, so no face need be sampled to learn it.
+pub fn natural_normal_opposes_gradient(surface: &Surface) -> bool {
+    matches!(surface, Surface::Cone { .. })
 }
 
-/// The XT node for `surface` as the face carrying `samples` uses it, or a
-/// message naming what about that use the format cannot say.
+/// The surface's natural normal at `p` as the format defines it.
+pub fn natural_normal(surface: &Surface, p: Vec3) -> Vec3 {
+    let n = surface.gradient(p);
+    let len = n.length();
+    assert!(
+        len > 1e-6,
+        "the surface {surface:?} has a natural normal at every point a face uses, but it \
+         vanishes at {p:?}"
+    );
+    let n = n / len;
+    if natural_normal_opposes_gradient(surface) { -n } else { n }
+}
+
+/// The node type `surface` is written as.
+fn surface_node(surface: &Surface) -> u16 {
+    match surface {
+        Surface::Plane { .. } => text::PLANE,
+        Surface::Cylinder { .. } => text::CYLINDER,
+        Surface::Cone { .. } => text::CONE,
+        Surface::Sphere { .. } => text::SPHERE,
+        Surface::Torus { .. } => text::TORUS,
+    }
+}
+
+/// The node type's name, for a message about this surface.
+pub fn surface_name(surface: &Surface) -> &'static str {
+    match surface {
+        Surface::Plane { .. } => "PLANE",
+        Surface::Cylinder { .. } => "CYLINDER",
+        Surface::Cone { .. } => "CONE",
+        Surface::Sphere { .. } => "SPHERE",
+        Surface::Torus { .. } => "TORUS",
+    }
+}
+
+/// Checks that `surface` says what a node of the format can say, given the
+/// points of the face using it, and returns a message naming what it cannot.
 ///
-/// `samples` are points of the face -- its loop vertices and edge midpoints --
-/// and they decide the two things a kernel surface leaves open: which half of a
-/// double cone is in use, and which sheet of a self-intersecting torus the face
-/// lies on. A face straddling either boundary is refused rather than translated,
-/// because the answer would be a surface whose normal turns over inside the
-/// face.
-pub fn of_surface(surface: &Surface, samples: &[Vec3]) -> Result<XtSurface, String> {
+/// Nothing about the surface is decided here -- the kernel has already named
+/// the cone's nappe and the torus's sheet. What is left is the format's own
+/// requirement that every radius it carries be positive, and the check that the
+/// face's own points really do lie on the surface they are written as being on.
+pub fn check_surface(surface: &Surface, samples: &[Vec3]) -> Result<(), String> {
     assert!(
         !samples.is_empty(),
-        "a surface is translated as some face uses it, so it needs at least one point of that face"
+        "a surface is written as some face uses it, so it needs at least one point of that face"
     );
-    let out = match *surface {
+    let radius = match *surface {
+        Surface::Plane { .. } => f32::INFINITY,
+        Surface::Cylinder { radius, .. } | Surface::Sphere { radius, .. } => radius,
+        Surface::Cone { radius, .. } => radius,
+        Surface::Torus { minor_r, .. } => minor_r,
+    };
+    if radius <= 0.0 {
+        return Err(format!(
+            "every {} node carries a positive radius, so one of {radius} cannot be written",
+            surface_name(surface)
+        ));
+    }
+    for &p in samples {
+        let d = surface.signed_distance(p);
+        if d.abs() > ON_GEOMETRY_MM {
+            return Err(format!(
+                "a point of the face, {p:?}, stands {d} mm off the {} node written for its \
+                 {surface:?}",
+                surface_name(surface)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Writes `surface` as its node, `links` first in schema order and then the
+/// fields of its own type.
+pub fn write_surface(w: &mut Writer, surface: &Surface, index: Index, links: &GeomLinks) {
+    w.begin(surface_node(surface), index);
+    w.int(links.node_id);
+    w.ptr(0);
+    w.ptr(links.owner);
+    w.ptr(links.next);
+    w.ptr(links.prev);
+    w.ptr(links.geometric_owner);
+    w.ch(links.sense);
+    match *surface {
         Surface::Plane {
             origin,
             normal,
             x_axis,
-        } => XtSurface::Plane {
-            pvec: origin,
-            normal,
-            x_axis,
-        },
+        } => {
+            w.pos(origin);
+            w.dir(normal);
+            w.dir(x_axis);
+        }
         Surface::Cylinder {
             base,
             axis,
             radius,
             ref_dir,
         } => {
-            assert!(radius > 0.0, "a cylinder's radius must be positive, got {radius}");
-            XtSurface::Cylinder {
-                pvec: base,
-                axis,
-                radius,
-                x_axis: ref_dir,
-            }
+            w.pos(base);
+            w.dir(axis);
+            w.dist(radius);
+            w.dir(ref_dir);
         }
         Surface::Cone {
             pvec,
@@ -124,26 +166,30 @@ pub fn of_surface(surface: &Surface, samples: &[Vec3]) -> Result<XtSurface, Stri
             radius,
             half_angle,
             ref_dir,
-        } => XtSurface::Cone {
-            pvec,
-            axis,
-            radius,
-            half_angle,
-            x_axis: ref_dir,
-        },
+        } => {
+            let (sin_half, cos_half) = (half_angle as f64).sin_cos();
+            assert!(
+                (sin_half * sin_half + cos_half * cos_half - 1.0).abs() <= math_unit_residue(),
+                "a CONE node's half-angle sine and cosine are one f64 angle's, so their squares \
+                 sum to one: sin {sin_half}, cos {cos_half}"
+            );
+            w.pos(pvec);
+            w.dir(axis);
+            w.dist(radius);
+            w.real(sin_half);
+            w.real(cos_half);
+            w.dir(ref_dir);
+        }
         Surface::Sphere {
             center,
             axis,
             radius,
             ref_dir,
         } => {
-            assert!(radius > 0.0, "a sphere's radius must be positive, got {radius}");
-            XtSurface::Sphere {
-                centre: center,
-                radius,
-                axis,
-                x_axis: ref_dir,
-            }
+            w.pos(center);
+            w.dist(radius);
+            w.dir(axis);
+            w.dir(ref_dir);
         }
         Surface::Torus {
             center,
@@ -151,269 +197,20 @@ pub fn of_surface(surface: &Surface, samples: &[Vec3]) -> Result<XtSurface, Stri
             major_r,
             minor_r,
             ref_dir,
-        } => torus_of(center, axis, major_r, minor_r, ref_dir, samples)?,
-    };
-    for &p in samples {
-        let d = out.distance(p);
-        if d.abs() > ON_GEOMETRY_MM {
-            return Err(format!(
-                "a point of the face, {p:?}, stands {d} mm off the {} node written for its \
-                 {surface:?}",
-                out.node_name()
-            ));
-        }
-    }
-    Ok(out)
-}
-
-/// The XT torus the face using `samples` lies on.
-///
-/// A torus whose minor radius exceeds its major one meets itself, and its two
-/// sheets are two XT surfaces: the outer one takes the major radius as the
-/// kernel states it, the inner one takes its negative, which is what turns that
-/// sheet into the node's own outer sheet. A face with points on both sheets
-/// passes through the axis, where the surface is singular and its normal
-/// vanishes, and is refused.
-fn torus_of(
-    centre: Vec3,
-    axis: Dir,
-    major: f32,
-    minor: f32,
-    ref_dir: Dir,
-    samples: &[Vec3],
-) -> Result<XtSurface, String> {
-    assert!(
-        major > 0.0 && minor > 0.0,
-        "the kernel states a torus with positive radii, got major {major} minor {minor}"
-    );
-    let sheet = |p: Vec3| -> f32 {
-        let d = p - centre;
-        let along = d.dot(*axis);
-        let perp = (d - *axis * along).length();
-        let near = ((perp - major).powi(2) + along * along).sqrt() - minor;
-        let far = ((perp + major).powi(2) + along * along).sqrt() - minor;
-        if near.abs() <= far.abs() { 1.0 } else { -1.0 }
-    };
-    let first = sheet(samples[0]);
-    if samples.iter().any(|&p| sheet(p) != first) {
-        return Err(format!(
-            "a face on the torus at {centre:?} (major {major}, minor {minor}) crosses the axis \
-             the two sheets of a spindle meet on, where its normal vanishes"
-        ));
-    }
-    Ok(XtSurface::Torus {
-        centre,
-        axis,
-        major: first * major,
-        minor,
-        x_axis: ref_dir,
-    })
-}
-
-impl XtSurface {
-    /// The node type this surface is written as.
-    pub fn node_type(&self) -> u16 {
-        match self {
-            XtSurface::Plane { .. } => text::PLANE,
-            XtSurface::Cylinder { .. } => text::CYLINDER,
-            XtSurface::Cone { .. } => text::CONE,
-            XtSurface::Sphere { .. } => text::SPHERE,
-            XtSurface::Torus { .. } => text::TORUS,
-        }
-    }
-
-    /// The node type's name, for a message about this surface.
-    pub fn node_name(&self) -> &'static str {
-        match self {
-            XtSurface::Plane { .. } => "PLANE",
-            XtSurface::Cylinder { .. } => "CYLINDER",
-            XtSurface::Cone { .. } => "CONE",
-            XtSurface::Sphere { .. } => "SPHERE",
-            XtSurface::Torus { .. } => "TORUS",
-        }
-    }
-
-    /// How far `p` stands from this surface, in millimetres, signed by the side
-    /// -- the implicit form of the very parameters that get written.
-    pub fn distance(&self, p: Vec3) -> f32 {
-        match *self {
-            XtSurface::Plane { pvec, normal, .. } => (p - pvec).dot(*normal),
-            XtSurface::Cylinder {
-                pvec, axis, radius, ..
-            } => radial(p - pvec, *axis).1 - radius,
-            XtSurface::Cone {
-                pvec,
-                axis,
-                radius,
-                half_angle,
-                ..
-            } => {
-                let (sin_half, cos_half) = half_angle.sin_cos();
-                let d = p - pvec;
-                let (_, perp) = radial(d, *axis);
-                perp * cos_half + d.dot(*axis) * sin_half - radius * cos_half
-            }
-            XtSurface::Sphere { centre, radius, .. } => (p - centre).length() - radius,
-            XtSurface::Torus {
-                centre,
-                axis,
-                major,
-                minor,
-                ..
-            } => {
-                let d = p - centre;
-                let along = d.dot(*axis);
-                let (_, perp) = radial(d, *axis);
-                ((perp - major).powi(2) + along * along).sqrt() - minor
-            }
-        }
-    }
-
-    /// The radius a reader would reject as non-positive, which every curved
-    /// surface variant carries and a plane does not (it reports `f32::INFINITY`,
-    /// so the one assert in `write` never sees a plane).
-    fn radius_of(&self) -> f32 {
-        match *self {
-            XtSurface::Plane { .. } => f32::INFINITY,
-            XtSurface::Cylinder { radius, .. }
-            | XtSurface::Cone { radius, .. }
-            | XtSurface::Sphere { radius, .. } => radius,
-            XtSurface::Torus { minor, .. } => minor,
-        }
-    }
-
-    /// The surface's natural normal at `p`, the direction of `dP/du x dP/dv` of
-    /// the parametric form the format defines for this node.
-    ///
-    /// It is what the emitted `sense` is measured against: the face's normal is
-    /// this direction when the face and surface senses agree, and its reverse
-    /// when they do not.
-    pub fn natural_normal(&self, p: Vec3) -> Vec3 {
-        match *self {
-            XtSurface::Plane { normal, .. } => *normal,
-            XtSurface::Cylinder { pvec, axis, .. } => radial(p - pvec, *axis).0,
-            XtSurface::Cone {
-                pvec,
-                axis,
-                half_angle,
-                ..
-            } => {
-                let (sin_half, cos_half) = half_angle.sin_cos();
-                -(cos_half * radial(p - pvec, *axis).0 + sin_half * *axis).normalize()
-            }
-            XtSurface::Sphere { centre, .. } => (p - centre).normalize(),
-            XtSurface::Torus {
-                centre,
-                axis,
-                major,
-                ..
-            } => {
-                let spine = centre + radial(p - centre, *axis).0 * major;
-                (p - spine).normalize()
-            }
-        }
-    }
-
-    /// Writes this surface as its node, `links` first in schema order and then
-    /// the fields of its own type.
-    pub fn write(&self, w: &mut Writer, index: Index, links: &GeomLinks) {
-        assert!(
-            self.radius_of() > 0.0,
-            "every XT surface node with a radius carries a positive one, so {} cannot be written \
-             with {}",
-            self.node_name(),
-            self.radius_of()
-        );
-        w.begin(self.node_type(), index);
-        w.int(links.node_id);
-        w.ptr(0);
-        w.ptr(links.owner);
-        w.ptr(links.next);
-        w.ptr(links.prev);
-        w.ptr(links.geometric_owner);
-        w.ch(links.sense);
-        match *self {
-            XtSurface::Plane {
-                pvec,
-                normal,
-                x_axis,
-            } => {
-                w.pos(pvec);
-                w.dir(normal);
-                w.dir(x_axis);
-            }
-            XtSurface::Cylinder {
-                pvec,
-                axis,
-                radius,
-                x_axis,
-            } => {
-                w.pos(pvec);
-                w.dir(axis);
-                w.dist(radius);
-                w.dir(x_axis);
-            }
-            XtSurface::Cone {
-                pvec,
-                axis,
-                radius,
-                half_angle,
-                x_axis,
-            } => {
-                let (sin_half, cos_half) = (half_angle as f64).sin_cos();
-                assert!(
-                    (sin_half * sin_half + cos_half * cos_half - 1.0).abs() <= text::UNIT_RESIDUE,
-                    "a CONE node's half-angle sine and cosine are one f64 angle's, so their \
-                     squares sum to one: sin {sin_half}, cos {cos_half}"
-                );
-                w.pos(pvec);
-                w.dir(axis);
-                w.dist(radius);
-                w.real(sin_half);
-                w.real(cos_half);
-                w.dir(x_axis);
-            }
-            XtSurface::Sphere {
-                centre,
-                radius,
-                axis,
-                x_axis,
-            } => {
-                w.pos(centre);
-                w.dist(radius);
-                w.dir(axis);
-                w.dir(x_axis);
-            }
-            XtSurface::Torus {
-                centre,
-                axis,
-                major,
-                minor,
-                x_axis,
-            } => {
-                w.pos(centre);
-                w.dir(axis);
-                w.dist(major);
-                w.dist(minor);
-                w.dir(x_axis);
-            }
+        } => {
+            w.pos(center);
+            w.dir(axis);
+            w.dist(major_r);
+            w.dist(minor_r);
+            w.dir(ref_dir);
         }
     }
 }
 
-/// The kernel surface's own natural normal at `p`: the gradient of its
-/// implicit form, which is what the kernel's `Face::sense` is measured against.
-/// The XT counterpart is `XtSurface::natural_normal`; the pair is what the
-/// emitted surface sense reconciles.
-pub fn kernel_normal(surface: &Surface, p: Vec3) -> Vec3 {
-    let n = surface.gradient(p);
-    let len = n.length();
-    assert!(
-        len > 1e-6,
-        "the kernel surface {surface:?} has a natural normal at every point a face uses, but \
-         it vanishes at {p:?}"
-    );
-    n / len
+/// The writer's own bound on an emitted `f64` identity, re-exported here so the
+/// CONE half-angle check states it in the same terms every direction does.
+fn math_unit_residue() -> f64 {
+    crate::kernel::math::UNIT_RESIDUE
 }
 
 pub enum XtCurve {
@@ -599,18 +396,4 @@ impl XtCurve {
             }
         }
     }
-}
-
-/// The unit radial direction of `d` about an axis through the origin, and the
-/// distance out to it.
-///
-/// The direction is `Vec3::ZERO` exactly when `d` lies on the axis, which every
-/// caller here treats as the degenerate case it is.
-fn radial(d: Vec3, axis: Vec3) -> (Vec3, f32) {
-    let out = d - axis * d.dot(axis);
-    let len = out.length();
-    if len < 1e-9 {
-        return (Vec3::ZERO, 0.0);
-    }
-    (out / len, len)
 }
