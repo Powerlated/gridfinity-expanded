@@ -21,7 +21,6 @@
 //! `isect` -- and nothing here formats a field, which is `text`.
 
 use crate::kernel::geom::{Curve, Surface};
-use crate::kernel::math::Vec3;
 use crate::kernel::topo::{Solid, VertexId};
 use crate::kernel::xt::isect::{self, Intersection};
 use crate::kernel::xt::surf::{self, GeomLinks, XtCurve, XtSurface, kernel_normal};
@@ -37,10 +36,6 @@ const RES_LINEAR: f64 = 1.0e-8;
 const BODY_TYPE_SOLID: i64 = 1;
 const PART_STATE_NEW: i64 = 1;
 const NOM_GEOM_STATE: i64 = 1;
-
-/// How much of a face is sampled to decide the questions its surface leaves
-/// open and to check the emitted surface against the kernel's.
-const MAX_FACE_SAMPLES: usize = 24;
 
 /// What an edge's curve is written as: one of the format's analytic curves, or
 /// the exact intersection of the two surfaces meeting along it.
@@ -89,21 +84,24 @@ pub fn write_body(w: &mut Writer, solid: &Solid) -> Result<Index, String> {
     let geometry = face_geometry(solid)?;
     let used = used_edges(solid);
     let curves = edge_geometry(solid, &geometry, &used)?;
-    let component = components(solid, &used);
-    let n_components = component.iter().copied().max().unwrap_or(0) + 1;
-    for c in 0..n_components {
-        let faces: Vec<usize> = (0..solid.faces.len()).filter(|&f| component[f] == c).collect();
-        if !encloses_material(solid, &faces) {
-            return Err(format!(
-                "one of the solid's {n_components} shell(s) has its material on the outside, so it \
-                 bounds a void inside the body, which needs a containment analysis to transmit"
-            ));
+    let shells = solid.shells();
+    let n_components = shells.len();
+    if let Some(void) = shells.iter().position(|sh| !sh.encloses_material) {
+        return Err(format!(
+            "shell {void} of the solid's {n_components} has its material on the outside, so it \
+             bounds a void inside the body, which needs a containment analysis to transmit"
+        ));
+    }
+    let mut component = vec![0usize; solid.faces.len()];
+    for (c, sh) in shells.iter().enumerate() {
+        for &f in &sh.faces {
+            component[f] = c;
         }
     }
 
     let ids = allocate(w, solid, &used, &curves, n_components);
-    let fins = build_fins(solid, &ids, &used);
-    emit(w, solid, &geometry, &curves, &ids, &fins, &component, n_components);
+    let (fins, fin_at_vertex) = build_fins(solid, &ids, &used);
+    emit(w, solid, &geometry, &curves, &ids, &fins, &fin_at_vertex, &component, n_components);
     Ok(ids.body)
 }
 
@@ -122,24 +120,6 @@ fn used_edges(solid: &Solid) -> Vec<bool> {
     used
 }
 
-/// Points of face `fi` that lie on its surface: the vertices its loops pass
-/// through and the midpoint of each of its edges, capped so a face with hundreds
-/// of edges costs no more than a small one.
-fn face_samples(solid: &Solid, fi: usize) -> Vec<Vec3> {
-    let mut out = Vec::new();
-    for lp in solid.face_loops(fi) {
-        for &(e, _) in lp {
-            let ed = &solid.edges[e];
-            out.push(solid.vertex(ed.v0));
-            out.push(ed.curve.point((ed.t0 + ed.t1) * 0.5));
-            if out.len() >= MAX_FACE_SAMPLES {
-                return out;
-            }
-        }
-    }
-    out
-}
-
 /// Every face's surface as XT states it, with the sense that makes the emitted
 /// surface's natural normal answer the kernel's.
 ///
@@ -151,7 +131,7 @@ fn face_samples(solid: &Solid, fi: usize) -> Vec<Vec3> {
 fn face_geometry(solid: &Solid) -> Result<Vec<FaceGeometry>, String> {
     let mut out = Vec::with_capacity(solid.faces.len());
     for (fi, face) in solid.faces.iter().enumerate() {
-        let samples = face_samples(solid, fi);
+        let samples = solid.face_points(fi);
         let surface = surf::of_surface(&face.surface, &samples)
             .map_err(|e| format!("face {fi}: {e}"))?;
         let p = samples[0];
@@ -218,98 +198,6 @@ fn edge_geometry(
         out.push(Some(EdgeGeometry::Section(plan)));
     }
     Ok(out)
-}
-
-/// Which connected component of the face adjacency graph each face belongs to,
-/// numbered from zero. Two faces are adjacent when they share a used edge, so
-/// the components are exactly the solid's shells.
-fn components(solid: &Solid, used: &[bool]) -> Vec<usize> {
-    let mut parent: Vec<usize> = (0..solid.faces.len()).collect();
-    fn find(parent: &mut [usize], i: usize) -> usize {
-        let mut r = i;
-        while parent[r] != r {
-            r = parent[r];
-        }
-        let mut c = i;
-        while parent[c] != c {
-            let next = parent[c];
-            parent[c] = r;
-            c = next;
-        }
-        r
-    }
-    let ef = solid.edge_faces();
-    for e in 0..solid.edges.len() {
-        if !used[e] {
-            continue;
-        }
-        let faces = &ef[e];
-        for &f in &faces[1..] {
-            let (a, b) = (find(&mut parent, faces[0]), find(&mut parent, f));
-            parent[a] = b;
-        }
-    }
-    let mut label = vec![usize::MAX; solid.faces.len()];
-    let mut next = 0;
-    for f in 0..solid.faces.len() {
-        let root = find(&mut parent, f);
-        if label[root] == usize::MAX {
-            label[root] = next;
-            next += 1;
-        }
-        label[f] = label[root];
-    }
-    for e in 0..solid.edges.len() {
-        if !used[e] {
-            continue;
-        }
-        let faces = &ef[e];
-        assert!(
-            faces.windows(2).all(|w| label[w[0]] == label[w[1]]),
-            "two faces sharing used edge {e} are one shell, so they carry one component label"
-        );
-    }
-    label
-}
-
-/// How much of a millimetre two samples may sit apart and still count as the
-/// same point of a shell's +x extreme. It has to sit above the coordinate noise
-/// of `f32` at bin scale -- one ulp at 100 mm is 7.6e-6, so a tolerance near it
-/// rounds away and samples at the extreme stop tying -- and far below the
-/// thinnest feature the model makes, which is a fraction of a millimetre.
-const EXTREME_TIE_MM: f32 = 1.0e-3;
-
-/// Whether the shell made of `faces` has material inside it rather than outside.
-///
-/// At the point of a closed shell furthest along +x, the outward normal cannot
-/// point back along -x if the shell encloses its material, and cannot point
-/// along +x if the material is outside it and the shell bounds a void. Reading
-/// the extreme point settles it without any containment test.
-fn encloses_material(solid: &Solid, faces: &[usize]) -> bool {
-    let normals: Vec<(f32, f32)> = faces
-        .iter()
-        .flat_map(|&fi| {
-            let sense = if solid.faces[fi].sense { 1.0 } else { -1.0 };
-            face_samples(solid, fi)
-                .into_iter()
-                .map(move |p| (p.x, kernel_normal(&solid.faces[fi].surface, p).x * sense))
-        })
-        .collect();
-    let best = normals
-        .iter()
-        .map(|&(x, _)| x)
-        .fold(f32::NEG_INFINITY, f32::max);
-    let mut outward = f32::NEG_INFINITY;
-    for &(x, n) in &normals {
-        if x > best - EXTREME_TIE_MM {
-            outward = outward.max(n);
-        }
-    }
-    assert!(
-        outward.is_finite(),
-        "the shell's furthest point along +x has at least one sample at it"
-    );
-    outward > 0.0
 }
 
 /// Every node index one body occupies, allocated in one pass so any field may
@@ -453,50 +341,47 @@ fn live_vertices(solid: &Solid, used: &[bool]) -> Vec<bool> {
 /// of it in that ring, the vertex the edge use ends at, the edge's other fin,
 /// and whether the use runs with the edge or against it. The chain of fins at a
 /// vertex is threaded afterwards, once every fin knows its vertex.
-fn build_fins(solid: &Solid, ids: &Ids, used: &[bool]) -> Vec<(Index, Fin)> {
-    let mut fins: Vec<(Index, Fin)> = Vec::new();
-    for fi in 0..solid.faces.len() {
-        for (li, lp) in solid.face_loops(fi).enumerate() {
-            let node = ids.loops[fi][li];
-            let n = lp.len();
-            for (k, &(e, forward)) in lp.iter().enumerate() {
-                assert!(used[e], "a loop entry names an edge, so that edge is used");
-                let side = usize::from(!forward);
-                let (next_e, next_f) = lp[(k + 1) % n];
-                let (prev_e, prev_f) = lp[(k + n - 1) % n];
-                fins.push((
-                    ids.fin[e][side],
-                    Fin {
-                        loop_node: node,
-                        forward: ids.fin[next_e][usize::from(!next_f)],
-                        backward: ids.fin[prev_e][usize::from(!prev_f)],
-                        vertex: solid.directed(e, forward).1,
-                        other: ids.fin[e][1 - side],
-                        edge: ids.edge[e],
-                        sense: if forward { '+' } else { '-' },
-                        next_at_vx: 0,
-                    },
-                ));
-            }
-        }
-    }
+fn build_fins(solid: &Solid, ids: &Ids, used: &[bool]) -> (Vec<(Index, Fin)>, Vec<Index>) {
+    let kernel = solid.fins();
+    let loop_node: std::collections::HashMap<u32, Index> = (0..solid.faces.len())
+        .flat_map(|fi| solid.loop_ids(fi).enumerate().map(move |(li, lid)| (fi, li, lid)))
+        .map(|(fi, li, lid)| (lid, ids.loops[fi][li]))
+        .collect();
+    let node = |slot: usize| -> Index {
+        let f = &kernel[slot];
+        ids.fin[f.edge][usize::from(!f.forward)]
+    };
+    let mut fins: Vec<(Index, Fin)> = kernel
+        .iter()
+        .enumerate()
+        .map(|(slot, f)| {
+            assert!(used[f.edge], "a loop entry names an edge, so that edge is used");
+            (
+                node(slot),
+                Fin {
+                    loop_node: loop_node[&f.loop_id],
+                    forward: node(f.next_in_loop),
+                    backward: node(f.prev_in_loop),
+                    vertex: f.vertex,
+                    other: node(f.partner),
+                    edge: ids.edge[f.edge],
+                    sense: if f.forward { '+' } else { '-' },
+                    next_at_vx: f.next_at_vertex.map(node).unwrap_or(0),
+                },
+            )
+        })
+        .collect();
     fins.sort_by_key(|(index, _)| *index);
-    let mut at_vertex: Vec<Vec<usize>> = vec![Vec::new(); solid.verts.len()];
-    for (slot, (_, fin)) in fins.iter().enumerate() {
-        at_vertex[fin.vertex].push(slot);
-    }
-    for slots in &at_vertex {
-        for pair in slots.windows(2) {
-            let next = fins[pair[1]].0;
-            fins[pair[0]].1.next_at_vx = next;
-        }
-    }
     assert_eq!(
         fins.len(),
         2 * used.iter().filter(|u| **u).count(),
         "a closed manifold uses every edge exactly twice, so it has two fins per used edge"
     );
-    fins
+    let mut head = vec![0; solid.verts.len()];
+    for (slot, f) in kernel.iter().enumerate().rev() {
+        head[f.vertex] = node(slot);
+    }
+    (fins, head)
 }
 
 /// A doubly-linked chain over `items`: the (next, previous) pair for each, null
@@ -525,6 +410,7 @@ fn emit(
     curves: &[Option<EdgeGeometry>],
     ids: &Ids,
     fins: &[(Index, Fin)],
+    fin_at_vertex: &[Index],
     component: &[usize],
     n_components: usize,
 ) {
@@ -545,7 +431,7 @@ fn emit(
         emit_fin(w, *index, fin, ids);
     }
     emit_edges(w, solid, curves, ids, &live_edges);
-    emit_vertices(w, solid, ids, fins, &live_vertices, &live_points);
+    emit_vertices(w, solid, ids, fin_at_vertex, &live_vertices, &live_points);
     for &(index, referencing, shared) in &ids.owners {
         let ring: Vec<Index> = ids
             .owners
@@ -855,16 +741,12 @@ fn emit_vertices(
     w: &mut Writer,
     solid: &Solid,
     ids: &Ids,
-    fins: &[(Index, Fin)],
+    first_fin: &[Index],
     live: &[Index],
     points: &[Index],
 ) {
     let links = chain(live);
     let point_links = chain(points);
-    let mut first_fin = vec![0; solid.verts.len()];
-    for (index, fin) in fins.iter().rev() {
-        first_fin[fin.vertex] = *index;
-    }
     let mut slot = 0;
     for v in 0..solid.verts.len() {
         if ids.vertex[v] == 0 {

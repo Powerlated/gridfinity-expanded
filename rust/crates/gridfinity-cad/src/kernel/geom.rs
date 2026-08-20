@@ -274,7 +274,7 @@ impl Surface {
         }
     }
 
-    fn normal_ignores_v(&self, v0: f32, v1: f32) -> bool {
+    fn normal_ignores_v(&self, _v0: f32, _v1: f32) -> bool {
         match *self {
             Surface::Plane { .. } | Surface::Cylinder { .. } => true,
             Surface::Cone { .. } => true,

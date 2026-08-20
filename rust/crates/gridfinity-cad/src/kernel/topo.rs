@@ -70,6 +70,258 @@ pub struct Face {
     n_loops: u32,
 }
 
+/// One connected boundary shell of a solid: the faces it is made of, and
+/// which side of it the material is on.
+///
+/// A closed manifold solid is one or more shells. Each bounds a lump of
+/// material from the outside, or -- when the material is outside it -- an
+/// internal void.
+#[derive(Clone, Debug)]
+pub struct Shell {
+    pub faces: Vec<usize>,
+    pub encloses_material: bool,
+}
+
+/// How much of a millimetre two samples may sit apart and still count as the
+/// same point of a shell's +x extreme.
+///
+/// It has to sit above the coordinate noise of `f32` at bin scale -- one ulp at
+/// 100 mm is 7.6e-6, so a tolerance near it rounds away and samples at the
+/// extreme stop tying -- and far below the thinnest feature the model makes,
+/// which is a fraction of a millimetre.
+const EXTREME_TIE_MM: f32 = 1.0e-3;
+
+/// How many points of a face are read when deciding which side of its shell
+/// the material is on, capped so a face with hundreds of edges costs no more
+/// than a small one.
+const MAX_FACE_SAMPLES: usize = 24;
+
+impl Solid {
+    /// The solid's boundary split into connected shells, each saying whether it
+    /// encloses material or bounds a void.
+    ///
+    /// Two faces are in one shell exactly when a chain of shared used edges
+    /// joins them, so the shells are the connected components of the face
+    /// adjacency graph and every face is in exactly one. Edges the builder
+    /// interned but no face kept join nothing.
+    ///
+    /// Material side is read at the shell's furthest point along +x: an outward
+    /// normal there cannot point back along -x if the shell encloses its
+    /// material, and cannot point along +x if the material is outside it. That
+    /// settles it without a containment test.
+    pub fn shells(&self) -> Vec<Shell> {
+        let label = self.shell_labels();
+        let n = label.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+        let shells: Vec<Shell> = (0..n)
+            .map(|c| {
+                let faces: Vec<usize> =
+                    (0..self.faces.len()).filter(|&f| label[f] == c).collect();
+                assert!(
+                    !faces.is_empty(),
+                    "a shell is a connected component of the faces, so it has at least one, \
+                     but component {c} of {n} came out empty"
+                );
+                let encloses_material = self.encloses_material(&faces);
+                Shell {
+                    faces,
+                    encloses_material,
+                }
+            })
+            .collect();
+        assert_eq!(
+            shells.iter().map(|s| s.faces.len()).sum::<usize>(),
+            self.faces.len(),
+            "every face belongs to exactly one shell"
+        );
+        shells
+    }
+
+    /// Which shell each face belongs to, numbered from zero in face order.
+    fn shell_labels(&self) -> Vec<usize> {
+        let mut parent: Vec<usize> = (0..self.faces.len()).collect();
+        fn find(parent: &mut [usize], i: usize) -> usize {
+            let mut r = i;
+            while parent[r] != r {
+                r = parent[r];
+            }
+            let mut c = i;
+            while parent[c] != c {
+                let next = parent[c];
+                parent[c] = r;
+                c = next;
+            }
+            r
+        }
+        let ef = self.edge_faces();
+        for e in 0..self.edges.len() {
+            let faces = &ef[e];
+            for &f in faces.iter().skip(1) {
+                let (a, b) = (find(&mut parent, faces[0]), find(&mut parent, f));
+                parent[a] = b;
+            }
+        }
+        let mut label = vec![usize::MAX; self.faces.len()];
+        let mut next = 0;
+        for f in 0..self.faces.len() {
+            let root = find(&mut parent, f);
+            if label[root] == usize::MAX {
+                label[root] = next;
+                next += 1;
+            }
+            label[f] = label[root];
+        }
+        for e in 0..self.edges.len() {
+            let faces = &ef[e];
+            assert!(
+                faces.windows(2).all(|w| label[w[0]] == label[w[1]]),
+                "two faces sharing edge {e} are joined by it, so they carry one shell label"
+            );
+        }
+        label
+    }
+
+    /// Points of face `fi` that lie on its surface: the vertices its loops pass
+    /// through and the midpoint of each of its edges.
+    pub fn face_points(&self, fi: usize) -> Vec<Vec3> {
+        let mut out = Vec::new();
+        for lp in self.face_loops(fi) {
+            for &(e, _) in lp {
+                let ed = &self.edges[e];
+                out.push(self.vertex(ed.v0));
+                out.push(ed.curve.point((ed.t0 + ed.t1) * 0.5));
+                if out.len() >= MAX_FACE_SAMPLES {
+                    return out;
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether the shell made of `faces` has material inside it rather than
+    /// outside.
+    fn encloses_material(&self, faces: &[usize]) -> bool {
+        let normals: Vec<(f32, f32)> = faces
+            .iter()
+            .flat_map(|&fi| {
+                let sense = if self.faces[fi].sense { 1.0 } else { -1.0 };
+                self.face_points(fi).into_iter().map(move |p| {
+                    let n = self.faces[fi].surface.gradient(p);
+                    (p.x, n.normalize().x * sense)
+                })
+            })
+            .collect();
+        let best = normals
+            .iter()
+            .map(|&(x, _)| x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut outward = f32::NEG_INFINITY;
+        for &(x, n) in &normals {
+            if x > best - EXTREME_TIE_MM {
+                outward = outward.max(n);
+            }
+        }
+        assert!(
+            outward.is_finite(),
+            "the shell's furthest point along +x has at least one sample at it"
+        );
+        outward > 0.0
+    }
+}
+
+/// One directed use of an edge by a loop, which is what Parasolid calls a fin.
+///
+/// The kernel stores a loop as an ordered list of `(edge, forward)` pairs and
+/// not as linked half-edges, which is why this is a view derived on demand
+/// rather than the storage. It carries everything a consumer of the ring
+/// structure needs: where the use sits in its loop, which vertex it ends at,
+/// which other use of the same edge is its partner, and the chain of uses
+/// meeting at that vertex.
+#[derive(Clone, Copy, Debug)]
+pub struct Fin {
+    pub loop_id: u32,
+    pub face: usize,
+    pub edge: EdgeId,
+    pub forward: bool,
+    pub vertex: VertexId,
+    pub next_in_loop: usize,
+    pub prev_in_loop: usize,
+    pub partner: usize,
+    pub next_at_vertex: Option<usize>,
+}
+
+impl Solid {
+    /// Every directed edge use in the solid, indexed by slot.
+    ///
+    /// Two per used edge, since a closed manifold uses each edge once in each
+    /// direction, and the two are each other's `partner`. `next_in_loop` and
+    /// `prev_in_loop` walk the ring of one loop; `next_at_vertex` walks the
+    /// uses ending at one vertex and is `None` at the end of that chain.
+    pub fn fins(&self) -> Vec<Fin> {
+        let mut slot_of: Vec<[Option<usize>; 2]> = vec![[None, None]; self.edges.len()];
+        let mut fins: Vec<Fin> = Vec::new();
+        for fi in 0..self.faces.len() {
+            for lid in self.loop_ids(fi) {
+                for &(e, forward) in self.loop_by_id(lid) {
+                    let side = usize::from(!forward);
+                    assert!(
+                        slot_of[e][side].is_none(),
+                        "an edge is used once in each direction, but edge {e} is used twice \
+                         going {}",
+                        if forward { "forward" } else { "backward" }
+                    );
+                    slot_of[e][side] = Some(fins.len());
+                    fins.push(Fin {
+                        loop_id: lid,
+                        face: fi,
+                        edge: e,
+                        forward,
+                        vertex: self.directed(e, forward).1,
+                        next_in_loop: usize::MAX,
+                        prev_in_loop: usize::MAX,
+                        partner: usize::MAX,
+                        next_at_vertex: None,
+                    });
+                }
+            }
+        }
+        let mut at = 0;
+        for fi in 0..self.faces.len() {
+            for lid in self.loop_ids(fi) {
+                let n = self.loop_by_id(lid).len();
+                for k in 0..n {
+                    fins[at + k].next_in_loop = at + (k + 1) % n;
+                    fins[at + k].prev_in_loop = at + (k + n - 1) % n;
+                }
+                at += n;
+            }
+        }
+        assert_eq!(at, fins.len(), "every fin belongs to exactly one loop ring");
+        for (e, sides) in slot_of.iter().enumerate() {
+            let (Some(f), Some(b)) = (sides[0], sides[1]) else {
+                assert!(
+                    sides[0].is_none() && sides[1].is_none(),
+                    "edge {e} is used once, but a closed manifold uses every edge it uses \
+                     twice, once in each direction"
+                );
+                continue;
+            };
+            fins[f].partner = b;
+            fins[b].partner = f;
+        }
+        let mut last_at: Vec<Option<usize>> = vec![None; self.verts.len()];
+        for i in (0..fins.len()).rev() {
+            let v = fins[i].vertex;
+            fins[i].next_at_vertex = last_at[v];
+            last_at[v] = Some(i);
+        }
+        assert!(
+            fins.iter().all(|f| f.partner != usize::MAX),
+            "every fin of a closed manifold has the opposite use of its edge as its partner"
+        );
+        fins
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Solid {
     pub verts: Vec<Vertex>,
