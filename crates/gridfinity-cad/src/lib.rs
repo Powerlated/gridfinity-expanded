@@ -1711,7 +1711,7 @@ mod tests {
     /// An opening takes the wall over its own run and nothing else. The chain
     /// dies on the mouth, where the corner is void rather than material, so
     /// `fillet.rs` emits a cap to close it off -- see the capped runout in
-    /// `rust/CLAUDE.md`. Before that existed the model zeroed the whole
+    /// `crates/CLAUDE.md`. Before that existed the model zeroed the whole
     /// compartment's fillet rather than ask for a blend it could not build.
     #[test]
     fn an_opening_keeps_the_rest_of_the_compartments_floor_fillet() {

@@ -31,3 +31,15 @@ src/wasm/
 
 # Parasolid import ladder, written by the `writes_the_import_ladder` test
 xt-ladder/
+
+# Cargo build cache for the workspace rooted here
+/target
+
+# Claude Code session transcripts
+session-*.md
+[0-9]*-commit.txt
+
+# Bad Apple demo: source video + the ffmpeg-generated frame asset
+# (regenerate with the ffmpeg line in crates/gridfinity-gui/src/badapple.rs)
+*.webm
+crates/gridfinity-gui/assets/badapple.raw

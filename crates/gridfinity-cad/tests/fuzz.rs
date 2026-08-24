@@ -1258,7 +1258,7 @@ fn fuzz_inner_walls() {
 /// Inner walls the product actually makes, up to three of them so they cross
 /// one another. **Reports rather than gates**: two crossing walls at certain
 /// positions hand the triangulator a face whose loops do not tile, which is a
-/// live undiagnosed defect (see `rust/CLAUDE.md`).
+/// live undiagnosed defect (see `crates/CLAUDE.md`).
 #[test]
 fn fuzz_tidy_inner_walls() {
     run(

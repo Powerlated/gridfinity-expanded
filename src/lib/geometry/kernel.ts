@@ -1,7 +1,7 @@
 /**
  * Geometry kernel boundary.
  *
- * Solid construction lives in the `rust/` Rust workspace and runs here as
+ * Solid construction lives in the `crates/` Rust workspace and runs here as
  * WebAssembly. It is an analytic B-rep kernel: exact surfaces,
  * exact curves, closed-form intersections, tessellated once at the very end.
  * That is why nothing on this side welds vertices, repairs degenerate facets,

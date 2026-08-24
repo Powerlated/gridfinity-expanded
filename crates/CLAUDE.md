@@ -10,7 +10,7 @@ Guidance for Claude Code in this repo. Keep it current with the code. `../AGENTS
 
 ## Overview
 
-Minimalistic **analytic-surface B-rep CAD kernel** (not CSG) + parametric **Gridfinity** model built on it + **egui** front-end previewing in 3D and exporting binary STL. Reproduces the purpose of the TS reference at `../gridfinity-expanded` (parametric generator + watertight STL) as a small Rust workspace.
+Minimalistic **analytic-surface B-rep CAD kernel** (not CSG) + parametric **Gridfinity** model built on it + **egui** front-end previewing in 3D and exporting binary STL. Reproduces the purpose of the TS app in `../src` (parametric generator + watertight STL) as a small Rust workspace.
 
 ## Hard rule: no mesh operations before export/render
 
@@ -413,7 +413,7 @@ Three phases, two parallelisable. Measured 8c/16t: check phase alone **7.1×** (
 
 ## Workspace layout
 
-Two crates (`Cargo.toml` = virtual workspace, edition 2024, resolver 3):
+Virtual workspace rooted at the **repository root** (`../Cargo.toml`, edition 2024, resolver 3) — every `cargo` command runs from there, not from `crates/`. Two crates:
 
 - **`crates/gridfinity-cad`** — the engine library. One dependency: `glam`. B-rep kernel and triangulator alike are hand-rolled.
 - **`crates/gridfinity-gui`** — eframe/egui/wgpu app. Depends on `gridfinity-cad`.
