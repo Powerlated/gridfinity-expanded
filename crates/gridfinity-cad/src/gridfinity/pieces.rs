@@ -8,7 +8,9 @@
 //! reaches `REENTRANT_FILLET_OVERHANG` into empty neighbours along y so the
 //! corner fillet that overhangs the grid is kept exactly once.
 //! `try_build_pieces` is the whole path for one `Params`: build each logical
-//! bin, partition it, carve.
+//! bin, partition it, carve. `try_build_pieces_reporting` is the same path with
+//! every bin's `BlendReport` summed, for a caller that needs to know whether the
+//! rounding it asked for actually landed.
 
 use super::*;
 use crate::kernel::math::{Vec2, Vec3};
@@ -108,8 +110,18 @@ pub(super) fn straddles(solid: &Solid, cut: &Cut) -> bool {
 }
 
 pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
+    try_build_pieces_reporting(p).map(|(pieces, _)| pieces)
+}
+
+/// `try_build_pieces` plus what became of every bin's blends, summed across the
+/// bins: how many rounds were asked for, how many the model could not resolve,
+/// which edges it left sharp, and the first refusal that named a reason. A
+/// caller that does not read this cannot tell a drawer that kept its floor
+/// fillets from one that quietly gave them up, which is the whole difference
+/// between a printable part and a printable part with sharp inside corners.
+pub fn try_build_pieces_reporting(p: &Params) -> Result<(Vec<BinPiece>, BlendReport), String> {
     if p.mode == Mode::Baseplate {
-        return Ok(vec![BinPiece {
+        return Ok((vec![BinPiece {
             name: "gridfinity-baseplate.stl".into(),
             bin: 0,
             piece: 0,
@@ -117,7 +129,7 @@ pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
             col: 0,
             row: 0,
             solid: build_baseplate(p),
-        }]);
+        }], BlendReport::default()));
     }
     let bins: Vec<(usize, &LogicalBin)> = p
         .bins
@@ -126,6 +138,7 @@ pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
         .filter(|(_, b)| !b.cells.is_empty())
         .collect();
     let mut out = Vec::new();
+    let mut blends = BlendReport::default();
     for (ord, (bi, bin)) in bins.iter().enumerate() {
         let parts = partition_cells(&bin.cells, &bin.split_lines);
         let stem = if bins.len() == 1 {
@@ -133,7 +146,11 @@ pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
         } else {
             format!("gridfinity-bin-{}", ord + 1)
         };
-        let whole = build_bin_solid(p, &bin.cells, bin.slope)?;
+        let (whole, report) = build_bin_solid_reporting(p, &bin.cells, bin.slope)?;
+        blends.requested += report.requested;
+        blends.unresolved += report.unresolved;
+        blends.dropped.extend(report.dropped);
+        blends.refusal = blends.refusal.take().or(report.refusal);
         for (i, part) in parts.iter().enumerate() {
             let solid = carve_to_cells(&whole, &bin.cells, &part.cells)?;
             let name = if parts.len() == 1 {
@@ -152,5 +169,14 @@ pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
             });
         }
     }
-    Ok(out)
+    assert!(
+        blends.made() + blends.unresolved + blends.dropped.len() == blends.requested,
+        "the summed blend report claims {} made, {} unresolved and {} dropped of {} requested, \
+         which is not a partition of the request",
+        blends.made(),
+        blends.unresolved,
+        blends.dropped.len(),
+        blends.requested
+    );
+    Ok((out, blends))
 }

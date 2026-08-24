@@ -147,9 +147,15 @@ pub(super) fn solve(
 /// carry bit-identical values for the ball centre and for each of the two
 /// touchdowns; corners meeting nothing are left as `solve` produced them. Errors
 /// when the two edges at a shared vertex do not have exactly one face in common,
-/// and asserts that the values it is about to unify already agree to within
+/// and when the values it is about to unify do not already agree to within
 /// `join_agree` -- past that the two blends do not share a tangent there, and
 /// unifying them would weld a visible kink shut rather than close float noise.
+/// That second refusal is an `Err` and not an assertion because, like the
+/// shared-face count beside it, it is a property of the chain the *caller* asked
+/// for: a request to blend across a kink is one `fillet_best_effort` drops so
+/// the user still gets a part. A closed edge disagreeing with *itself* stays an
+/// assertion, because both its ends came off the same faces and the same
+/// arithmetic and can only differ through a defect here.
 ///
 /// Each blend derives that point from its own faces' normals; along a
 /// tangent-continuous chain those are equal in exact arithmetic and differ in the
@@ -241,14 +247,14 @@ pub(super) fn reconcile_shared_ends(
         ] {
             let d = (a - b).length();
             let bound = join_agree(c0.r.max(c1.r));
-            assert!(
-                d <= bound,
-                "blend chain: edges {} and {} put the {name} at vertex {v} {d:.3e} mm apart \
-                 ({a:?} vs {b:?}), over the {bound:.3e} mm a {MAX_JOIN_KINK} rad kink allows; \
-                 they do not share a tangent there",
-                c0.e,
-                c1.e
-            );
+            if d > bound {
+                return Err(format!(
+                    "blend chain: edges {} and {} put the {name} at vertex {v} {d:.3e} mm apart \
+                     ({a:?} vs {b:?}), over the {bound:.3e} mm a {MAX_JOIN_KINK} rad kink \
+                     allows; they do not share a tangent there",
+                    c0.e, c1.e
+                ));
+            }
         }
         let (cv, ts, tt) = (c0.ends[k0].cv, on_shared(&c0, k0), on_tangent(&c0, k0));
         let c = &mut corners[i1];

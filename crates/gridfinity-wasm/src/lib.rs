@@ -126,6 +126,63 @@ pub fn export_parasolid(bins: JsValue) -> Result<String, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("parasolid export: {e}")))
 }
 
+/// The drawer packer, driven from JavaScript one chunk of restarts at a time.
+///
+/// The whole search lives in `gridfinity-cad`; this is only the boundary. The
+/// caller constructs it from a `PackInput`, spends the budget in `step` calls so
+/// it can report progress between them, and reads `result` whenever it likes --
+/// the incumbent layout is meaningful from construction, before any step.
+#[wasm_bindgen]
+pub struct PackSearch {
+    inner: gridfinity_cad::project::pack::PackSearch,
+}
+
+/// The serializer the pack boundary uses: maps become plain objects, because
+/// `placedByObjectId` is a `Record` on the TypeScript side and a JavaScript
+/// `Map` would not index by object id there.
+fn pack_serializer() -> serde_wasm_bindgen::Serializer {
+    serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true)
+}
+
+#[wasm_bindgen]
+impl PackSearch {
+    /// A search over the given `PackInput`, with its first greedy pass already
+    /// run.
+    #[wasm_bindgen(constructor)]
+    pub fn new(input: JsValue) -> Result<PackSearch, JsValue> {
+        let input: gridfinity_cad::project::pack::PackInput =
+            serde_wasm_bindgen::from_value(input)
+                .map_err(|e| JsValue::from_str(&format!("invalid pack input: {e}")))?;
+        Ok(PackSearch {
+            inner: gridfinity_cad::project::pack::PackSearch::new(input),
+        })
+    }
+
+    /// How many restarts this search will run in total.
+    #[wasm_bindgen(getter)]
+    pub fn total(&self) -> usize {
+        self.inner.total()
+    }
+
+    /// How many restarts have been run so far.
+    #[wasm_bindgen(getter)]
+    pub fn done(&self) -> usize {
+        self.inner.done()
+    }
+
+    /// Runs up to `iterations` further restarts and returns whether more of the
+    /// budget remains.
+    pub fn step(&mut self, iterations: usize) -> bool {
+        self.inner.step(iterations)
+    }
+
+    /// The best layout found so far, with the dividers its placements imply.
+    pub fn result(&self) -> Result<JsValue, JsValue> {
+        serde::Serialize::serialize(&self.inner.result(), &pack_serializer())
+            .map_err(|e| JsValue::from_str(&format!("pack result: {e}")))
+    }
+}
+
 #[wasm_bindgen]
 pub fn badapple_frame_count() -> usize {
     gridfinity_cad::badapple::frame_count()

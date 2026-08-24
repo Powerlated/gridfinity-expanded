@@ -2,7 +2,6 @@ import { Group, Stack, Text } from '@mantine/core';
 import { drawerCells, drawerGrid, packingArea } from '../../lib/project/drawer';
 import { DRAWER_BIN_ID } from '../../lib/project/layout';
 import { inflateParts, partsBounds } from '../../lib/project/rects';
-import { layoutWalls } from '../../lib/project/walls';
 import type { PackResult, Project, Rect } from '../../lib/types';
 import { MAX_GRID } from '../../store';
 import { EditorCanvas } from '../sidebar/EditorCanvas';
@@ -32,7 +31,7 @@ export function LayoutCanvas({ project, layout, perimeterThickness }: LayoutCanv
   const area = packingArea(grid, perimeterThickness);
   const margin = project.clearance + project.dividerThickness / 2;
   const placements = layout?.placements ?? [];
-  const walls = layout ? layoutWalls(placements, area, project.dividerThickness) : [];
+  const walls = layout?.walls ?? [];
   const names = new Map(project.objects.map((object) => [object.id, object.name]));
 
   if (grid.cols === 0 || grid.rows === 0) {

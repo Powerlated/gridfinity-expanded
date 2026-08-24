@@ -1,13 +1,21 @@
-import type { Rect, Rotation } from '../types';
+import type { Rect } from '../types';
 
-export type Orientation = 'h' | 'v';
+/**
+ * Rectilinear plan geometry for the Project editors.
+ *
+ * These are the measurements the SVG canvases and panels take while a user is
+ * drawing an object, all of them synchronous because they run inside React
+ * render. The optimizer that consumes the same shapes lives in the Rust kernel
+ * (`crates/gridfinity-cad/src/project/`) and is reached through the wasm
+ * `PackSearch`; nothing here packs, rotates, or derives dividers.
+ *
+ * Coordinates are millimetres in the drawer plane, quantized to `QUANTUM` so a
+ * box's far edge and the near edge of the box abutting it are the same number
+ * rather than a float ulp apart — without that, `rectGrid` reads a box as
+ * covering none of its own lattice cell and `unionArea` measures zero.
+ */
 
-export interface Segment {
-  orientation: Orientation;
-  coordinate: number;
-  start: number;
-  end: number;
-}
+const QUANTUM = 1e4;
 
 export interface RectGrid {
   xs: number[];
@@ -15,34 +23,24 @@ export interface RectGrid {
   filled: boolean[];
 }
 
-export const ROTATIONS: Rotation[] = [0, 90, 180, 270];
-
-const QUANTUM = 1e4;
-
+/** A millimetre value snapped to the module's coordinate quantum. */
 export function quantize(value: number): number {
   return Math.round(value * QUANTUM) / QUANTUM;
 }
 
+/** The box's maximum x in mm, quantized. */
 export function rectRight(rect: Rect): number {
-  return rect.x + rect.width;
+  return quantize(rect.x + rect.width);
 }
 
+/** The box's maximum y in mm, quantized. */
 export function rectBottom(rect: Rect): number {
-  return rect.y + rect.depth;
-}
-
-export function rectsOverlap(a: Rect, b: Rect): boolean {
-  return a.x < rectRight(b) && b.x < rectRight(a)
-    && a.y < rectBottom(b) && b.y < rectBottom(a);
-}
-
-export function rectContains(outer: Rect, inner: Rect): boolean {
-  return inner.x >= outer.x && inner.y >= outer.y
-    && rectRight(inner) <= rectRight(outer) && rectBottom(inner) <= rectBottom(outer);
+  return quantize(rect.y + rect.depth);
 }
 
 export const EMPTY_RECT: Rect = { x: 0, y: 0, width: 0, depth: 0 };
 
+/** The smallest box containing every part, or a zero box for no parts. */
 export function partsBounds(parts: Rect[]): Rect {
   if (parts.length === 0) return { ...EMPTY_RECT };
   const x = Math.min(...parts.map((part) => part.x));
@@ -55,15 +53,11 @@ export function partsBounds(parts: Rect[]): Rect {
   };
 }
 
-export function translateParts(parts: Rect[], dx: number, dy: number): Rect[] {
-  return parts.map((part) => ({ ...part, x: quantize(part.x + dx), y: quantize(part.y + dy) }));
-}
-
-export function normalizeParts(parts: Rect[]): Rect[] {
-  const bounds = partsBounds(parts);
-  return translateParts(parts, -bounds.x, -bounds.y);
-}
-
+/**
+ * Every part grown by `margin` on all four sides, so the shape's bounding box
+ * grows by `2 * margin` in each extent. A negative margin shrinks it, which is
+ * how a placed claim is drawn back down to the object inside it.
+ */
 export function inflateParts(parts: Rect[], margin: number): Rect[] {
   return parts.map((part) => ({
     x: quantize(part.x - margin),
@@ -73,43 +67,25 @@ export function inflateParts(parts: Rect[], margin: number): Rect[] {
   }));
 }
 
-export function rotateParts(parts: Rect[], rotation: Rotation): Rect[] {
-  return normalizeParts(parts.map((part) => {
-    if (rotation === 90) {
-      return { x: -rectBottom(part), y: part.x, width: part.depth, depth: part.width };
-    }
-    if (rotation === 180) {
-      return { x: -rectRight(part), y: -rectBottom(part), width: part.width, depth: part.depth };
-    }
-    if (rotation === 270) {
-      return { x: part.y, y: -rectRight(part), width: part.depth, depth: part.width };
-    }
-    return { ...part };
-  }));
-}
-
-export function partsKey(parts: Rect[]): string {
-  return [...parts]
-    .map((part) => `${quantize(part.x)},${quantize(part.y)},${quantize(part.width)},${quantize(part.depth)}`)
-    .sort()
-    .join('|');
-}
-
 function uniqueSorted(values: number[]): number[] {
   return [...new Set(values.map(quantize))].sort((a, b) => a - b);
 }
 
+/**
+ * The lattice a part list induces: every distinct part edge on each axis, and
+ * for each cell of the resulting grid whether one part covers it entirely.
+ */
 export function rectGrid(parts: Rect[]): RectGrid {
-  const xs = uniqueSorted(parts.flatMap((part) => [part.x, rectRight(part)]));
-  const ys = uniqueSorted(parts.flatMap((part) => [part.y, rectBottom(part)]));
+  const xs = uniqueSorted(parts.flatMap((part) => [quantize(part.x), rectRight(part)]));
+  const ys = uniqueSorted(parts.flatMap((part) => [quantize(part.y), rectBottom(part)]));
   const cols = Math.max(0, xs.length - 1);
   const rows = Math.max(0, ys.length - 1);
   const filled = new Array<boolean>(cols * rows).fill(false);
   for (let row = 0; row < rows; row++) {
     for (let col = 0; col < cols; col++) {
       filled[row * cols + col] = parts.some((part) =>
-        part.x <= xs[col] && xs[col + 1] <= rectRight(part)
-        && part.y <= ys[row] && ys[row + 1] <= rectBottom(part));
+        quantize(part.x) <= xs[col] && xs[col + 1] <= rectRight(part)
+        && quantize(part.y) <= ys[row] && ys[row + 1] <= rectBottom(part));
     }
   }
   return { xs, ys, filled };
@@ -129,6 +105,7 @@ function gridFilled(grid: RectGrid, col: number, row: number): boolean {
   return grid.filled[row * cols + col];
 }
 
+/** The area in mm² the parts cover between them, counting overlaps once. */
 export function unionArea(parts: Rect[]): number {
   const grid = rectGrid(parts);
   let area = 0;
@@ -141,6 +118,10 @@ export function unionArea(parts: Rect[]): number {
   return area;
 }
 
+/**
+ * Whether the parts form one edge-connected region. Boxes meeting only at a
+ * corner are not connected, and neither is a part list with no area at all.
+ */
 export function partsConnected(parts: Rect[]): boolean {
   if (parts.length <= 1) return true;
   const grid = rectGrid(parts);
@@ -166,69 +147,4 @@ export function partsConnected(parts: Rect[]): boolean {
     }
   }
   return seen.size === total;
-}
-
-export function boundarySegments(parts: Rect[]): Segment[] {
-  const grid = rectGrid(parts);
-  const cols = gridColumns(grid);
-  const rows = gridRows(grid);
-  const segments: Segment[] = [];
-  for (let col = 0; col <= cols; col++) {
-    for (let row = 0; row < rows; row++) {
-      if (gridFilled(grid, col - 1, row) === gridFilled(grid, col, row)) continue;
-      segments.push({
-        orientation: 'v',
-        coordinate: grid.xs[col],
-        start: grid.ys[row],
-        end: grid.ys[row + 1],
-      });
-    }
-  }
-  for (let row = 0; row <= rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      if (gridFilled(grid, col, row - 1) === gridFilled(grid, col, row)) continue;
-      segments.push({
-        orientation: 'h',
-        coordinate: grid.ys[row],
-        start: grid.xs[col],
-        end: grid.xs[col + 1],
-      });
-    }
-  }
-  return segments;
-}
-
-export function segmentKey(segment: Segment): string {
-  return `${segment.orientation}:${quantize(segment.coordinate)}`;
-}
-
-export function sortSegments(segments: Segment[]): Segment[] {
-  return [...segments].sort((a, b) =>
-    a.orientation.localeCompare(b.orientation)
-    || a.coordinate - b.coordinate
-    || a.start - b.start);
-}
-
-export function mergeSegments(segments: Segment[]): Segment[] {
-  const groups = new Map<string, Segment[]>();
-  for (const segment of segments) {
-    const key = segmentKey(segment);
-    const group = groups.get(key);
-    if (group) group.push(segment);
-    else groups.set(key, [segment]);
-  }
-  const merged: Segment[] = [];
-  for (const group of groups.values()) {
-    const sorted = [...group].sort((a, b) => a.start - b.start || a.end - b.end);
-    let run = { ...sorted[0] };
-    for (const segment of sorted.slice(1)) {
-      if (segment.start <= run.end) run.end = Math.max(run.end, segment.end);
-      else {
-        merged.push(run);
-        run = { ...segment };
-      }
-    }
-    merged.push(run);
-  }
-  return sortSegments(merged);
 }

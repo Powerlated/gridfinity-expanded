@@ -1244,6 +1244,7 @@ const FILLET_FAILED: &str = "fillet failed";
 /// the blend is refused; that used to be exempted here as documented policy and
 /// is a `FILLET_FAILED` failure now.
 #[test]
+#[ignore = "fuzzing is opt-in: cargo test --release -p gridfinity-cad --test fuzz fuzz_inner_walls -- --ignored --exact --nocapture"]
 fn fuzz_inner_walls() {
     run(
         Options {
@@ -1260,6 +1261,7 @@ fn fuzz_inner_walls() {
 /// positions hand the triangulator a face whose loops do not tile, which is a
 /// live undiagnosed defect (see `crates/CLAUDE.md`).
 #[test]
+#[ignore = "fuzzing is opt-in: cargo test --release -p gridfinity-cad --test fuzz fuzz_tidy_inner_walls -- --ignored --exact --nocapture"]
 fn fuzz_tidy_inner_walls() {
     run(
         Options {
@@ -1282,6 +1284,7 @@ fn fuzz_tidy_inner_walls() {
 /// (`FILLET_FAILED`), no compartment it rounded when closed comes back sharp
 /// (`OPENING_LOSES_FILLET`), and the solid is still sound.
 #[test]
+#[ignore = "fuzzing is opt-in: cargo test --release -p gridfinity-cad --test fuzz fuzz_wall_openings -- --ignored --exact --nocapture"]
 fn fuzz_wall_openings() {
     run(
         Options {
@@ -1299,6 +1302,7 @@ fn fuzz_wall_openings() {
 /// the least room to work in. This is the gate for "adding a wall opening or an
 /// internal wall never breaks filleting".
 #[test]
+#[ignore = "fuzzing is opt-in: cargo test --release -p gridfinity-cad --test fuzz fuzz_openings_and_inner_walls -- --ignored --exact --nocapture"]
 fn fuzz_openings_and_inner_walls() {
     run(
         Options {
@@ -1328,6 +1332,7 @@ fn fuzz_openings_and_inner_walls() {
 /// bin *builds*, stays manifold, audits clean and tessellates without leaks,
 /// all of which it does.
 #[test]
+#[ignore = "fuzzing is opt-in: cargo test --release -p gridfinity-cad --test fuzz fuzz_stripped_polyominoes -- --ignored --exact --nocapture"]
 fn fuzz_stripped_polyominoes() {
     run(
         Options {
@@ -1345,6 +1350,7 @@ fn fuzz_stripped_polyominoes() {
 /// The split path through the web app's partition model: arbitrary connected
 /// polyomino pieces carved off one bin.
 #[test]
+#[ignore = "fuzzing is opt-in: cargo test --release -p gridfinity-cad --test fuzz fuzz_bin_shapes -- --ignored --exact --nocapture"]
 fn fuzz_bin_shapes() {
     run(
         Options {
@@ -1361,6 +1367,7 @@ fn fuzz_bin_shapes() {
 /// The split path through the product's own model: `SplitLine`s and
 /// `partition_cells`, plus everything a split is supposed to mean.
 #[test]
+#[ignore = "fuzzing is opt-in: cargo test --release -p gridfinity-cad --test fuzz fuzz_split_pieces -- --ignored --exact --nocapture"]
 fn fuzz_split_pieces() {
     run(
         Options {
@@ -1379,6 +1386,7 @@ fn fuzz_split_pieces() {
 /// abuts a reentrant fillet panics the open-run planner, and a free-form wall
 /// makes the model over-ask for floor blends.
 #[test]
+#[ignore = "fuzzing is opt-in: cargo test --release -p gridfinity-cad --test fuzz fuzz_params_broad -- --ignored --exact --nocapture"]
 fn fuzz_params_broad() {
     run(
         Options {

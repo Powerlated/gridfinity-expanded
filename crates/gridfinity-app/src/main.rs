@@ -1,9 +1,26 @@
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+//! The Gridfinity desktop app, and the one command it also answers to.
+//!
+//! With no arguments it is the egui construction debugger: `App` owns the
+//! `Params` being edited, the `Editor` that edits them, the `Debugger` that
+//! steps the kernel program, and the viewport the result is drawn in. With
+//! `optimize` it is instead the headless drawer fitter in `optimize`/`input`/
+//! `export`/`report`, which packs a TOML of objects into a drawer, writes the
+//! geometry, and prints what it did. `--view` runs the fitter and then hands the
+//! `Params` it produced straight to the same window -- one process, one build,
+//! nothing written between them.
+//!
+//! Deliberately **not** `windows_subsystem = "windows"`: the same binary writes
+//! the fitting report to stdout, and a windows-subsystem process inherits no
+//! console, so the report would go nowhere in a release build.
 
 mod badapple;
 mod debugger;
 mod editor;
+mod export;
+mod input;
+mod optimize;
+mod report;
 mod viewport;
 mod wireframe;
 
@@ -162,7 +179,55 @@ fn debug_view(debugger: &Debugger, solid: &Solid) -> (Vec<f32>, wireframe::Wiref
     (verts, wf)
 }
 
+/// How to invoke the program, for a command line that did not.
+const USAGE: &str = "gridfinity-app -- the Gridfinity parametric CAD app
+
+usage:
+  gridfinity-app
+      opens the construction debugger on a default bin
+
+  gridfinity-app optimize <input.toml> --format <stl|parasolid_x_t> <output> [--view]
+      fits a drawer with compartments and writes the geometry
+
+  <input.toml>  the drawer's dimensions and the objects to organise in it
+  --format stl            writes one binary STL per printable piece into <output>,
+                          which is a directory and is created if it does not exist
+  --format parasolid_x_t  writes every piece as a body of one Parasolid transmit
+                          file at <output>
+  --view        opens the fitted bin in the debugger once it is written
+";
+
+/// Dispatches the command line: `optimize` runs the fitter and opens a window
+/// only if it asked to, anything else opens the debugger on a default bin.
 fn main() -> eframe::Result<()> {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{USAGE}");
+        return Ok(());
+    }
+    let initial = match argv.split_first() {
+        Some((first, rest)) if first == "optimize" => match optimize::run(rest) {
+            Ok(view) => match view {
+                Some(params) => Some(params),
+                None => return Ok(()),
+            },
+            Err(message) => {
+                eprintln!("error: {message}");
+                std::process::exit(1);
+            }
+        },
+        Some((first, _)) => {
+            eprintln!("error: {first:?} is not a command; the command is `optimize`");
+            eprint!("{USAGE}");
+            std::process::exit(1);
+        }
+        None => None,
+    };
+    window(initial)
+}
+
+/// Opens the construction debugger, on the given bin when there is one.
+fn window(initial: Option<Params>) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
@@ -171,9 +236,9 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "gridfinity-gui",
+        "gridfinity-app",
         options,
-        Box::new(|cc| Ok(Box::new(App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(App::new(cc, initial)))),
     )
 }
 
@@ -208,7 +273,7 @@ struct BadApple {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>) -> App {
+    fn new(cc: &eframe::CreationContext<'_>, initial: Option<Params>) -> App {
         let state =
             cc.wgpu_render_state.as_ref().expect("this build requires the wgpu backend");
         let gpu = Gpu {
@@ -221,7 +286,7 @@ impl App {
                 .expect("the wgpu backend must build the viewport pipelines"),
         ));
         let mut app = App {
-            params: Params::default(),
+            params: initial.unwrap_or_default(),
             editor: Editor::default(),
             debugger: Debugger::default(),
             printer: DEFAULT_PRINTER,

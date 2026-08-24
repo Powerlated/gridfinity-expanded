@@ -1,12 +1,12 @@
 [package]
-name = "gridfinity-gui"
-description = "egui front-end for the Gridfinity parametric CAD engine"
+name = "gridfinity-app"
+description = "The Gridfinity desktop app: an egui construction debugger, and the headless `optimize` command that fits a drawer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "gridfinity-gui"
+name = "gridfinity-app"
 path = "src/main.rs"
 
 [dependencies]
@@ -19,6 +19,8 @@ wgpu = { workspace = true }
 glam = "0.29"
 bytemuck = "1"
 rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
 mimalloc = "0.1"
 
 [dev-dependencies]

@@ -19,6 +19,7 @@
  * from the Rust workspace into `src/wasm/`, which is gitignored.
  */
 import init, {
+  PackSearch as WasmPackSearch,
   Viewer,
   badapple_bounds,
   badapple_fps,
@@ -28,9 +29,24 @@ import init, {
   export_parasolid,
   generate_geometry,
 } from '../../wasm/gridfinity_wasm.js';
-import type { BadAppleClip, Bin, BinParameters } from '../types';
+import type { BadAppleClip, Bin, BinParameters, PackInput, PackResult } from '../types';
 
 export type { Viewer };
+
+/**
+ * A drawer packing search in progress, owned by the kernel.
+ *
+ * The budget is a restart count, not a clock, so the caller spends it in chunks
+ * and may read the incumbent layout between them. `free` releases the wasm
+ * handle; the search is unusable afterwards.
+ */
+export interface PackSearch {
+  readonly total: number;
+  readonly done: number;
+  step: (iterations: number) => boolean;
+  result: () => PackResult;
+  free: () => void;
+}
 
 /** Opaque handle proving the kernel finished loading. */
 export interface GeometryKernel {
@@ -72,6 +88,29 @@ export function generateGeometry(_kernel: GeometryKernel, bins: BinParameters[])
  */
 export function exportParasolid(_kernel: GeometryKernel, bins: BinParameters[]): string {
   return export_parasolid(bins);
+}
+
+/**
+ * Starts a drawer packing search over `input`, with its first greedy pass
+ * already run so `result()` is meaningful before any `step`.
+ *
+ * The optimizer itself lives in `crates/gridfinity-cad/src/project/`; this is
+ * only the handle. The kernel handle is threaded through so callers cannot
+ * start a search before `initKernel()` has resolved.
+ */
+export function createPackSearch(_kernel: GeometryKernel, input: PackInput): PackSearch {
+  const search = new WasmPackSearch(input);
+  return {
+    get total() {
+      return search.total;
+    },
+    get done() {
+      return search.done;
+    },
+    step: (iterations: number) => search.step(iterations),
+    result: () => search.result() as PackResult,
+    free: () => search.free(),
+  };
 }
 
 export function badAppleClip(_kernel: GeometryKernel): BadAppleClip {

@@ -1,6 +1,18 @@
 import { DESIGN_DEFAULTS } from '../gridfinitySpec';
 import type { PackEffort, Project, ProjectObject } from '../types';
 
+/**
+ * How many perturbed instance orders each effort tier tries, for the panel that
+ * labels the tiers with it. Mirrors `PackEffort::restarts` in
+ * `crates/gridfinity-cad/src/project/pack.rs`, which is the budget actually
+ * spent; this table only names it.
+ */
+export const PACK_RESTARTS: Record<PackEffort, number> = {
+  quick: 30,
+  standard: 200,
+  thorough: 800,
+};
+
 export const PROJECT_DEFAULTS = {
   drawer: { width: 400, depth: 300 },
   dividerThickness: DESIGN_DEFAULTS.perimeterThickness,

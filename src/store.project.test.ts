@@ -1,9 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { packLayout } from './lib/project/pack';
-import { drawerGrid, packingArea } from './lib/project/drawer';
 import { DRAWER_BIN_ID } from './lib/project/layout';
-import type { Design } from './lib/types';
-import { DEFAULT_DESIGN, MAX_GRID, useAppStore } from './store';
+import type { Design, PackResult } from './lib/types';
+import { DEFAULT_DESIGN, useAppStore } from './store';
 
 function copyDesign(): Design {
   return structuredClone(DEFAULT_DESIGN);
@@ -19,17 +17,31 @@ function seedProject() {
   return objectId;
 }
 
+/**
+ * A finished layout, stated rather than computed: the optimizer lives in the
+ * Rust kernel now and is reached through wasm, which vitest's node environment
+ * does not load. What these tests exercise is the store's response to a layout,
+ * so the layout is a fixture -- two compartments side by side with the divider
+ * between them.
+ */
+function stubLayout(): PackResult {
+  const objectId = useAppStore.getState().selectedObjectId!;
+  return {
+    placements: [
+      { objectId, instance: 0, rotation: 0, parts: [{ x: 1.45, y: 1.45, width: 60, depth: 40 }] },
+      { objectId, instance: 1, rotation: 0, parts: [{ x: 61.45, y: 1.45, width: 60, depth: 40 }] },
+    ],
+    placedByObjectId: { [objectId]: 2 },
+    iterations: 30,
+    walls: [
+      { start: { x: 61.45, y: 0.85 }, end: { x: 61.45, y: 42.05 }, width: 1.2 },
+      { start: { x: 0.85, y: 41.45 }, end: { x: 122.05, y: 41.45 }, width: 1.2 },
+    ],
+  };
+}
+
 function optimize() {
-  const state = useAppStore.getState();
-  const project = state.projects.find((value) => value.id === state.activeProjectId)!;
-  const grid = drawerGrid(project.drawer, MAX_GRID);
-  state.setLayout(packLayout({
-    area: packingArea(grid, state.design.perimeterThickness),
-    objects: project.objects,
-    dividerThickness: project.dividerThickness,
-    clearance: project.clearance,
-    effort: 'quick',
-  }));
+  useAppStore.getState().setLayout(stubLayout());
 }
 
 beforeEach(() => {
@@ -80,7 +92,7 @@ describe('project commands', () => {
     expect(state.gridRows).toBe(5);
     expect(bin.cells).toHaveLength(35);
     expect(bin.openings).toEqual([]);
-    expect(bin.walls.length).toBeGreaterThan(0);
+    expect(bin.walls).toEqual(stubLayout().walls);
     expect(bin.cuts.length).toBeGreaterThan(0);
   });
 

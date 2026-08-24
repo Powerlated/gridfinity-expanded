@@ -57,30 +57,37 @@ Invariants moved out of ~30 hand-picked fixtures into the code: `Builder::build`
 ## Commands
 
 ```bash
-cargo build                                     # both crates
+cargo build                                     # `default-members`: gridfinity-app + its deps
+cargo build --workspace                         # every crate
 cargo test --release -p gridfinity-cad --lib    # the working gate: engine + model unit tests
 cargo test --release -p gridfinity-cad --lib <name> -- --nocapture
 cargo test --release -p gridfinity-cad --test asserts   # the AST assertion gate above
 # The Parasolid import ladder -- five .x_t files differing by one node class each, for a
 # real CAD system to accept or refuse, since nothing here can run a Parasolid reader:
 XT_LADDER_DIR=../xt-ladder cargo test --release -p gridfinity-cad --lib writes_the_import_ladder -- --ignored --nocapture
-cargo test --release --workspace                # full gate incl. fuzzers — slow, pre-PR only
-cargo test --release --workspace -- --ignored --nocapture   # benchmarks + perf reports
-cargo run -p gridfinity-gui                     # the app (needs a display + wgpu backend)
+cargo test --release --workspace                # full gate — fuzzers and benchmarks are #[ignore]d out of it
+cargo test --release --workspace -- --ignored --nocapture   # fuzzers + benchmarks + perf reports
+cargo run                                       # the app (needs a display + wgpu backend)
+cargo run -- optimize <in.toml> --format <stl|parasolid_x_t> <out> [--view]  # headless drawer fitting
 
 # Fuzzer (tests/fuzz.rs): random Params → try_build → validate → audit → tessellation_leaks,
 # failures grouped by signature, each shrunk to a paste-ready `Params` literal.
-FUZZ_CASES=2000 cargo test -p gridfinity-cad --test fuzz -- --nocapture
-FUZZ_SEED=7 FUZZ_CASES=500 cargo test -p gridfinity-cad --test fuzz -- --nocapture
+# **Every profile is #[ignore]d** — fuzzing is a deliberate campaign, not a routine gate.
+FUZZ_CASES=2000 cargo test --release -p gridfinity-cad --test fuzz -- --ignored --nocapture
+FUZZ_SEED=7 FUZZ_CASES=500 cargo test --release -p gridfinity-cad --test fuzz -- --ignored --nocapture
 # One profile alone (they interleave otherwise — test threads run in parallel):
-cargo test --release -p gridfinity-cad --test fuzz fuzz_bin_shapes -- --exact --nocapture
+cargo test --release -p gridfinity-cad --test fuzz fuzz_bin_shapes -- --ignored --exact --nocapture
 ```
 
 `--release` always: lib gate 0.2 s release vs ~1.7 s debug. Run with `--no-fail-fast` — a failing binary otherwise hides the ones after it.
 
-Measuring targets are `#[ignore]`d and do **not** gate: `tests/scale.rs`, `gridfinity-gui`'s badapple timings, `perf_report`, `alloc_report`. A number no assertion reads is not a gate, and they dominated the workspace run.
+Measuring targets are `#[ignore]`d and do **not** gate: `tests/scale.rs`, `gridfinity-app`'s badapple timings and `face_shapes` sweep, `perf_report`, `alloc_report`. A number no assertion reads is not a gate, and they dominated the workspace run.
 
-GUI is `windows_subsystem="windows"` in release — opens a window and blocks. Startup smoke test (shader compile / GL context / first mesh upload): `timeout 6 ./target/debug/gridfinity-gui.exe`.
+**The eight fuzz profiles are `#[ignore]`d too, on purpose.** Random search is a campaign tool: you run it when you are working on what it covers, or deliberately before a release, and you read the shrunk repro. Two profiles have stood red on the same undiagnosed backlog for a long time, so leaving them in the routine gate trained everyone to run it and skim past the red — which is the same failure mode `Options::known` had, arrived at from the other direction. Nothing is forgiven and nothing is deleted: `gate()` still asserts zero failures, the profiles still hold every requested blend, and the table below is still the number to compare against. They just do not run unless asked. `-- --ignored` is how you ask.
+
+`default-members = ["crates/gridfinity-app"]` is what makes bare `cargo run` the app and `cargo run -- optimize …` the fitter; it also narrows bare `cargo build`/`cargo test` to that crate, so pass `-p` or `--workspace` as every command above does.
+
+App is **not** `windows_subsystem="windows"` — the same binary prints the fitting report, and a windows-subsystem process inherits no console, so the report would go nowhere in release. Opens a window and blocks when given no `optimize`. Startup smoke test (shader compile / GL context / first mesh upload): `timeout 6 ./target/debug/gridfinity-app.exe`.
 
 ## Fuzzing: one path, eight profiles
 
@@ -88,9 +95,11 @@ GUI is `windows_subsystem="windows"` in release — opens a window and blocks. S
 
 `Options` names what a case *generates* (`Shape`, `Walls`, `openings`, `dividers`, `vary_params`, `slope`, `baseplate`, `Split`). It names nothing a profile *forgives*.
 
+Run with `-- --ignored`; the counts below are what a deliberate run should reproduce.
+
 | profile | varies | status at default seed |
 | --- | --- | --- |
-| `fuzz_inner_walls` | freeform walls on a fixed 2×2 | **red 21/150** — 8 defects |
+| `fuzz_inner_walls` | freeform walls on a fixed 2×2 | **red 21/150** — 9 defects |
 | `fuzz_tidy_inner_walls` | tidy walls, up to 3 so they cross | green |
 | `fuzz_wall_openings` | `open_edges` + `divider_edges` on rectangles | green |
 | `fuzz_openings_and_inner_walls` | both at once | green (was 6/150) |
@@ -99,7 +108,7 @@ GUI is `windows_subsystem="windows"` in release — opens a window and blocks. S
 | `fuzz_stripped_polyominoes` | polyominoes, **half** the perimeter wall opened | green (was 15/150) |
 | `fuzz_params_broad` | everything, incl. reentrant corners, slope, baseplate | **red 7/400** — 3 defects |
 
-Every red was already failing before, on a `known` list or behind a `require_blends` opt-out or both. Nothing is a regression; the counts are the backlog. Check the table before assuming a failure is yours. `fuzz_wall_openings` additionally clean at six seeds (default, 1, 7, 13, 42, 99) and at `FUZZ_CASES=600`.
+Every red was already failing before, on a `known` list or behind a `require_blends` opt-out or both. Nothing is a regression; the counts are the backlog. `fuzz_inner_walls` went 8 → 9 classes at the same 21 cases when the blend-chain kink became an `Err` instead of an assertion: cases that used to abort now report a named refusal, which is a class the old message absorbed. Compare **case counts**. Check the table before assuming a failure is yours. `fuzz_wall_openings` additionally clean at six seeds (default, 1, 7, 13, 42, 99) and at `FUZZ_CASES=600`.
 
 Six of eight green at the default seed; the two reds are **28 cases across 11 defects**, from 44 across 15. At seeds 1 / 7 / 42 the other six are green but for `fuzz_openings_and_inner_walls` (2/0/0) and `fuzz_stripped_polyominoes` (2/3/1), and `fuzz_inner_walls` sits at 25/21/25, `fuzz_params_broad` at 11/12/12. **`fuzz_inner_walls`' 21 are 13 of one class** — the ramp running out into a needle, below — so the profile is one defect from being close.
 
@@ -399,31 +408,49 @@ Three phases, two parallelisable. Measured 8c/16t: check phase alone **7.1×** (
 
 `catching` no longer swaps the panic hook per case — with many threads inside `catch_unwind` that race silenced the harness's own hook. `quiet_panics()` installs one silent hook per sweep, refcounted, and restores the loud one before the report is asserted.
 
-`gridfinity-gui`'s `badapple::tests::face_shapes` sweeps every distinct blob ≥ 40 cells in the clip's first ten seconds: ~31 minutes of CPU, which is what made `cargo test --workspace` look hung. Parallel (measured 13.6× on 16 threads) + de-duplicating blobs repeated across consecutive frames → ~140 s. Because it saturates every core, anything sharing that binary must not have a tight wall-clock budget — `pipelined_worker_matches_serial_build` polled a fixed 2000 × 2 ms and began failing under the load; its budget is an explicit deadline now.
+`gridfinity-app`'s `badapple::tests::face_shapes` sweeps every distinct blob ≥ 40 cells in the clip's first ten seconds: ~31 minutes of CPU, which is what made `cargo test --workspace` look hung. Parallel (measured 13.6× on 16 threads) + de-duplicating blobs repeated across consecutive frames → ~140 s. Because it saturates every core, anything sharing that binary must not have a tight wall-clock budget — `pipelined_worker_matches_serial_build` polled a fixed 2000 × 2 ms and began failing under the load; its budget is an explicit deadline now.
+
+**It is `#[ignore]`d.** It was 304 s of a 319 s workspace run — everything else in the workspace together is ~3 s — and the 140 s half of it is not a gate: the sweep reduces to `(leaky, total)` and only `println!`s them, so no assertion reads the number the time is spent producing. The cheap half does assert (`tessellation_leaks` empty on the biggest blob) and went with it; run the whole thing when working on the many-hole bridging path, which these blobs are the only real exercise of. `-p gridfinity-app` is 19.9 s without it.
 
 ## Debugger handover
 
-**A bin in the debugger can be handed over as a test.** `Params::rust_literal` prints a `Params` as the Rust literal that rebuilds it, omitting fields still at default. `gridfinity-gui`'s **Copy config** button puts that on the clipboard (optionally a file) with the `BlendReport` for the same bin — blends requested, blends landed, and the kernel's own refusal message when one did not. The counts alone do not name a defect; that message does, and it is otherwise visible only from inside `fillet_best_effort`.
+**A bin in the debugger can be handed over as a test.** `Params::rust_literal` prints a `Params` as the Rust literal that rebuilds it, omitting fields still at default. `gridfinity-app`'s **Copy config** button puts that on the clipboard (optionally a file) with the `BlendReport` for the same bin — blends requested, blends landed, and the kernel's own refusal message when one did not. The counts alone do not name a defect; that message does, and it is otherwise visible only from inside `fillet_best_effort`.
 
 `tests/fuzz.rs`'s `repro` calls the same function, so a hand-exported bin and a shrunk case arrive in **one** format and either pastes straight into a `#[test]`. Keep it that way — a second printer is a second format to recognise, and the two drift the moment a field is added to `Params`. `an_exported_config_names_every_field_it_changed` is the guard: every non-default field reaches the string, a default `Params` mentions none. A field added to `Params` and not the printer fails silently and lands on whoever tries the export months later.
 
-**`gridfinity-gui`'s `broken()` is coupled to the model's failure surface.** Its three failure-path tests need a configuration that genuinely fails, and every fix here retires one — re-pointed twice so far. Needs a **hard** failure: `build_bin` only catches `Err` and panics, so a solid that builds and then fails `validate` reads as success there.
+**`gridfinity-app`'s `broken()` is coupled to the model's failure surface.** Its three failure-path tests need a configuration that genuinely fails, and every fix here retires one — re-pointed twice so far. Needs a **hard** failure: `build_bin` only catches `Err` and panics, so a solid that builds and then fails `validate` reads as success there.
 
 **One `catch`, `main.rs`'s, `pub(crate)`.** `debugger.rs`'s test module had a second copy differing only in dropping the `"panicked: "` prefix. It is the *app's* net (silent hook for the duration, unwind or `Err` alike into a message) and the rollback sweep drives it deliberately — which is not the same as `rolling_back_the_construction_never_crashes_the_viewer` being routed through it. That test still is not, on purpose: the app keeps the net so the window survives, and a fuzzer behind one passes on a viewer that panics at every step.
 
 ## Workspace layout
 
-Virtual workspace rooted at the **repository root** (`../Cargo.toml`, edition 2024, resolver 3) — every `cargo` command runs from there, not from `crates/`. Two crates:
+Virtual workspace rooted at the **repository root** (`../Cargo.toml`, edition 2024, resolver 3) — every `cargo` command runs from there, not from `crates/`. Four crates, `default-members` the app:
 
 - **`crates/gridfinity-cad`** — the engine library. One dependency: `glam`. B-rep kernel and triangulator alike are hand-rolled.
-- **`crates/gridfinity-gui`** — eframe/egui/wgpu app. Depends on `gridfinity-cad`.
+- **`crates/gridfinity-app`** — eframe/egui/wgpu app **and** the headless `optimize` command, one binary. Depends on `gridfinity-cad` and `gridfinity-render`.
+- **`crates/gridfinity-render`** — the shared wgpu renderer, no egui and no wasm.
+- **`crates/gridfinity-wasm`** — the web app's bindings.
 
 Inside `gridfinity-cad`:
 
 - `src/kernel/` — `math`, `geom`, `sketch`, `topo`, `build`, `fillet`, `tess`, `planar`, `mesh`, `xt`, plus 2D loop and region work: `round` (tangency + corner rounding on a seg loop), `nesting` (which loops sit inside which), `region2d`, `rectregion`. **Nothing here knows about Gridfinity**; dependency direction is one-way, no kernel module imports from the model layer. Paths `crate::kernel::topo`, `gridfinity_cad::kernel::geom`.
-- `src/` — `gridfinity/` (the model, twelve modules), `layout` (grid cells/edges), `region` (polyomino boundary tracing, grid-coupled), `printers` (bed fitting, pure logic).
+- `src/` — `gridfinity/` (the model, twelve modules), `layout` (grid cells/edges), `region` (polyomino boundary tracing, grid-coupled), `printers` (bed fitting, pure logic), `project` (drawer fitting, pure logic).
 
-`Mesh`, `Solid`, `Tessellation`/`tessellate`, `Params` stay re-exported at the crate root, so the GUI is unaffected by the split.
+Inside `gridfinity-app`: `main` (dispatch + the egui `App`), `editor`, `debugger`, `viewport`, `wireframe`, `badapple` — the window; and `optimize` (the pipeline), `input` (the TOML), `export` (STL/X_T files), `report` (stdout) — the command.
+
+Two rules the command holds itself to. **The output path is checked before any work** (`Format::check_output`, called first in `optimize::run`): STL fills a directory and X_T writes one file, so each is refused by an existing path of the other kind, and discovering that after minutes of packing and building is the same mistake reported far too late. And **the report is read off the finished `Run`, never recomputed** — every stage's result is kept on it, so the numbers printed cannot disagree with the geometry written. `--view` hands `run.params` straight to the window in the same process; nothing is serialised between them.
+
+`Mesh`, `Solid`, `Tessellation`/`tessellate`, `Params` stay re-exported at the crate root, so the app is unaffected by the split.
+
+### `project/` — drawer fitting, in the model layer
+
+Pure logic beside `printers.rs`, no kernel dependency, four modules: `rects` (axis-aligned boxes, their lattice, `union_area`/`parts_connected`, boundary runs and `merge_segments`), `pack` (`PackSearch`, the bottom-left first fit over four rotations, restarts perturbed by `Mulberry32`), `walls` (`layout_walls` → `Wall`/`InnerWall`, extended half a thickness at both ends), `drawer` (`drawer_grid`, `packing_area`, `MAX_GRID` 40).
+
+**This is the only implementation.** It used to live in `../src/lib/project/*.ts` and was ported here verbatim — `mulberry32` bit for bit, the same tie-break on the instance sort — then verified against it: the same input gave byte-identical placements, counts, iterations and walls at both `quick` and `thorough`. The TypeScript optimizer is deleted; `../src/lib/project/rects.ts` keeps only the render-time measurements the SVG canvases take, and the web app reaches this one through `gridfinity-wasm`'s `PackSearch`.
+
+**`Rect::right`/`bottom` quantise.** The TS original did not, and `rect_grid`'s "does one part cover this cell" test compares a quantised lattice line against a raw `x + width`: at `x = 28.65, width = 28.2` the sum is an ulp below the line, the cell reads empty, and `union_area` returns **0** for a plain box. That value is the packer's own sort key, so the defect changed which layout came out. Quantising the far edges is what makes a box's right edge and its neighbour's left edge one number. `union_area` now asserts its result lies in `largest_part ..= sum_of_parts`, which is the check that would have caught it.
+
+`PACK_SEED` + `PackEffort::restarts()` is the whole reason one drawer and one object list always give one layout; the budget is an iteration count and never wall-clock, so the result cannot depend on the machine.
 
 ## Engine architecture
 
@@ -601,6 +628,14 @@ It takes the **bin's** cells as well as the piece's, because the prism is not qu
 
 **A piece enclosed on all four sides by the rest of the bin is refused up front** (`piece_is_enclosed`). Its cut runs through face *interiors* without crossing their loops, and `trim_loop` only inspects loop edges, so no chain and no connector is produced — the 3×3 centre cell reaches `trim` with 32 vertices inside, 312 outside, **0 connectors**. Supporting it means teaching `trim` to open a new interior section loop in a face, which it cannot do; until then the error says so instead of failing deep in the cap emitter with `cut section does not close into a loop`. Same capability a runout terminating in a face's interior needs.
 
+### A blend chain across a kink is refused, not asserted against
+
+`reconcile_shared_ends` derives each blend end's ball centre and touchdowns once and hands the answer to both edges, and it used to **assert** the two already agreed to within `join_agree`. That is a property of the chain the *caller* asked for, not of the kernel's own arithmetic — exactly like the shared-face count in the branch above it, which was already an `Err` — so it is an `Err` now. `fillet_best_effort` drops the chain and the user still gets a part; the fuzzer still counts the drop as `FILLET_FAILED`, so nothing is forgiven, only reported instead of crashed. A **closed** edge disagreeing with *itself* stays an assertion: both its ends came off the same faces and the same arithmetic.
+
+Found by a packed drawer: 42 dividers, a T junction whose two floor-fillet edges put the ball centre 4.2e-2 mm apart against a 2.1e-2 mm bound. Radius-independent, layout-dependent — one of the `fuzz_inner_walls` class, undiagnosed. It cost 29 of that bin's 204 floor fillets, which is what the salvage drops with the chain.
+
+`try_build_pieces_reporting` is how a caller sees that: `try_build_pieces` plus every bin's `BlendReport` summed, asserting `made + unresolved + dropped == requested`. Without it a caller cannot tell a drawer that kept its fillets from one that quietly gave them up, and the `optimize` report prints both the counts and the refusal.
+
 ### `orient.rs`
 
 The **orientation invariant**: every loop is *material-consistent* — walking it with the face's true outward normal keeps material on the left (outer loops positive, holes negative). `Builder::build` establishes it, so every solid the kernel hands out satisfies it and `misoriented_loops` is empty. This is what makes a boolean expressible.
@@ -661,7 +696,7 @@ Rectilinear region engine: unions/differences of axis-aligned rects resolved on 
 
 Twelve modules, dividing by what part of a bin they author. `mod` = wiring + `build`/`try_build`/`try_build_reporting`/`program`/`build_piece`/`build_bin_solid*`. `spec` = the normative dimensions and every clamp the model holds itself to (`buildable_wall_thickness`, `buildable_floor_fillet`, and one named const per tolerance — no bare epsilons). `params` = `Params`/`LogicalBin`/`InnerWall`, plain data, no validation. `outline` = the boundary walk + `OuterLoops`/`split_outline_at`. `cavity` = `cavity_inset`/`compartment_corners`/`finger_strips`/`walked_cavity`/`shape_cavity_loop`. `opening` = `OpenSpan`/`CavityLoop`/`clip_cavity_to_outline`. `wall` = `Island`/`Notch`/`Banded`/`inner_wall_quad`. `peg` = the three ring profiles + `split_peg_profile`. `stack` = `plan_cavity_flat`/`plan_cavity_banded` + the slope arithmetic. `plan` = `plan_piece`. `pieces` = `carve_to_cells`/`try_build_pieces`. `baseplate`.
 
-Each submodule names its own kernel imports and reaches its siblings through `use super::*`, so everything shared between them is `pub(super)` and `mod.rs` globs each back in. The public surface is `mod.rs`'s `pub use` and is what `gridfinity-gui`, `gridfinity-wasm` and `tests/fuzz.rs` see — moving an item between submodules changes nothing outside.
+Each submodule names its own kernel imports and reaches its siblings through `use super::*`, so everything shared between them is `pub(super)` and `mod.rs` globs each back in. The public surface is `mod.rs`'s `pub use` and is what `gridfinity-app`, `gridfinity-wasm` and `tests/fuzz.rs` see — moving an item between submodules changes nothing outside.
 
 Parametric model + spec constants + `Params`, a faithful port of the TS reference's `BinConfig`. `Params.bins: Vec<LogicalBin>` holds polyomino cell sets (plus optional floor slope); `Params::rect(gx,gy)` is the rectangular convenience. **Each bin is built in one `Builder`** so interface edges are shared automatically — there is *no general boolean*.
 

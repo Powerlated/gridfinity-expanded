@@ -313,13 +313,7 @@ export const useAppStore = create<AppState>((set) => ({
   applyLayout: () => set((state) => {
     const project = activeProject(state);
     if (!project || !state.layout) return state;
-    const bin = buildDrawerBin(
-      project,
-      state.layout,
-      state.design.printer,
-      state.design.perimeterThickness,
-      MAX_GRID,
-    );
+    const bin = buildDrawerBin(project.drawer, state.layout, state.design.printer, MAX_GRID);
     const grid = drawerGrid(project.drawer, MAX_GRID);
     return {
       design: { ...state.design, bins: [bin] },

@@ -1,0 +1,52 @@
+# A worked input for `cargo run -- optimize`.
+#
+#   cargo run -- optimize examples/drawer.toml --format stl out
+#   cargo run -- optimize examples/drawer.toml --format parasolid_x_t drawer.x_t --view
+
+[drawer]
+width = 400            # the drawer's inside measurements, in mm
+depth = 300
+
+[settings]             # every key here is optional
+divider_thickness = 1.2
+clearance = 0.5
+effort = "standard"    # quick | standard | thorough
+height_units = 4       # 7 mm each, above a 7 mm base
+wall_thickness = 1.2
+fillet_radius = 2.5
+magnets = false
+screws = false
+printer = "Prusa MK4 / MK3S+"
+# bed = { width = 250, depth = 210 }   # state a bed instead of a profile
+
+[[objects]]
+name = "calipers"
+size = [160, 40, 22]   # width, depth, and an optional height
+
+[[objects]]
+name = "socket 1/4in"
+quantity = 12
+size = [26, 26, 40]
+
+[[objects]]
+name = "screwdriver"
+quantity = 6
+size = [200, 30, 25]
+
+[[objects]]
+name = "tape measure"
+quantity = 1
+size = [70, 70, 60]
+
+[[objects]]
+name = "allen key set"
+quantity = 2
+boxes = [                                    # an L, given as two touching boxes
+  { x = 0,  y = 0,  width = 90, depth = 25 },
+  { x = 0,  y = 25, width = 25, depth = 55 },
+]
+
+[[objects]]
+name = "spare bits"
+quantity = 4
+size = [45, 35, 15]

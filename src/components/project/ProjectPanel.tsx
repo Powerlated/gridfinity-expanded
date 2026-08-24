@@ -13,7 +13,7 @@ import {
 } from '@mantine/core';
 import { usePackLayout } from '../../hooks/usePackLayout';
 import { MIN_DRAWER_MM, drawerGrid, maxDrawerMm, packingArea } from '../../lib/project/drawer';
-import { PACK_RESTARTS } from '../../lib/project/pack';
+import { PACK_RESTARTS } from '../../lib/project/defaults';
 import type { PackEffort } from '../../lib/types';
 import { MAX_GRID, useAppStore } from '../../store';
 import { Hint, Label } from '../ui/Field';

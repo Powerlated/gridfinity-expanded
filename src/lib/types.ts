@@ -77,6 +77,13 @@ export interface PackResult {
   placements: Placement[];
   placedByObjectId: Record<string, number>;
   iterations: number;
+  /**
+   * The dividers these placements imply, derived by the Rust packer alongside
+   * them. They arrive with the result rather than being recomputed here because
+   * the generator lives in the kernel and the canvases that draw them run
+   * inside React render, which cannot await wasm.
+   */
+  walls: Wall[];
 }
 
 export type PackEffort = 'quick' | 'standard' | 'thorough';

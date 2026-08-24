@@ -5,6 +5,7 @@ pub mod badapple;
 pub mod gridfinity;
 pub mod layout;
 pub mod printers;
+pub mod project;
 pub mod region;
 
 pub use gridfinity::{Params, build as build_gridfinity};
