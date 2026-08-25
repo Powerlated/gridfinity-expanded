@@ -146,7 +146,7 @@ pub(super) fn solve(
 /// Rewrites `corners` in place so that where two blends meet at a vertex, both
 /// carry bit-identical values for the ball centre and for each of the two
 /// touchdowns; corners meeting nothing are left as `solve` produced them. Errors
-/// when the two edges at a shared vertex do not have exactly one face in common,
+/// when the two edges at a shared vertex have no face in common,
 /// and when the values it is about to unify do not already agree to within
 /// `join_agree` -- past that the two blends do not share a tangent there, and
 /// unifying them would weld a visible kink shut rather than close float noise.
@@ -167,6 +167,17 @@ pub(super) fn solve(
 /// which share a normal there, name the other. The lower edge id wins, so the
 /// answer does not depend on iteration order; averaging would invent a third
 /// point neither blend built.
+///
+/// **Two shared faces is a chain running straight on, not a junction.** A
+/// requested edge is held back from `merge_coplanar_faces`, so a run of the
+/// boundary between one face and another can reach here still cut in two by a
+/// seam whose own edge the fuse dissolved: both halves are requested, and both
+/// then border the *same* pair of faces. There is no third face to distinguish
+/// the touchdowns by, and none is needed -- each corner's two faces are distinct,
+/// so naming a touchdown by the face it lies on is a bijection either way, and
+/// the shared face is picked by ascending id for the same reason the lower edge
+/// wins. It is the check below, on the three points the two corners already
+/// agree to `join_agree`, that says whether they really continue one chain.
 pub(super) fn reconcile_shared_ends(
     solid: &Solid,
     corners: &mut [Corner],
@@ -203,22 +214,30 @@ pub(super) fn reconcile_shared_ends(
             continue;
         }
         let (c0, c1) = (corners[i0], corners[i1]);
+        assert!(
+            c0.fa != c0.fb && c1.fa != c1.fb,
+            "blend chain: edge {} borders faces {:?} and edge {} borders faces {:?}; \
+             `check_edges` admitted only edges with two distinct faces, so naming a touchdown \
+             by the face it lies on is a bijection",
+            c0.e,
+            (c0.fa, c0.fb),
+            c1.e,
+            (c1.fa, c1.fb)
+        );
         let shared: Vec<usize> = [c0.fa, c0.fb]
             .into_iter()
             .filter(|f| *f == c1.fa || *f == c1.fb)
             .collect();
-        if shared.len() != 1 {
+        let Some(&s) = shared.first() else {
             return Err(format!(
-                "blend chain: edges {} and {} meet at vertex {v} across {} shared face(s) \
-                 (want 1); faces {:?} and {:?}",
+                "blend chain: edges {} and {} meet at vertex {v} sharing no face; \
+                 faces {:?} and {:?}",
                 c0.e,
                 c1.e,
-                shared.len(),
                 (c0.fa, c0.fb),
                 (c1.fa, c1.fb)
             ));
-        }
-        let s = shared[0];
+        };
         let on_shared = |c: &Corner, k: usize| {
             if c.fa == s {
                 c.ends[k].ta_p

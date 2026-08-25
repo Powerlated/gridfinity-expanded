@@ -213,7 +213,8 @@ fn fillet_edges_with(
 mod tests {
     use super::*;
     use crate::kernel::build::extrude;
-    use crate::kernel::sketch::Sketch;
+    use crate::kernel::math::Vec2;
+    use crate::kernel::sketch::{Seg, Sketch};
 
     #[test]
     fn best_effort_matches_fillet_edges_when_nothing_fails() {
@@ -237,6 +238,63 @@ mod tests {
         );
         assert_eq!(best.faces.len(), direct.faces.len());
         best.validate().expect("best-effort result is manifold");
+    }
+
+    /// A run of one face's boundary cut in two by a seam the coplanar fuse
+    /// dissolves: both halves are requested, so both survive the fuse bordering
+    /// the *same* pair of faces, and the chain across them is a straight
+    /// continuation rather than a junction. The packed drawer produces dozens of
+    /// these -- a divider's own vertex splits the compartment's floor run -- and
+    /// refusing them cost `examples/drawer.toml` 24 of its 283 floor fillets.
+    #[test]
+    fn a_chain_running_on_across_a_fused_seam_still_blends() {
+        let (x0, x1, y) = (-10.0, 10.0, -10.0);
+        let segs = vec![
+            Seg::Line {
+                a: Vec2::new(x0, y),
+                b: Vec2::new(0.0, y),
+            },
+            Seg::Line {
+                a: Vec2::new(0.0, y),
+                b: Vec2::new(x1, y),
+            },
+            Seg::Line {
+                a: Vec2::new(x1, y),
+                b: Vec2::new(x1, 10.0),
+            },
+            Seg::Line {
+                a: Vec2::new(x1, 10.0),
+                b: Vec2::new(x0, 10.0),
+            },
+            Seg::Line {
+                a: Vec2::new(x0, 10.0),
+                b: Vec2::new(x0, y),
+            },
+        ];
+        let solid = extrude(&Sketch::single(segs), 0.0, 5.0);
+        let run: Vec<(EdgeId, f64)> = (0..solid.edges.len())
+            .filter(|&e| {
+                let ed = solid.edges[e];
+                let (a, b) = (solid.vertex(ed.v0), solid.vertex(ed.v1));
+                [a, b]
+                    .iter()
+                    .all(|p| p.z.abs() < 1e-9 && (p.y - y).abs() < 1e-9)
+            })
+            .map(|e| (e, 1.0))
+            .collect();
+        assert_eq!(
+            run.len(),
+            2,
+            "the split side must reach the blend as two collinear edges, got {run:?}"
+        );
+
+        let (best, dropped, refusal) = fillet_best_effort(&solid, &run).expect("sound input");
+        assert!(
+            dropped.is_empty() && refusal.is_none(),
+            "a chain running straight on across a fused seam is not a junction, but \
+             {dropped:?} was dropped and it refused with {refusal:?}"
+        );
+        best.validate().expect("blended result is manifold");
     }
 
     #[test]
