@@ -30,7 +30,7 @@ use gridfinity_cad::layout::{GridCell, Piece, SplitLine, partition_cells};
 use gridfinity_cad::printers::compute_auto_split_lines;
 use gridfinity_cad::project::drawer::{DrawerGrid, MAX_GRID, drawer_cells, drawer_grid, packing_area};
 use gridfinity_cad::project::pack::{PackInput, PackResult, pack_layout};
-use gridfinity_cad::project::rects::Rect;
+use gridfinity_cad::project::rects::{Rect, inflate_parts};
 use gridfinity_cad::project::walls::{WallReport, layout_walls_reporting};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -45,12 +45,19 @@ pub struct Args {
 }
 
 /// Everything one invocation produced, in the order the pipeline produced it.
+///
+/// `claim_margin` is the packer's own `PackInput::margin`, kept rather than
+/// restated: it is how the report and the drawn boxes get back from a
+/// `Placement`'s claim to the object inside it, and a second derivation of it
+/// silently disagrees the moment the two are fed different numbers.
 pub struct Run {
     pub spec: Spec,
     pub grid: DrawerGrid,
     pub area: Rect,
     pub cells: Vec<GridCell>,
     pub result: PackResult,
+    pub floor_fillet: f64,
+    pub claim_margin: f64,
     pub wall_report: WallReport,
     pub params: Params,
     pub split_lines: Vec<SplitLine>,
@@ -61,14 +68,6 @@ pub struct Run {
     pub pack_time: Duration,
     pub build_time: Duration,
     pub export_time: Duration,
-}
-
-impl Run {
-    /// How far each object's boxes were grown to become the area it claimed: its
-    /// clearance plus the half divider standing on the claim boundary.
-    pub fn claim_margin(&self) -> f64 {
-        self.spec.clearance + self.spec.divider_thickness / 2.0
-    }
 }
 
 /// One placed object's box, in the bin's own millimetre coordinates: what the
@@ -96,14 +95,23 @@ pub struct View {
 /// floor, rising by the height its object declared, or filling the cavity when
 /// it declared none.
 ///
-/// `packing_area` is already in the bin's coordinates, so a placement's
-/// rectangles need no transform -- the rotation the packer chose is baked into
-/// the rectangles themselves. An object made of several boxes contributes one
-/// box per part rather than one bounding box over all of them, so an L-shaped
-/// object reads as the L it is and not as the rectangle around it.
+/// **A `Placement` carries the instance's *claim*, not the object.** A claim is
+/// the object grown by `claim_margin` -- its clearance, the reserved fillet, and
+/// the half divider that stands on the claim boundary -- so it reaches to the
+/// divider centrelines and to the edge of the packing area by construction.
+/// Drawing it is drawing a box that laps every wall the layout has, which is a
+/// picture of the reservation and not of the object; `inflate_parts` by the
+/// negative margin is what puts the object back.
+///
+/// `packing_area` is already in the bin's coordinates, so nothing else needs a
+/// transform -- the rotation the packer chose is baked into the rectangles
+/// themselves. An object made of several boxes contributes one box per part
+/// rather than one bounding box over all of them, so an L-shaped object reads as
+/// the L it is and not as the rectangle around it.
 fn object_boxes(run: &Run) -> Vec<ObjectBox> {
     let depth = run.spec.cavity_depth();
     let floor = gridfinity::BASE_TOTAL_HEIGHT + gridfinity::FLOOR_THICKNESS;
+    let margin = run.claim_margin;
     let mut out = Vec::new();
     for placement in &run.result.placements {
         let object = run
@@ -119,7 +127,15 @@ fn object_boxes(run: &Run) -> Vec<ObjectBox> {
                 )
             });
         let height = object.height.unwrap_or(depth);
-        for part in &placement.parts {
+        let parts = inflate_parts(&placement.parts, -margin);
+        assert!(
+            parts.len() == placement.parts.len(),
+            "deflating a claim by the margin it was grown by returns the object's own boxes, \
+             but {} boxes came back from {}",
+            parts.len(),
+            placement.parts.len()
+        );
+        for part in &parts {
             out.push(ObjectBox {
                 min: Vec3::new(part.x, part.y, floor),
                 max: Vec3::new(part.right(), part.bottom(), floor + height),
@@ -245,15 +261,20 @@ fn fit(spec: Spec) -> Result<Run, String> {
     }
     let cells = drawer_cells(grid);
     let area = packing_area(grid, spec.wall_thickness);
+    let floor_fillet = spec.built_floor_fillet();
 
-    let started = Instant::now();
-    let result = pack_layout(PackInput {
+    let input = PackInput {
         area,
         objects: spec.pack_objects(),
         divider_thickness: spec.divider_thickness,
         clearance: spec.clearance,
+        floor_fillet,
         effort: spec.effort,
-    });
+    };
+    let claim_margin = input.margin();
+
+    let started = Instant::now();
+    let result = pack_layout(input);
     let pack_time = started.elapsed();
 
     let (walls, wall_report) =
@@ -282,6 +303,8 @@ fn fit(spec: Spec) -> Result<Run, String> {
         area,
         cells,
         result,
+        floor_fillet,
+        claim_margin,
         wall_report,
         params,
         split_lines,
@@ -323,6 +346,9 @@ pub fn run(rest: &[String]) -> Result<Option<View>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gridfinity_cad::kernel::geom::Surface;
+    use gridfinity_cad::kernel::math::Vec2;
+    use gridfinity_cad::kernel::sketch::point_in_polygon;
 
     fn args(argv: &[&str]) -> Result<Args, String> {
         parse_args(&argv.iter().map(|s| s.to_string()).collect::<Vec<String>>())
@@ -366,6 +392,12 @@ mod tests {
 
     /// A drawer small enough to build quickly and busy enough to need dividers:
     /// two cells square, four objects that tile it.
+    ///
+    /// 30 mm and not 34: a claim is the object plus `2 * (clearance +
+    /// floor_fillet + divider/2)` = 7.16 mm at these settings, and two 34 mm
+    /// blocks' claims are 82.32 mm across an 81.1 mm packing area. Reserving the
+    /// fillet is what costs that, and the fixture is sized for what the drawer
+    /// can really hold rather than for what fits in plan view.
     const SMALL: &str = "\
 [drawer]
 width = 84
@@ -377,7 +409,7 @@ effort = \"quick\"
 [[objects]]
 name = \"block\"
 quantity = 4
-size = [34, 34]
+size = [30, 30]
 ";
 
     #[test]
@@ -390,7 +422,7 @@ size = [34, 34]
         assert_eq!(
             run.result.placements.len(),
             4,
-            "four 34 mm blocks fit an 84 mm drawer"
+            "four 30 mm blocks fit an 84 mm drawer"
         );
         assert!(
             !run.result.walls.is_empty(),
@@ -412,12 +444,12 @@ height_units = 3
 [[objects]]
 name = \"low\"
 quantity = 2
-size = [34, 34, 5]
+size = [30, 30, 5]
 
 [[objects]]
 name = \"high\"
 quantity = 2
-size = [34, 34, 200]
+size = [30, 30, 200]
 ";
 
     #[test]
@@ -459,8 +491,90 @@ size = [34, 34, 200]
         for b in too_tall {
             assert!(
                 b.max.z - b.min.z > run.spec.cavity_depth(),
-                "an object that does not fit still stands its full height, or the drawing                  hides the warning"
+                "an object that does not fit still stands its full height, or the drawing \
+                 hides the warning"
             );
+        }
+    }
+
+    /// Every compartment floor of a built piece, as the polygon its outer loop
+    /// traces in XY.
+    ///
+    /// A cavity floor is a `Plane` with a vertical normal at the one height
+    /// `BASE_TOTAL_HEIGHT + FLOOR_THICKNESS`, and nothing else in the model sits
+    /// there -- the same identification `floor_fillet_coverage` makes. The loop
+    /// is read off the *finished* solid, so it is the floor the floor fillet has
+    /// already trimmed back, which is the whole point of asking.
+    fn compartment_floors(solid: &Solid) -> Vec<Vec<Vec2>> {
+        let floor_z = gridfinity::BASE_TOTAL_HEIGHT + gridfinity::FLOOR_THICKNESS;
+        let mut out = Vec::new();
+        for fid in 0..solid.faces.len() {
+            let Surface::Plane { origin, normal, .. } = solid.faces[fid].surface else {
+                continue;
+            };
+            if normal.vec().z.abs() < 0.999 || (origin.z - floor_z).abs() > 1e-6 {
+                continue;
+            }
+            let mut pts: Vec<Vec2> = Vec::new();
+            for &(e, fwd) in solid.outer_edges(fid) {
+                let edge = solid.edges[e];
+                for p in edge.sample(fwd, edge.seg_count(24)) {
+                    pts.push(Vec2::new(p.x, p.y));
+                }
+            }
+            assert!(
+                pts.len() >= 3,
+                "a floor face traces {} points, which bounds no area",
+                pts.len()
+            );
+            out.push(pts);
+        }
+        out
+    }
+
+    /// The check the drawn boxes are a picture of: every packed object's
+    /// footprint lies inside a compartment floor the model actually built.
+    ///
+    /// This is the independent statement of what reserving the fillet is for. It
+    /// asks the finished B-rep where the floor is rather than re-deriving it from
+    /// the same margin the packer used, so a reservation that is too small fails
+    /// here even though the packing is self-consistent. Without the reservation
+    /// every corner of every object lands inside the blend.
+    #[test]
+    fn every_packed_object_fits_the_compartment_floor_the_model_built() {
+        let spec = input::parse(SMALL).expect("the fixture is a valid run");
+        let run = fit(spec).expect("a two-cell drawer of four blocks builds");
+        assert_eq!(run.pieces.len(), 1, "a two-cell drawer needs no splitting");
+        assert!(
+            run.floor_fillet > run.spec.clearance,
+            "the fixture must reserve more than its clearance, or it cannot tell the \
+             reservation from the clearance: fillet {} against clearance {}",
+            run.floor_fillet,
+            run.spec.clearance
+        );
+
+        let floors = compartment_floors(&run.pieces[0].solid);
+        assert!(
+            floors.len() >= run.result.placements.len(),
+            "every placed object gets a compartment, so there are at least {} floors, not {} \
+             -- leftover packing area becomes compartments of its own on top of those",
+            run.result.placements.len(),
+            floors.len()
+        );
+        for b in object_boxes(&run) {
+            for corner in [
+                Vec2::new(b.min.x, b.min.y),
+                Vec2::new(b.max.x, b.min.y),
+                Vec2::new(b.max.x, b.max.y),
+                Vec2::new(b.min.x, b.max.y),
+            ] {
+                assert!(
+                    floors.iter().any(|f| point_in_polygon(f, corner)),
+                    "the object corner {corner} stands on no compartment floor -- it is inside \
+                     the floor fillet, so the object does not sit in the compartment \
+                     packed for it"
+                );
+            }
         }
     }
 

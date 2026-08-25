@@ -9,7 +9,9 @@
 //! quantity wanted. `parse` is the whole transformation, and every failure it
 //! returns names the object and the key at fault.
 
-use gridfinity_cad::gridfinity::{BASE_TOTAL_HEIGHT, FLOOR_THICKNESS, HEIGHT_PER_UNIT};
+use gridfinity_cad::gridfinity::{
+    BASE_TOTAL_HEIGHT, FLOOR_THICKNESS, HEIGHT_PER_UNIT, buildable_floor_fillet,
+};
 use gridfinity_cad::printers::{DEFAULT_PRINTER, PRINTER_PROFILES, PrinterProfile};
 use gridfinity_cad::project::pack::{PackEffort, PackObject};
 use gridfinity_cad::project::rects::{Rect, parts_connected};
@@ -117,6 +119,25 @@ impl Spec {
     /// How deep a compartment is: everything above the base and its floor.
     pub fn cavity_depth(&self) -> f64 {
         self.total_height() - f64::from(BASE_TOTAL_HEIGHT) - f64::from(FLOOR_THICKNESS)
+    }
+
+    /// The floor fillet the model will actually blend this bin's compartments
+    /// with: the requested radius after the clamps the cavity's depth and corner
+    /// impose on it.
+    ///
+    /// A drawer bin is never sloped and takes `fillet_radius` as its corner
+    /// radius too, so this is `buildable_floor_fillet` asked exactly as
+    /// `plan_cavities` will ask it. It is the fitter's number as much as the
+    /// model's: the blend takes this much floor away from every compartment
+    /// wall, so it is what an object standing on that floor has to be held clear
+    /// of before its own clearance.
+    pub fn built_floor_fillet(&self) -> f64 {
+        buildable_floor_fillet(
+            self.fillet_radius,
+            self.cavity_depth(),
+            self.fillet_radius.max(0.0),
+            false,
+        )
     }
 
     /// The objects the packer is asked to place.

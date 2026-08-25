@@ -93,14 +93,36 @@ pub struct PackInput {
     pub objects: Vec<PackObject>,
     pub divider_thickness: f64,
     pub clearance: f64,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub floor_fillet: f64,
     pub effort: PackEffort,
 }
 
 impl PackInput {
     /// How far each object's boxes are grown to become the area it claims: its
-    /// clearance plus the half divider that will stand on the claim boundary.
+    /// clearance, the floor fillet the compartment's walls will be blended into
+    /// its floor by, and the half divider that will stand on the claim boundary.
+    ///
+    /// The fillet is in there because an object *rests on the floor*, and a
+    /// concave blend of radius `r` between floor and wall takes `r` of floor
+    /// away from every wall: the compartment is its stated size at mid height
+    /// and `r` smaller all round where the object actually sits. Reserving it
+    /// here is what makes the packed layout one the objects fit into rather than
+    /// one they only fit the plan view of. It is a lower bound on the corner
+    /// rounding too -- a compartment corner of radius `rc` bulges in by
+    /// `rc * (1 - 1/sqrt 2)`, about `0.3 * rc`, and the model never builds a
+    /// fillet larger than the corner it turns.
+    ///
+    /// Zero is the honest value for a bin the model rounds nothing in, and is
+    /// what a caller that has not been taught about the fillet sends, so the
+    /// margin is exactly what it always was for them.
     pub fn margin(&self) -> f64 {
-        self.clearance + self.divider_thickness / 2.0
+        assert!(
+            self.floor_fillet >= 0.0 && self.floor_fillet.is_finite(),
+            "a compartment's floor fillet is a radius, but this input reserves {}",
+            self.floor_fillet
+        );
+        self.clearance + self.floor_fillet + self.divider_thickness / 2.0
     }
 }
 
@@ -551,6 +573,7 @@ mod tests {
             objects,
             divider_thickness: 0.0,
             clearance: 0.0,
+            floor_fillet: 0.0,
             effort: PackEffort::Quick,
         }
     }
@@ -635,6 +658,45 @@ mod tests {
             assert_eq!(placement.parts[0].width, 23.0);
             assert_eq!(placement.parts[0].depth, 23.0);
         }
+    }
+
+    /// The floor fillet is reserved on top of those, because an object rests on
+    /// the floor and the blend takes its radius of floor from every wall.
+    #[test]
+    fn reserves_the_floor_fillet_on_top_of_the_clearance() {
+        let request = PackInput {
+            divider_thickness: 2.0,
+            clearance: 0.5,
+            floor_fillet: 2.5,
+            ..input(vec![object("a", 20.0, 20.0, 2)], AREA)
+        };
+        assert_eq!(
+            request.margin(),
+            4.0,
+            "0.5 clearance + 2.5 fillet + 1.0 half divider"
+        );
+        let result = pack_layout(request);
+        assert_eq!(result.placements.len(), 2);
+        for placement in &result.placements {
+            assert_eq!(placement.parts[0].width, 28.0);
+            assert_eq!(placement.parts[0].depth, 28.0);
+        }
+    }
+
+    /// A caller that names no fillet claims exactly what it always did, so the
+    /// reservation cannot change a layout behind an existing caller's back.
+    #[test]
+    fn a_zero_fillet_claims_what_the_margin_always_was() {
+        let plain = PackInput {
+            divider_thickness: 2.0,
+            clearance: 0.5,
+            ..input(vec![object("a", 20.0, 20.0, 2)], AREA)
+        };
+        assert_eq!(plain.floor_fillet, 0.0, "`input` names no fillet");
+        assert_eq!(
+            plain.margin(),
+            plain.clearance + plain.divider_thickness / 2.0
+        );
     }
 
     #[test]

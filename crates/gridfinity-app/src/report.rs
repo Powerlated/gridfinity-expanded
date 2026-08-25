@@ -161,7 +161,7 @@ fn objects(run: &Run) {
         "{:<24}{:>5}{:>8}  {:<18}{:>10}  {}",
         "name", "want", "placed", "claim mm", "area mm2", "turns"
     ));
-    let margin = run.claim_margin();
+    let margin = run.claim_margin;
     for object in &run.spec.objects {
         let placed = run
             .result
@@ -254,12 +254,12 @@ fn packing(run: &Run) {
     field(
         "claimed area",
         &format!(
-            "{} mm2 including clearance and dividers ({} of the area)",
+            "{} mm2 including clearance, floor fillet and dividers ({} of the area)",
             mm2(claimed_area),
             percent(claimed_area, area)
         ),
     );
-    let margin = run.claim_margin();
+    let margin = run.claim_margin;
     let mut any = false;
     for object in &run.spec.objects {
         let placed = run
@@ -296,7 +296,7 @@ fn placements(run: &Run) {
         return;
     }
     heading("Placements");
-    let margin = run.claim_margin();
+    let margin = run.claim_margin;
     let mut rows: Vec<(f64, f64, String)> = run
         .result
         .placements
@@ -359,7 +359,20 @@ fn rounding(run: &Run) {
     heading("Rounding");
     field(
         "floor fillets",
-        &format!("{} of {} built", blends.made(), blends.requested),
+        &format!(
+            "{} of {} built, at {} mm",
+            blends.made(),
+            blends.requested,
+            mm(run.floor_fillet)
+        ),
+    );
+    field(
+        "reserved",
+        &format!(
+            "{} mm of floor at every compartment wall, so an object stands clear of the \
+             blend it sits beside",
+            mm(run.floor_fillet)
+        ),
     );
     if blends.is_clean() {
         return;

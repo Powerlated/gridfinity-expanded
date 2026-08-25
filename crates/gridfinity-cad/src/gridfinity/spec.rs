@@ -190,7 +190,13 @@ pub(super) fn buildable_wall_thickness(want: f64, openish: bool, sloped: bool) -
 /// `FILLET_DEPTH_HEADROOM` and inside the corner by `FILLET_CORNER_HEADROOM`.
 /// The result is a radius the compartment's *depth and corners* admit; whether
 /// its width admits it is `max_inward_radius`'s question, asked per loop later.
-pub(super) fn buildable_floor_fillet(want: f64, cavity_depth: f64, rc: f64, sloped: bool) -> f64 {
+///
+/// Public because it is also what a *caller* laying compartments out has to
+/// reserve: the blend takes this much floor away from every wall, so an object
+/// meant to sit on that floor needs it before its own clearance. Reserving the
+/// unclamped request instead would over-reserve on a shallow bin, and reserving
+/// nothing puts the object inside the blend.
+pub fn buildable_floor_fillet(want: f64, cavity_depth: f64, rc: f64, sloped: bool) -> f64 {
     if sloped || rc <= MIN_ROUNDED_CORNER {
         return 0.0;
     }

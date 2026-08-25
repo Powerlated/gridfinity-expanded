@@ -266,6 +266,7 @@ mod tests {
             objects: vec![object("a", 80.0, 80.0, 4)],
             divider_thickness: DIVIDER,
             clearance: 0.5,
+            floor_fillet: 0.0,
             effort: PackEffort::Quick,
         });
         let walls = layout_walls(&result.placements, &area(), DIVIDER);
