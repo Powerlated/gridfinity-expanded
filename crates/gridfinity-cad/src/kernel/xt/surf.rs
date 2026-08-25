@@ -22,13 +22,13 @@ use crate::kernel::xt::text::{self, Index, Writer};
 /// How far a point the kernel says is on a surface or curve may sit from the
 /// emitted node's own implicit form.
 ///
-/// The kernel is `f32`, so a point 300 mm from the origin carries about 3e-5 mm
+/// The kernel is `f64`, so a point 300 mm from the origin carries about 3e-5 mm
 /// of representation noise and a curve evaluated two ways differs by a few
 /// multiples of that. This bound is an order above that noise and three orders
-/// below the thinnest feature the model makes, so it passes what `f32` costs and
+/// below the thinnest feature the model makes, so it passes what `f64` costs and
 /// fails any real error of translation, which moves a surface by a whole
 /// millimetre or turns it inside out.
-pub const ON_GEOMETRY_MM: f32 = 1.0e-3;
+pub const ON_GEOMETRY_MM: f64 = 1.0e-3;
 
 /// The fields every curve and surface node begins with, in schema order.
 pub struct GeomLinks {
@@ -104,7 +104,7 @@ pub fn check_surface(surface: &Surface, samples: &[Vec3]) -> Result<(), String> 
         "a surface is written as some face uses it, so it needs at least one point of that face"
     );
     let radius = match *surface {
-        Surface::Plane { .. } => f32::INFINITY,
+        Surface::Plane { .. } => f64::INFINITY,
         Surface::Cylinder { radius, .. } | Surface::Sphere { radius, .. } => radius,
         Surface::Cone { radius, .. } => radius,
         Surface::Torus { minor_r, .. } => minor_r,
@@ -222,14 +222,14 @@ pub enum XtCurve {
         centre: Vec3,
         normal: Dir,
         x_axis: Dir,
-        radius: f32,
+        radius: f64,
     },
     Ellipse {
         centre: Vec3,
         normal: Dir,
         x_axis: Dir,
-        major: f32,
-        minor: f32,
+        major: f64,
+        minor: f64,
     },
 }
 
@@ -283,7 +283,7 @@ impl XtCurve {
 
     /// How far `p` stands from this curve, in millimetres -- unsigned, since a
     /// curve has no side.
-    pub fn distance(&self, p: Vec3) -> f32 {
+    pub fn distance(&self, p: Vec3) -> f64 {
         match *self {
             XtCurve::Line { pvec, direction } => {
                 let d = p - pvec;
@@ -317,10 +317,10 @@ impl XtCurve {
     }
 
     /// The radius a reader would reject as non-positive: a line has none (it
-    /// reports `f32::INFINITY`, so the one assert in `write` never sees one).
-    fn radius_of(&self) -> f32 {
+    /// reports `f64::INFINITY`, so the one assert in `write` never sees one).
+    fn radius_of(&self) -> f64 {
         match *self {
-            XtCurve::Line { .. } => f32::INFINITY,
+            XtCurve::Line { .. } => f64::INFINITY,
             XtCurve::Circle { radius, .. } => radius,
             XtCurve::Ellipse { minor, .. } => minor,
         }

@@ -23,9 +23,12 @@ use crate::kernel::math::{Dir, Vec3};
 /// How near two quantities in world millimetres must be to count as equal
 /// here -- a plane's distance from a sphere's surface, a cross product's length
 /// against zero, a cosine against 1. 1e-5 mm is four orders below the smallest
-/// feature the model builds and two orders above f32 noise at bin scale, so the
-/// degenerate cases it names are the geometric ones and not float slop.
-pub const TOL: f32 = 1e-5;
+/// feature the model builds and nine orders above `f64` noise at bin scale, so
+/// the degenerate cases it names are the geometric ones and not float slop. It
+/// is deliberately not tightened to the precision: what it separates is a
+/// genuine tangency or parallel from a near one, which is a statement about the
+/// model's own scale rather than about the arithmetic.
+pub const TOL: f64 = 1e-5;
 
 /// What two surfaces meet in.
 ///
@@ -355,13 +358,13 @@ fn plane_cone(pl: &Surface, co: &Surface) -> Intersection {
 fn cone_generator_hit(
     apex: Vec3,
     axis: Vec3,
-    half_angle: f32,
+    half_angle: f64,
     pl: &Surface,
     dir: Vec3,
 ) -> Option<Vec3> {
     let (_, n) = plane_parts(pl);
     let radial = perp_unit(Dir::new(axis), dir);
-    for sign in [1.0f32, -1.0] {
+    for sign in [1.0f64, -1.0] {
         let g = axis * sign * half_angle.cos() + *radial * half_angle.sin();
         let denom = g.dot(n);
         if denom.abs() < TOL {
@@ -477,7 +480,7 @@ fn plane_torus(a: &Surface, b: &Surface) -> Intersection {
             return Intersection::Empty;
         }
         return Intersection::Curves(
-            [1.0f32, -1.0]
+            [1.0f64, -1.0]
                 .iter()
                 .map(|&branch| {
                     Curve::torus_section(center, *axis, n, offset, major_r, minor_r, branch)
@@ -524,7 +527,7 @@ fn plane_torus(a: &Surface, b: &Surface) -> Intersection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f32::consts::PI;
+    use std::f64::consts::PI;
 
     fn assert_on_both(a: &Surface, b: &Surface, isect: &Intersection) {
         let curves = isect.curves();
@@ -532,8 +535,8 @@ mod tests {
         for c in curves {
             for i in 0..64 {
                 let t = match c {
-                    Curve::Line { .. } => (i as f32 - 32.0) * 0.5,
-                    _ => i as f32 / 64.0 * 2.0 * PI,
+                    Curve::Line { .. } => (i as f64 - 32.0) * 0.5,
+                    _ => i as f64 / 64.0 * 2.0 * PI,
                 };
                 let p = c.point(t);
                 assert!(
@@ -582,7 +585,7 @@ mod tests {
             panic!("want a circle")
         };
         assert!(
-            (radius - (25.0f32 - 4.0).sqrt()).abs() < 1e-4,
+            (radius - (25.0f64 - 4.0).sqrt()).abs() < 1e-4,
             "radius {radius}"
         );
     }
@@ -627,7 +630,7 @@ mod tests {
         };
         assert!((minor - 4.0).abs() < 1e-4, "semi-minor {minor}");
         assert!(
-            (major - 4.0 * 2.0f32.sqrt()).abs() < 1e-3,
+            (major - 4.0 * 2.0f64.sqrt()).abs() < 1e-3,
             "semi-major {major}",
         );
     }

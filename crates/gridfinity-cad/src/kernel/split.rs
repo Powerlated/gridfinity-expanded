@@ -5,7 +5,7 @@ use crate::kernel::math::{Dir, Vec2, Vec3};
 use crate::kernel::sketch::{point_in_polygon, polygon_area};
 use crate::kernel::topo::{Builder, EdgeId, Solid, VertexId};
 
-pub const ON_PLANE: f32 = 1e-4;
+pub const ON_PLANE: f64 = 1e-4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Side {
@@ -25,9 +25,9 @@ pub fn side_of(plane: &Surface, p: Vec3) -> Side {
     }
 }
 
-pub fn curve_plane_params(curve: &Curve, t0: f32, t1: f32, plane: &Surface) -> Vec<f32> {
+pub fn curve_plane_params(curve: &Curve, t0: f64, t1: f64, plane: &Surface) -> Vec<f64> {
     let (lo, hi) = (t0.min(t1), t0.max(t1));
-    let within = |t: f32| t > lo + ON_PLANE && t < hi - ON_PLANE;
+    let within = |t: f64| t > lo + ON_PLANE && t < hi - ON_PLANE;
     let Surface::Plane { origin, normal, .. } = *plane else {
         return Vec::new();
     };
@@ -85,9 +85,9 @@ pub fn curve_plane_params(curve: &Curve, t0: f32, t1: f32, plane: &Surface) -> V
 
 /// `root` shifted by whole turns into `[lo, hi]`, and `None` when no whole
 /// number of turns lands it there.
-fn wrap_into(root: f32, lo: f32, hi: f32) -> Option<f32> {
+fn wrap_into(root: f64, lo: f64, hi: f64) -> Option<f64> {
     let mut t = root;
-    let two_pi = std::f32::consts::TAU;
+    let two_pi = std::f64::consts::TAU;
     while t < lo {
         t += two_pi;
     }
@@ -136,15 +136,15 @@ fn torus_section_roots(
     center: Vec3,
     axis: Dir,
     ref_dir: Dir,
-    major: f32,
-    minor: f32,
-    offset: f32,
-    branch: f32,
+    major: f64,
+    minor: f64,
+    offset: f64,
+    branch: f64,
     n: Vec3,
-    c: f32,
-    lo: f32,
-    hi: f32,
-) -> Vec<f32> {
+    c: f64,
+    lo: f64,
+    hi: f64,
+) -> Vec<f64> {
     assert!(
         minor > 0.0,
         "a torus section's minor radius is the blend radius it was rolled with and is positive, \
@@ -155,7 +155,7 @@ fn torus_section_roots(
     let b_coef = minor * axis.dot(n);
     let k = c - center.dot(n) - offset * d0.dot(n);
 
-    let roots: Vec<f32> = if b_coef.abs() < ON_PLANE {
+    let roots: Vec<f64> = if b_coef.abs() < ON_PLANE {
         if a_coef.abs() < ON_PLANE {
             return Vec::new();
         }
@@ -176,7 +176,7 @@ fn torus_section_roots(
             return Vec::new();
         }
         let base = s.asin();
-        vec![base, std::f32::consts::PI - base]
+        vec![base, std::f64::consts::PI - base]
     } else {
         panic!(
             "a torus section against a plane oblique to its axis is a quartic in cos t and is \
@@ -185,16 +185,16 @@ fn torus_section_roots(
         )
     };
 
-    let mut out: Vec<f32> = roots
+    let mut out: Vec<f64> = roots
         .into_iter()
         .filter_map(|r| wrap_into(r, lo, hi))
         .collect();
-    out.sort_by(f32::total_cmp);
+    out.sort_by(f64::total_cmp);
     out.dedup_by(|x, y| (*x - *y).abs() < ON_PLANE);
     out
 }
 
-fn harmonic_roots(a: f32, b: f32, rhs: f32, lo: f32, hi: f32) -> Vec<f32> {
+fn harmonic_roots(a: f64, b: f64, rhs: f64, lo: f64, hi: f64) -> Vec<f64> {
     let amp = (a * a + b * b).sqrt();
     if amp < ON_PLANE {
         return Vec::new();
@@ -205,16 +205,16 @@ fn harmonic_roots(a: f32, b: f32, rhs: f32, lo: f32, hi: f32) -> Vec<f32> {
     }
     let phase = b.atan2(a);
     let base = ratio.acos();
-    let mut out: Vec<f32> = [phase + base, phase - base]
+    let mut out: Vec<f64> = [phase + base, phase - base]
         .into_iter()
         .filter_map(|root| wrap_into(root, lo, hi))
         .collect();
-    out.sort_by(f32::total_cmp);
+    out.sort_by(f64::total_cmp);
     out.dedup_by(|x, y| (*x - *y).abs() < ON_PLANE);
     out
 }
 
-pub fn param_of(curve: &Curve, p: Vec3) -> f32 {
+pub fn param_of(curve: &Curve, p: Vec3) -> f64 {
     match *curve {
         Curve::Line { p0, dir } => (p - p0).dot(*dir),
         Curve::Circle {
@@ -406,8 +406,8 @@ impl Cut {
 
     /// Parameters at which an edge crosses the cut surface, each tagged with the
     /// plane it crosses.
-    fn crossings(&self, curve: &Curve, t0: f32, t1: f32) -> Vec<(f32, usize)> {
-        let mut out: Vec<(f32, usize)> = Vec::new();
+    fn crossings(&self, curve: &Curve, t0: f64, t1: f64) -> Vec<(f64, usize)> {
+        let mut out: Vec<(f64, usize)> = Vec::new();
         for (i, cp) in self.planes.iter().enumerate() {
             for t in curve_plane_params(curve, t0, t1, &cp.surface) {
                 if self.side_of(curve.point(t)) == Side::On {
@@ -498,18 +498,18 @@ fn no_connector_reason(surface: &Surface, cut: &Cut, from: Vec3) -> String {
 }
 
 /// Directed advance from `from` to `to` along `curve` travelling towards `dir`.
-fn advance_to(curve: &Curve, t_from: f32, t_to: f32, sign: f32) -> Option<f32> {
+fn advance_to(curve: &Curve, t_from: f64, t_to: f64, sign: f64) -> Option<f64> {
     let mut delta = (t_to - t_from) * sign;
     if matches!(curve, Curve::Line { .. }) {
         return (delta > ON_PLANE).then_some(delta);
     }
     while delta <= ON_PLANE {
-        delta += std::f32::consts::TAU;
+        delta += std::f64::consts::TAU;
     }
     Some(delta)
 }
 
-fn travel_sign(curve: &Curve, t_from: f32, dir: Vec3) -> Option<f32> {
+fn travel_sign(curve: &Curve, t_from: f64, dir: Vec3) -> Option<f64> {
     let h = 1e-3;
     let tangent = curve.point(t_from + h) - curve.point(t_from - h);
     if tangent.length() < 1e-9 {
@@ -520,7 +520,7 @@ fn travel_sign(curve: &Curve, t_from: f32, dir: Vec3) -> Option<f32> {
 
 /// Points ahead along `curve` where the plane being followed hands over to
 /// another plane of the cut — the edges of the cut surface.
-fn window_exits(cut: &Cut, curve: &Curve, from: Vec3, dir: Vec3) -> Vec<(f32, f32, Vec3)> {
+fn window_exits(cut: &Cut, curve: &Curve, from: Vec3, dir: Vec3) -> Vec<(f64, f64, Vec3)> {
     let t_from = param_of(curve, from);
     let Some(sign) = travel_sign(curve, t_from, dir) else {
         return Vec::new();
@@ -528,8 +528,8 @@ fn window_exits(cut: &Cut, curve: &Curve, from: Vec3, dir: Vec3) -> Vec<(f32, f3
     let (lo, hi) = match curve {
         Curve::Line { .. } => (t_from - 1e6, t_from + 1e6),
         _ => (
-            t_from - std::f32::consts::TAU,
-            t_from + std::f32::consts::TAU,
+            t_from - std::f64::consts::TAU,
+            t_from + std::f64::consts::TAU,
         ),
     };
     let mut out = Vec::new();
@@ -549,10 +549,10 @@ fn window_exits(cut: &Cut, curve: &Curve, from: Vec3, dir: Vec3) -> Vec<(f32, f3
 
 /// A connector may only run along the cut surface, never across material the
 /// cut removes.
-fn runs_along_cut(cut: &Cut, curve: &Curve, from: Vec3, signed: f32) -> bool {
+fn runs_along_cut(cut: &Cut, curve: &Curve, from: Vec3, signed: f64) -> bool {
     let t0 = param_of(curve, from);
     for k in 1..4 {
-        let t = t0 + signed * (k as f32 / 4.0);
+        let t = t0 + signed * (k as f64 / 4.0);
         if cut.side_of(curve.point(t)) != Side::On {
             return false;
         }
@@ -578,16 +578,16 @@ fn trim_loop(
     lp: &[(EdgeId, bool)],
     cut: &Cut,
 ) -> Result<Option<Vec<Chain>>, String> {
-    let mut pieces: Vec<(Vec3, Vec3, Curve, f32, f32, bool)> = Vec::new();
+    let mut pieces: Vec<(Vec3, Vec3, Curve, f64, f64, bool)> = Vec::new();
     for &(e, fwd) in lp {
         let ed = solid.edges[e];
         let (ta, tb) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
-        let mut cuts: Vec<f32> = cut
+        let mut cuts: Vec<f64> = cut
             .crossings(&ed.curve, ed.t0, ed.t1)
             .into_iter()
             .map(|(t, _)| t)
             .collect();
-        cuts.sort_by(f32::total_cmp);
+        cuts.sort_by(f64::total_cmp);
         cuts.dedup_by(|x, y| (*x - *y).abs() < ON_PLANE);
         cuts.sort_by(|x, y| {
             let dx = (x - ta).abs();
@@ -667,7 +667,7 @@ fn trim_loop(
     Ok(Some(chains))
 }
 
-fn advance_along(curve: &Curve, from: Vec3, to: Vec3, dir: Vec3) -> Option<(f32, f32)> {
+fn advance_along(curve: &Curve, from: Vec3, to: Vec3, dir: Vec3) -> Option<(f64, f64)> {
     let t_from = param_of(curve, from);
     let t_to = param_of(curve, to);
     if (curve.point(t_to) - to).length() > 1e-2 {
@@ -684,7 +684,7 @@ fn advance_along(curve: &Curve, from: Vec3, to: Vec3, dir: Vec3) -> Option<(f32,
         return (delta > ON_PLANE).then_some((delta, delta * sign));
     }
     while delta <= ON_PLANE {
-        delta += std::f32::consts::TAU;
+        delta += std::f64::consts::TAU;
     }
     Some((delta, delta * sign))
 }
@@ -822,9 +822,9 @@ enum Stop {
 
 struct Connector {
     stop: Stop,
-    advance: f32,
+    advance: f64,
     curve: Curve,
-    signed: f32,
+    signed: f64,
     plane: usize,
 }
 
@@ -915,7 +915,7 @@ fn nearest_along_shared_edge(
     }
     let on_shared =
         |p: Vec3| (p - tp).length() > ON_PLANE && shared.iter().any(|&j| cut.planes[j].holds(p));
-    let mut best: Option<(Option<usize>, f32)> = None;
+    let mut best: Option<(Option<usize>, f64)> = None;
     let mut consider = |idx: Option<usize>, p: Vec3| {
         if on_shared(p) {
             let d = (p - tp).length();
@@ -945,7 +945,7 @@ fn rebuild_loop(b: &mut Builder, solid: &Solid, lp: &[(EdgeId, bool)]) -> Vec<(E
 }
 
 fn unwrap_u(pts: &mut [Vec2]) {
-    use std::f32::consts::{PI, TAU};
+    use std::f64::consts::{PI, TAU};
     for i in 1..pts.len() {
         while pts[i].x - pts[i - 1].x > PI {
             pts[i].x -= TAU;
@@ -954,7 +954,7 @@ fn unwrap_u(pts: &mut [Vec2]) {
             pts[i].x += TAU;
         }
     }
-    let min = pts.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+    let min = pts.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
     let shift = (min / TAU).floor() * TAU;
     if shift != 0.0 {
         for p in pts.iter_mut() {
@@ -971,7 +971,7 @@ fn loop_encloses(outer: &[Vec2], inner: &[Vec2], angular: bool) -> bool {
     if !angular {
         return false;
     }
-    let tau = std::f32::consts::TAU;
+    let tau = std::f64::consts::TAU;
     point_in_polygon(outer, Vec2::new(p.x + tau, p.y))
         || point_in_polygon(outer, Vec2::new(p.x - tau, p.y))
 }
@@ -1009,7 +1009,7 @@ fn emit_trimmed_faces(
         }
     }
     let winding = if sense { 1.0 } else { -1.0 };
-    let areas: Vec<f32> = polys.iter().map(|p| polygon_area(p) * winding).collect();
+    let areas: Vec<f64> = polys.iter().map(|p| polygon_area(p) * winding).collect();
 
     let mut owner: Vec<Option<usize>> = vec![None; loops.len()];
     let outers: Vec<usize> = (0..loops.len())
@@ -1090,7 +1090,7 @@ fn emit_caps(
             .collect()
     };
     let polys: Vec<Vec<Vec2>> = loops.iter().map(|l| poly(l)).collect();
-    let areas: Vec<f32> = polys.iter().map(|p| polygon_area(p)).collect();
+    let areas: Vec<f64> = polys.iter().map(|p| polygon_area(p)).collect();
     let mut used = vec![false; loops.len()];
     for i in 0..loops.len() {
         if areas[i] <= 0.0 {
@@ -1117,17 +1117,17 @@ fn emit_caps(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f32::consts::PI;
+    use std::f64::consts::PI;
 
-    fn pts(xy: &[(f32, f32)]) -> Vec<Vec2> {
+    fn pts(xy: &[(f64, f64)]) -> Vec<Vec2> {
         xy.iter().map(|&(x, y)| Vec2::new(x, y)).collect()
     }
 
-    fn plane_x(c: f32) -> Surface {
+    fn plane_x(c: f64) -> Surface {
         Surface::plane(Vec3::new(c, 0.0, 0.0), Vec3::X)
     }
 
-    fn assert_lands_on_plane(curve: &Curve, params: &[f32], plane: &Surface) {
+    fn assert_lands_on_plane(curve: &Curve, params: &[f64], plane: &Surface) {
         for &t in params {
             let d = plane.signed_distance(curve.point(t));
             assert!(d.abs() < 1e-3, "t={t} is {d} off the plane");
@@ -1203,12 +1203,12 @@ mod tests {
     /// original does not have.
     fn assert_on_plane_and_torus(
         curve: &Curve,
-        params: &[f32],
+        params: &[f64],
         plane: &Surface,
         center: Vec3,
         axis: Vec3,
-        major: f32,
-        minor: f32,
+        major: f64,
+        minor: f64,
     ) {
         for &t in params {
             assert!(
@@ -1289,7 +1289,7 @@ mod tests {
         ];
         for curve in &curves {
             for i in 1..12 {
-                let t = -1.2 + i as f32 * 0.2;
+                let t = -1.2 + i as f64 * 0.2;
                 let p = curve.point(t);
                 let back = curve.point(param_of(curve, p));
                 assert!(

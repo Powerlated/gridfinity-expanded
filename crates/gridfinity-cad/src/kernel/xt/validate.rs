@@ -28,17 +28,19 @@ use std::collections::HashMap;
 ///
 /// The file's own declared `res_linear`, because that is the number the reader
 /// holds it to -- a tolerance the validator picks for itself can only be a
-/// number the reader has never heard of. The kernel's f32 noise measures ~3e-9 m
-/// against its analytic forms, so honest data clears it by about three times;
-/// a battery entry that fails is a bin whose f32 error a Parasolid frustrum
-/// would also reject, which is worth a red gate rather than a wider bound.
+/// number the reader has never heard of. It is left at `res_linear` and not
+/// tightened to the kernel's own precision for exactly that reason: what it
+/// asks is whether a *reader* would accept the file. The measured deviation was
+/// ~3e-9 m when the kernel modelled in `f32`, clearing it by three times; in
+/// `f64` the margin is orders wider still, and a battery entry that fails is a
+/// bin a Parasolid frustrum would also reject.
 const ON_GEOMETRY_M: f64 = 1.0e-8;
 
 /// How far a direction field may be from unit length.
 ///
 /// Four orders tighter than `ON_GEOMETRY_M`, because the writer normalises in
-/// f64 and the emitted decimals round-trip exactly, so nothing here has any f32
-/// residue left in it. Loosening this to f32's own 6e-8 is what let a chamfer's
+/// f64 and the emitted decimals round-trip exactly, so nothing here has any f64
+/// residue left in it. Loosening this to f64's own 6e-8 is what let a chamfer's
 /// tilted normals ship six times the file's declared resolution out of unit --
 /// invisible to every test here and a fault in the first CAD system to read it.
 const UNIT_TOL: f64 = 1.0e-12;

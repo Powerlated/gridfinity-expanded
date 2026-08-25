@@ -30,8 +30,8 @@ pub struct Editor {
     pub active_bin: usize,
     drag_start: Option<Pos2>,
     drag_now: Option<Pos2>,
-    pub wall_width: f32,
-    pub wall_height: f32,
+    pub wall_width: f64,
+    pub wall_height: f64,
     pub wall_full: bool,
 }
 
@@ -147,14 +147,14 @@ impl Editor {
 
         for w in &p.inner_walls {
             let a = Pos2::new(
-                rect.left() + w.x1 / PITCH * cell,
-                rect.bottom() - w.y1 / PITCH * cell,
+                rect.left() + w.x1 as f32 / PITCH * cell,
+                rect.bottom() - w.y1 as f32 / PITCH * cell,
             );
             let b2 = Pos2::new(
-                rect.left() + w.x2 / PITCH * cell,
-                rect.bottom() - w.y2 / PITCH * cell,
+                rect.left() + w.x2 as f32 / PITCH * cell,
+                rect.bottom() - w.y2 as f32 / PITCH * cell,
             );
-            let px = (w.width.max(0.4) / PITCH * cell).max(2.0);
+            let px = (w.width.max(0.4) as f32 / PITCH * cell).max(2.0);
             painter.line_segment([a, b2], Stroke::new(px, Color32::from_rgb(0x8a, 0x5a, 0x2b)));
         }
         if let (Some(a), Some(b2)) = (self.drag_start, self.drag_now) {
@@ -199,10 +199,10 @@ impl Editor {
                         let (ax, ay) = to_grid(a);
                         let (bx, by) = to_grid(b2);
                         let w = InnerWall {
-                            x1: ax * PITCH,
-                            y1: ay * PITCH,
-                            x2: bx * PITCH,
-                            y2: by * PITCH,
+                            x1: (ax * PITCH) as f64,
+                            y1: (ay * PITCH) as f64,
+                            x2: (bx * PITCH) as f64,
+                            y2: (by * PITCH) as f64,
                             width: self.wall_width,
                             height: (!self.wall_full).then_some(self.wall_height),
                         };

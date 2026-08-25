@@ -10,7 +10,7 @@ use crate::kernel::topo::{Edge, EdgeFaces, EdgeId, Solid};
 
 /// Maps a cylindrical surface to its `(base, axis, radius)` and every other
 /// surface kind to `None`. The axis is returned as stored, not renormalized.
-pub(super) fn as_cyl(s: &Surface) -> Option<(Vec3, Vec3, f32)> {
+pub(super) fn as_cyl(s: &Surface) -> Option<(Vec3, Vec3, f64)> {
     if let Surface::Cylinder {
         base, axis, radius, ..
     } = s
@@ -97,7 +97,7 @@ pub(super) fn across_at(
 /// clamped distance would rank two tangent points by how far past the end they
 /// fall rather than by which line they are on. Every branch is a function of the
 /// edge alone, so the two faces sharing it agree.
-pub(super) fn dist_to_curve(p: Vec3, ed: &Edge, solid: &Solid) -> f32 {
+pub(super) fn dist_to_curve(p: Vec3, ed: &Edge, solid: &Solid) -> f64 {
     match ed.curve {
         Curve::Line { p0, dir } => {
             let rel = p - p0;

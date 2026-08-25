@@ -161,9 +161,9 @@ fn drawer_params(
             slope: None,
         }],
         height_units: spec.height_units,
-        wall_thickness: spec.wall_thickness as f32,
-        cavity_corner_radius: spec.fillet_radius as f32,
-        floor_fillet: spec.fillet_radius as f32,
+        wall_thickness: spec.wall_thickness,
+        cavity_corner_radius: spec.fillet_radius,
+        floor_fillet: spec.fillet_radius,
         magnet_holes: spec.magnets,
         screw_holes: spec.screws,
         open_edges: Vec::new(),
@@ -398,9 +398,9 @@ size = [34, 34]
         assert_eq!(run.params.bins.len(), 1);
         assert_eq!(run.params.bins[0].cells, run.cells);
         for (wall, inner) in run.result.walls.iter().zip(&run.params.inner_walls) {
-            assert_eq!(inner.x1, wall.start.x as f32);
-            assert_eq!(inner.y1, wall.start.y as f32);
-            assert_eq!(inner.width, wall.width as f32);
+            assert_eq!(inner.x1, wall.start.x);
+            assert_eq!(inner.y1, wall.start.y);
+            assert_eq!(inner.width, wall.width);
             assert_eq!(inner.height, None, "a generated divider is full height");
         }
     }

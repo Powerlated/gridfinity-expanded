@@ -35,7 +35,7 @@ use gridfinity_cad::gridfinity::{self, BinSlope, LogicalBin, Mode, Params, Slope
 use gridfinity_cad::layout::GridFootprint;
 use gridfinity_cad::printers::{DEFAULT_PRINTER, PRINTER_PROFILES, PrinterProfile, check_bed_fit, compute_auto_split_lines};
 use gridfinity_cad::kernel::build::extrude;
-use gridfinity_cad::kernel::math::Vec3;
+use glam::Vec3;
 use gridfinity_cad::kernel::sketch::Sketch;
 use gridfinity_cad::kernel::topo::Solid;
 use gridfinity_cad::{tessellate, tessellate_shell};
@@ -67,6 +67,13 @@ fn flagged(tess: &gridfinity_cad::Tessellation, bad: bool) -> Vec<f32> {
     out
 }
 
+/// A point the kernel measured in millimetres, as the camera's own `f32`
+/// vector. The kernel models in `f64` and the renderer draws in `f32`, so this
+/// is where a coordinate crosses.
+fn render_point(p: [f64; 3]) -> Vec3 {
+    Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32)
+}
+
 fn vert_bounds(verts: &[f32]) -> (Vec3, Vec3) {
     let mut min = Vec3::splat(f32::INFINITY);
     let mut max = Vec3::splat(f32::NEG_INFINITY);
@@ -83,12 +90,12 @@ fn build_bin(p: &Params, bin: &LogicalBin) -> Result<Solid, String> {
 }
 
 fn placeholder(p: &Params, bin: &LogicalBin) -> Vec<f32> {
-    let h = (p.height_units as f32 * gridfinity::HEIGHT_PER_UNIT).max(1.0);
+    let h = (p.height_units as f64 * gridfinity::HEIGHT_PER_UNIT).max(1.0);
     let side = gridfinity::GRID_PITCH - 2.0 * gridfinity::HALF_TOL;
     let mut out = Vec::new();
     for c in &bin.cells {
-        let cx = c.x as f32 * gridfinity::GRID_PITCH + gridfinity::GRID_PITCH / 2.0;
-        let cy = c.y as f32 * gridfinity::GRID_PITCH + gridfinity::GRID_PITCH / 2.0;
+        let cx = c.x as f64 * gridfinity::GRID_PITCH + gridfinity::GRID_PITCH / 2.0;
+        let cy = c.y as f64 * gridfinity::GRID_PITCH + gridfinity::GRID_PITCH / 2.0;
         let sk = Sketch::rounded_rect(cx, cy, side, side, gridfinity::OUTER_R);
         out.extend(flagged(&tessellate(&extrude(&sk, 0.0, h), PREVIEW_RES), true));
     }
@@ -347,7 +354,7 @@ impl App {
 
     fn badapple_start(&mut self, time: f64) {
         let (min, max) = badapple::bounds();
-        self.camera.frame(Vec3::from_array(min), Vec3::from_array(max));
+        self.camera.frame(render_point(min), render_point(max));
         self.camera.yaw = 1.05;
         self.camera.pitch = 0.35;
         self.badapple = Some(BadApple {
@@ -875,7 +882,7 @@ impl App {
         let font = egui::FontId::monospace(9.0);
         let mut taken: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
         for label in &self.labels {
-            let Some(p) = self.camera.project(label.at, rect) else {
+            let Some(p) = self.camera.project(label.at.as_vec3(), rect) else {
                 continue;
             };
             if !rect.contains(p) {
@@ -965,9 +972,12 @@ mod tests {
         let p = bins_at(&[GridCell { x: 2, y: 1 }]);
         let (verts, _) = build_scene_with(&p, always_fails);
         let (min, max) = vert_bounds(&verts);
-        let pitch = gridfinity::GRID_PITCH;
+        let pitch = gridfinity::GRID_PITCH as f32;
         assert!(min.x > 2.0 * pitch - 1.0 && max.x < 3.0 * pitch + 1.0, "x {min:?}..{max:?}");
         assert!(min.y > 1.0 * pitch - 1.0 && max.y < 2.0 * pitch + 1.0, "y {min:?}..{max:?}");
-        assert!((max.z - gridfinity::HEIGHT_PER_UNIT).abs() < 1e-3, "one height unit tall");
+        assert!(
+            (max.z - gridfinity::HEIGHT_PER_UNIT as f32).abs() < 1e-3,
+            "one height unit tall"
+        );
     }
 }

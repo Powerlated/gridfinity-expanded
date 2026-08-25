@@ -37,7 +37,7 @@ use std::collections::HashSet;
 /// nothing else -- two cells the piece holds either side of an undivided edge
 /// are the same compartment by construction -- so the three cases are a
 /// partition, which is what the `else` asserts rather than assumes.
-pub(super) fn cavity_inset(walls: &EffectiveWalls, wt: f32, e: &GridEdge) -> f32 {
+pub(super) fn cavity_inset(walls: &EffectiveWalls, wt: f64, e: &GridEdge) -> f64 {
     if walls.dividers.contains(e) {
         wt / 2.0
     } else if walls.walled.contains(e) {
@@ -73,7 +73,7 @@ pub(super) fn cavity_inset(walls: &EffectiveWalls, wt: f32, e: &GridEdge) -> f32
 /// case is one the walk has to reproduce; see
 /// `the_walk_reproduces_the_tracer_except_where_a_divider_meets_a_notch` for the
 /// enumeration and `CLAUDE.md` for what each is.
-pub(super) fn compartment_corners(steps: &[Step], inset: &dyn Fn(&GridEdge) -> f32) -> Vec<Vec2> {
+pub(super) fn compartment_corners(steps: &[Step], inset: &dyn Fn(&GridEdge) -> f64) -> Vec<Vec2> {
     let n = steps.len();
     assert!(
         n >= 4,
@@ -126,7 +126,7 @@ pub(super) fn compartment_corners(steps: &[Step], inset: &dyn Fn(&GridEdge) -> f
 /// loop reproduces that planner's answer exactly, which is what
 /// `the_walk_reproduces_the_tracer_except_where_a_divider_meets_a_notch` checks
 /// on every finger configuration it sweeps.
-pub(super) fn finger_strips(comp: &[GridCell], walls: &EffectiveWalls, wt: f32) -> Vec<RectF> {
+pub(super) fn finger_strips(comp: &[GridCell], walls: &EffectiveWalls, wt: f64) -> Vec<RectF> {
     let set: HashSet<GridCell> = comp.iter().copied().collect();
     let mut out = Vec::new();
     for e in &walls.dividers {
@@ -144,11 +144,11 @@ pub(super) fn finger_strips(comp: &[GridCell], walls: &EffectiveWalls, wt: f32) 
 
 /// The material a divider stands as: `plan_cavity`'s own rectangle, the full
 /// pitch length of the edge by `wall_thickness`, centred on the divider line.
-pub(super) fn divider_strip(e: &GridEdge, wt: f32) -> RectF {
+pub(super) fn divider_strip(e: &GridEdge, wt: f64) -> RectF {
     let p = GRID_PITCH;
     match e.orientation {
-        Orientation::H => RectF::new(e.x as f32 * p, e.y as f32 * p - wt / 2.0, p, wt),
-        Orientation::V => RectF::new(e.x as f32 * p - wt / 2.0, e.y as f32 * p, wt, p),
+        Orientation::H => RectF::new(e.x as f64 * p, e.y as f64 * p - wt / 2.0, p, wt),
+        Orientation::V => RectF::new(e.x as f64 * p - wt / 2.0, e.y as f64 * p, wt, p),
     }
 }
 
@@ -168,7 +168,7 @@ pub(super) fn divider_strip(e: &GridEdge, wt: f32) -> RectF {
 pub(super) fn compartment_cavity_corners(
     comp: &[GridCell],
     walls: &EffectiveWalls,
-    wt: f32,
+    wt: f64,
 ) -> Vec<Vec<Vec2>> {
     let inset = |e: &GridEdge| cavity_inset(walls, wt, e);
     let walked: Vec<Vec<Vec2>> = boundary_steps(comp)
@@ -236,7 +236,7 @@ pub(super) fn contained_holes(all: &[TracedLoop], outer: &TracedLoop) -> Vec<Tra
 pub(super) fn walked_cavity(
     cells: &[GridCell],
     walls: &EffectiveWalls,
-    wt: f32,
+    wt: f64,
 ) -> Vec<(TracedLoop, Vec<TracedLoop>)> {
     let loops: Vec<TracedLoop> = crate::layout::compartments(cells, &walls.dividers)
         .iter()
@@ -257,13 +257,13 @@ pub(super) fn walked_cavity(
 
 pub(super) fn shape_cavity_loop_open(
     lp: &TracedLoop,
-    rc: f32,
-    rf: f32,
+    rc: f64,
+    rf: f64,
     spans: &[OpenSpan],
 ) -> Vec<Seg> {
     let n = lp.pts.len();
     let suppressed: Vec<bool> = lp.pts.iter().map(|&p| point_on_spans(spans, p)).collect();
-    let inset = |_: usize, _: Vec2, _: Vec2| 0.0f32;
+    let inset = |_: usize, _: Vec2, _: Vec2| 0.0f64;
     let radius = move |i: usize, convex: bool| {
         if suppressed[i] {
             return 0.0;
@@ -288,8 +288,8 @@ pub(super) fn shape_cavity_loop_open(
     )
 }
 
-pub(super) fn shape_cavity_loop(lp: &TracedLoop, rc: f32, rf: f32) -> Vec<Seg> {
-    let inset = |_: usize, _: Vec2, _: Vec2| 0.0f32;
+pub(super) fn shape_cavity_loop(lp: &TracedLoop, rc: f64, rf: f64) -> Vec<Seg> {
+    let inset = |_: usize, _: Vec2, _: Vec2| 0.0f64;
     let radius = move |_: usize, convex: bool| if convex { rc } else { rf };
     let segs = shape_loop(
         lp,
@@ -351,7 +351,7 @@ mod tests {
     /// hanging into this compartment below the divider.
     #[test]
     fn a_divider_junction_and_a_divider_by_a_notch_walk_to_a_single_corner() {
-        let wt = 1.2f32;
+        let wt = 1.2f64;
         let walk = |piece: &[GridCell], dividers: &[GridEdge], comp: usize| -> Vec<Vec2> {
             let walls = effective_walls(piece, piece, &[], dividers);
             let comps = crate::layout::compartments(piece, &walls.dividers);
@@ -359,7 +359,7 @@ mod tests {
             assert_eq!(steps.len(), 1, "the compartment has one boundary loop");
             compartment_corners(&steps[0], &|e| cavity_inset(&walls, wt, e))
         };
-        let close = |a: &[Vec2], b: &[(f32, f32)]| {
+        let close = |a: &[Vec2], b: &[(f64, f64)]| {
             assert!(
                 same_loop(
                     a,

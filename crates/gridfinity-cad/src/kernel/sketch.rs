@@ -1,5 +1,5 @@
 use crate::kernel::math::Vec2;
-use std::f32::consts::PI;
+use std::f64::consts::PI;
 
 /// How near two points of a boundary must be to be the same point, in
 /// millimetres. It is the one tolerance every consumer of a loop has to agree
@@ -7,7 +7,7 @@ use std::f32::consts::PI;
 /// it, `chain_loops` welds two chain ends this far apart, and a caller reading a
 /// sweep's output back -- dropping a hair, merging a subdivided run -- must use
 /// the same figure or it will keep a piece the boolean already welded away.
-pub const COINCIDENT: f32 = 1e-3;
+pub const COINCIDENT: f64 = 1e-3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Seg {
@@ -19,9 +19,9 @@ pub enum Seg {
         a: Vec2,
         b: Vec2,
         center: Vec2,
-        radius: f32,
-        a0: f32,
-        a1: f32,
+        radius: f64,
+        a0: f64,
+        a1: f64,
     },
 }
 
@@ -68,11 +68,11 @@ impl Sketch {
         Sketch { loops: vec![loop_] }
     }
 
-    pub fn area(&self) -> f32 {
+    pub fn area(&self) -> f64 {
         loop_area(&self.loops[0])
     }
 
-    pub fn rectangle(cx: f32, cy: f32, w: f32, h: f32) -> Sketch {
+    pub fn rectangle(cx: f64, cy: f64, w: f64, h: f64) -> Sketch {
         let (hw, hh) = (w / 2.0, h / 2.0);
         let p = |x, y| Vec2::new(cx + x, cy + y);
         let (bl, br, tr, tl) = (p(-hw, -hh), p(hw, -hh), p(hw, hh), p(-hw, hh));
@@ -84,7 +84,7 @@ impl Sketch {
         ])
     }
 
-    pub fn rounded_rect(cx: f32, cy: f32, w: f32, h: f32, r: f32) -> Sketch {
+    pub fn rounded_rect(cx: f64, cy: f64, w: f64, h: f64, r: f64) -> Sketch {
         let r = r.min(w / 2.0).min(h / 2.0);
         if r <= 1e-4 {
             return Sketch::rectangle(cx, cy, w, h);
@@ -122,7 +122,7 @@ impl Sketch {
         Sketch::single(segs)
     }
 
-    pub fn circle(cx: f32, cy: f32, r: f32) -> Sketch {
+    pub fn circle(cx: f64, cy: f64, r: f64) -> Sketch {
         let c = Vec2::new(cx, cy);
         let right = Vec2::new(cx + r, cy);
         let left = Vec2::new(cx - r, cy);
@@ -147,7 +147,7 @@ impl Sketch {
     }
 }
 
-pub fn loop_area(segs: &[Seg]) -> f32 {
+pub fn loop_area(segs: &[Seg]) -> f64 {
     let mut s = 0.0;
     for seg in segs {
         let a = seg.start();
@@ -170,7 +170,7 @@ pub fn loop_area(segs: &[Seg]) -> f32 {
 /// convention every region in the kernel is read by. This is `loop_area` for a
 /// loop given as *points* rather than segments; a polygon has no arcs, so there
 /// is no circular-segment term to add.
-pub fn polygon_area(pts: &[Vec2]) -> f32 {
+pub fn polygon_area(pts: &[Vec2]) -> f64 {
     let n = pts.len();
     let mut s = 0.0;
     for i in 0..n {
@@ -215,8 +215,8 @@ pub struct Aabb {
 
 impl Aabb {
     pub const EMPTY: Aabb = Aabb {
-        min: Vec2::new(f32::INFINITY, f32::INFINITY),
-        max: Vec2::new(f32::NEG_INFINITY, f32::NEG_INFINITY),
+        min: Vec2::new(f64::INFINITY, f64::INFINITY),
+        max: Vec2::new(f64::NEG_INFINITY, f64::NEG_INFINITY),
     };
 
     #[inline]
@@ -225,7 +225,7 @@ impl Aabb {
     }
 
     #[inline]
-    pub fn area(&self) -> f32 {
+    pub fn area(&self) -> f64 {
         ((self.max.x - self.min.x) * (self.max.y - self.min.y)).max(0.0)
     }
 
@@ -262,7 +262,7 @@ impl Seg {
                 let k0 = (lo / q).ceil() as i32;
                 let k1 = (hi / q).floor() as i32;
                 for k in k0..=k1 {
-                    let t = k as f32 * q;
+                    let t = k as f64 * q;
                     let p = center + Vec2::new(t.cos(), t.sin()) * radius;
                     bb = bb.union(Aabb { min: p, max: p });
                 }
@@ -290,7 +290,7 @@ pub fn point_in_segs(pt: Vec2, segs: &[Seg]) -> bool {
 /// can sum this over candidates instead of walking every segment.
 pub fn seg_crossings(pt: Vec2, seg: &Seg) -> u32 {
     let mut hits = 0u32;
-    let mut cross = |y0: f32, y1: f32, x: f32| {
+    let mut cross = |y0: f64, y1: f64, x: f64| {
         if (y0 > pt.y) != (y1 > pt.y) && x > pt.x {
             hits += 1;
         }
@@ -317,13 +317,13 @@ pub fn seg_crossings(pt: Vec2, seg: &Seg) -> u32 {
                     k1 - k0 < MAX_ARC_STOPS as i32,
                     "arc spans more than 2pi: a0={a0} a1={a1}"
                 );
-                let mut buf = [0.0f32; MAX_ARC_STOPS];
+                let mut buf = [0.0f64; MAX_ARC_STOPS];
                 let mut n = 0;
                 for k in k0..=k1 {
                     if n == MAX_ARC_STOPS {
                         break;
                     }
-                    buf[n] = PI / 2.0 + k as f32 * PI;
+                    buf[n] = PI / 2.0 + k as f64 * PI;
                     n += 1;
                 }
                 let stops = &mut buf[..n];
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn stadium_loop_closes_and_keeps_its_area() {
-        let (w, h) = (40.0f32, 2.4f32);
+        let (w, h) = (40.0f64, 2.4f64);
         let sk = Sketch::rounded_rect(0.0, 0.0, w, h, 5.0);
         let segs = &sk.loops[0];
         for i in 0..segs.len() {
@@ -397,7 +397,7 @@ mod tests {
             );
         }
         let r = h / 2.0;
-        let want = (w - h) * h + std::f32::consts::PI * r * r;
+        let want = (w - h) * h + std::f64::consts::PI * r * r;
         assert!(
             (loop_area(segs) - want).abs() < 1e-3,
             "area {}",
@@ -414,7 +414,7 @@ mod tests {
     fn brute_bbox(s: &Seg) -> Aabb {
         let mut bb = Aabb::EMPTY;
         for i in 0..=2048 {
-            let t = i as f32 / 2048.0;
+            let t = i as f64 / 2048.0;
             let p = match *s {
                 Seg::Line { a, b } => a + (b - a) * t,
                 Seg::Arc {
@@ -441,7 +441,7 @@ mod tests {
         let c = Vec2::new(3.0, -2.0);
         let r = 7.0;
         for k in 0..24 {
-            let a0 = k as f32 * 0.31 - 3.0;
+            let a0 = k as f64 * 0.31 - 3.0;
             for span in [0.4, 1.2, PI, 4.0, 2.0 * PI, -1.2, -4.0] {
                 let a1 = a0 + span;
                 let seg = Seg::Arc {
@@ -491,7 +491,7 @@ mod tests {
         let circle = Sketch::circle(1.0, 2.0, 5.0).loops[0].clone();
         for i in -12..12 {
             for j in -12..12 {
-                let p = Vec2::new(1.0 + i as f32 * 0.7, 2.0 + j as f32 * 0.7);
+                let p = Vec2::new(1.0 + i as f64 * 0.7, 2.0 + j as f64 * 0.7);
                 let want = (p - Vec2::new(1.0, 2.0)).length() < 5.0;
                 if ((p - Vec2::new(1.0, 2.0)).length() - 5.0).abs() < 1e-3 {
                     continue;

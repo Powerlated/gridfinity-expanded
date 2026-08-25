@@ -11,22 +11,26 @@
 //! far apart two faces' answers for one edge's moved endpoint may be. Zero is the
 //! honest bound -- both run the same arithmetic on the same inputs -- but a
 //! tangent point can be selected through different expressions along a chain, so
-//! this allows the last bits of an f32 near the model's 100 mm scale and nothing
-//! more. It is well under `topo`'s weld quantum, the distance at which a
+//! this allows the last bits of an `f64` near the model's 100 mm scale, where an
+//! ulp is 1.4e-14 mm, and nothing more. It is well under `topo`'s weld quantum,
+//! the distance at which a
 //! disagreement starts interning two vertices, so anything it catches would have
 //! cracked the solid open. `ON_EDGE` is how far off an edge's supporting curve a
 //! touchdown may be and still count as standing *on* that edge: a touchdown that
 //! lands on an edge does so exactly, being the ball centre offset by a face
 //! normal where the two faces meet, so this is float noise only -- an order above
 //! `END_AGREE` because it is reached through the normals rather than by the same
-//! arithmetic twice, and three orders below the thinnest wall the model will
-//! build, so it cannot mistake one edge at a corner for another. `MAX_JOIN_KINK`
+//! arithmetic twice, and eight orders below the thinnest wall the model will
+//! build, so it cannot mistake one edge at a corner for another. Both were 1e-4
+//! and 1e-3 when the kernel modelled in `f32`, where they really did have to
+//! absorb the last bits of a float at 100 mm; five orders of that allowance was
+//! the precision and is gone with it. `MAX_JOIN_KINK`
 //! is the largest kink two edges of one chain may have at the vertex they share.
 //! It is an **angle** because that is the quantity in question: the two blends
 //! site the same ball there, so in exact arithmetic they agree, and a kink of `d`
 //! radians moves the centre by about `r * d` -- stating it as a distance would
 //! tighten with the radius exactly where a blend has the most room to absorb the
-//! error. Half a degree is two orders above f32 normal noise at model scale and
+//! error. Half a degree is two orders above f64 normal noise at model scale and
 //! two orders below the turn any corner makes, and at the largest fillet the
 //! model offers it costs under 0.07 mm, which no printer resolves.
 
@@ -45,18 +49,18 @@ use crate::kernel::topo::{Builder, EdgeFaces, EdgeId, Solid};
 
 pub const NON_FINITE_NORMAL: &str = "blend: face normal is not finite";
 
-const END_AGREE: f32 = 1e-4;
+const END_AGREE: f64 = 1e-9;
 
-const ON_EDGE: f32 = 1e-3;
+const ON_EDGE: f64 = 1e-8;
 
-const MAX_JOIN_KINK: f32 = 0.5 * std::f32::consts::PI / 180.0;
+const MAX_JOIN_KINK: f64 = 0.5 * std::f64::consts::PI / 180.0;
 
 /// Maps a blend radius to how far apart, in millimetres, two edges of one chain
 /// may put the point they share. A kink of `MAX_JOIN_KINK` radians moves the ball
 /// centre by about `r * MAX_JOIN_KINK`, so the bound scales with the radius, and
 /// never falls below `END_AGREE`, which is the float noise floor a zero radius
 /// would otherwise demand the answer beat.
-fn join_agree(r: f32) -> f32 {
+fn join_agree(r: f64) -> f64 {
     (r * MAX_JOIN_KINK).max(END_AGREE)
 }
 
@@ -78,7 +82,7 @@ fn join_agree(r: f32) -> f32 {
 /// only the builder's own compaction clears those.
 pub fn fillet_best_effort(
     solid: &Solid,
-    blends: &[(EdgeId, f32)],
+    blends: &[(EdgeId, f64)],
 ) -> Result<(Solid, Vec<EdgeId>, Option<String>), String> {
     const MAX_SPLIT: u32 = 3;
 
@@ -96,7 +100,7 @@ pub fn fillet_best_effort(
         Err(e) => e,
     };
 
-    let mut kept: Vec<(EdgeId, f32)> = Vec::new();
+    let mut kept: Vec<(EdgeId, f64)> = Vec::new();
     for run in chain::chains(solid, blends) {
         let salvaged = chain::salvage(solid, &edge_faces, &kept, &run, MAX_SPLIT);
         kept.extend(salvaged);
@@ -131,7 +135,7 @@ pub fn fillet_best_effort(
 /// all of them or none, with nothing left sharp and nothing approximated. The
 /// input is blended as given -- no coplanar fuse, unlike `fillet_best_effort` --
 /// so an edge id means the same thing on the way in and in any error out.
-pub fn fillet_edges(solid: &Solid, blends: &[(EdgeId, f32)]) -> Result<Solid, String> {
+pub fn fillet_edges(solid: &Solid, blends: &[(EdgeId, f64)]) -> Result<Solid, String> {
     let edge_faces = solid.edge_faces();
     fillet_edges_with(solid, blends, &edge_faces)
 }
@@ -168,18 +172,18 @@ fn check_edges(
 /// to the last radius given, since the request is read into a map first.
 fn fillet_edges_with(
     solid: &Solid,
-    blends: &[(EdgeId, f32)],
+    blends: &[(EdgeId, f64)],
     edge_faces: &EdgeFaces,
 ) -> Result<Solid, String> {
     let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::FilletEdges);
-    let mut want: HashMap<EdgeId, f32> = HashMap::with_capacity(blends.len());
+    let mut want: HashMap<EdgeId, f64> = HashMap::with_capacity(blends.len());
     want.extend(blends.iter().copied());
 
     check_edges(solid, want.keys().copied(), edge_faces)?;
 
     let (vertex_blends, terminating) = chain::ends(solid, &want)?;
     let mut corners = corner::solve(solid, &want, edge_faces)?;
-    corner::reconcile_shared_ends(&mut corners, &vertex_blends)?;
+    corner::reconcile_shared_ends(solid, &mut corners, &vertex_blends)?;
     let (bm, runouts) = blend::build_all(solid, &corners, &terminating, edge_faces)?;
 
     let (touched, vinfo) = rebuild::touched_faces(solid, &bm, &want);
@@ -215,7 +219,7 @@ mod tests {
     fn best_effort_matches_fillet_edges_when_nothing_fails() {
         let sk = Sketch::rounded_rect(0.0, 0.0, 20.0, 20.0, 4.0);
         let solid = extrude(&sk, 0.0, 5.0);
-        let top: Vec<(EdgeId, f32)> = (0..solid.edges.len())
+        let top: Vec<(EdgeId, f64)> = (0..solid.edges.len())
             .filter(|&e| {
                 let ed = solid.edges[e];
                 let (a, b) = (solid.vertex(ed.v0), solid.vertex(ed.v1));

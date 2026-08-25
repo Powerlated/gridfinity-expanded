@@ -24,14 +24,14 @@ use crate::kernel::sketch::{COINCIDENT, Seg, loop_area};
 /// the float noise in a tangent read off a boolean's output, and well below any
 /// turn a bin's boundary makes on purpose, the shallowest of which is the
 /// 45-degree step where a cavity's inset changes along one run.
-pub const TANGENT_DOT: f32 = 0.9995;
+pub const TANGENT_DOT: f64 = 0.9995;
 
 /// How far `|cos phi|` must fall below 1 for the turn between two runs to be a
 /// corner worth rounding. Below it the pair is collinear (`phi = 0`) or doubles
 /// back on itself (`phi = pi`), and neither admits an inscribed arc: the first
 /// has no corner, the second no interior. It also floors the half-angle tangent
 /// the trim divides by -- `tan(acos(1 - CORNER_TURNS) / 2)`, about 7.1e-4.
-pub const CORNER_TURNS: f32 = 1e-6;
+pub const CORNER_TURNS: f64 = 1e-6;
 
 /// The closed loop of straight segments through `pts` in order, last back to
 /// first. Each point becomes one segment's start and the previous one's end, so
@@ -78,7 +78,7 @@ pub fn corners_of(segs: &[Seg]) -> Vec<Vec2> {
 /// round: the returned pair starts at `a0` and ends within `PI` of it, naming
 /// the same two points of the circle as the input. An exact half turn, where
 /// neither way round is shorter, sweeps positive -- `wrap_pi`'s closed end.
-pub fn short_arc(a0: f32, a1: f32) -> (f32, f32) {
+pub fn short_arc(a0: f64, a1: f64) -> (f64, f64) {
     (a0, a0 + wrap_pi(a1 - a0))
 }
 
@@ -109,7 +109,7 @@ pub fn seg_mid(seg: &Seg) -> Vec2 {
 /// Drop segments a boolean left with coincident endpoints, and loops left with
 /// fewer than three segments once those are gone.
 ///
-/// A region sweep can cut a run twice at what is the same point in f32 and hand
+/// A region sweep can cut a run twice at what is the same point in f64 and hand
 /// back a hair between the two cuts. The loop stays continuous without it --
 /// the neighbours already meet there -- and `build::wall_between` takes a
 /// segment's plane normal from the quad it sweeps, so a zero-length one gives a
@@ -158,13 +158,13 @@ pub fn has_sharp_corner(shape: &[Seg]) -> bool {
 /// both endpoints and interior points no more than `step` apart, taken on the
 /// true line or the true circle so neither the point nor the tangent is ever
 /// read off a chord. A degenerate segment yields nothing.
-pub fn seg_samples(s: &Seg, step: f32) -> Vec<(Vec2, Vec2)> {
+pub fn seg_samples(s: &Seg, step: f64) -> Vec<(Vec2, Vec2)> {
     assert!(
         step > 0.0,
         "sampling a segment needs a positive spacing, got {step}"
     );
     let mut out = Vec::new();
-    let (len, at): (f32, Box<dyn Fn(f32) -> (Vec2, Vec2)>) = match *s {
+    let (len, at): (f64, Box<dyn Fn(f64) -> (Vec2, Vec2)>) = match *s {
         Seg::Line { a, b } => {
             let d = b - a;
             let len = d.length();
@@ -200,7 +200,7 @@ pub fn seg_samples(s: &Seg, step: f32) -> Vec<(Vec2, Vec2)> {
     }
     let n = (len / step).ceil() as usize;
     for k in 0..=n {
-        out.push(at(k as f32 / n as f32));
+        out.push(at(k as f64 / n as f64));
     }
     out
 }
@@ -225,7 +225,7 @@ pub fn is_convex_arc(shape: &[Seg], s: &Seg) -> bool {
 /// would have left the corner sharp, and a hair-thin *arc* is not a chain
 /// terminator the way a sharp corner is, so it dragged a whole compartment's
 /// 2.48 mm floor fillet down to its own radius instead of ending the chain.
-pub const MIN_ARC_R: f32 = 0.1;
+pub const MIN_ARC_R: f64 = 0.1;
 
 /// `segs` with an arc inscribed at every sharp corner between two straight
 /// runs: radius `convex_r` where the loop turns away from its material and
@@ -242,16 +242,16 @@ pub const MIN_ARC_R: f32 = 0.1;
 /// Arcs already in `segs` are passed through untouched; only line/line joints
 /// are rounded. The result is the same closed loop with the same winding, one
 /// segment per input plus one arc per rounded corner.
-pub fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<Seg> {
+pub fn round_sharp_corners(segs: &[Seg], convex_r: f64, concave_r: f64) -> Vec<Seg> {
     let n = segs.len();
     if n < 2 || (convex_r <= 0.0 && concave_r <= 0.0) {
         return segs.to_vec();
     }
     let ccw = loop_area(segs) > 0.0;
 
-    let mut trim = vec![0.0f32; n];
-    let mut arc_r = vec![0.0f32; n];
-    let mut tan_half = vec![0.0f32; n];
+    let mut trim = vec![0.0f64; n];
+    let mut arc_r = vec![0.0f64; n];
+    let mut tan_half = vec![0.0f64; n];
     for i in 0..n {
         let (cur, next) = (&segs[i], &segs[(i + 1) % n]);
         let (Seg::Line { .. }, Seg::Line { .. }) = (cur, next) else {
@@ -277,7 +277,7 @@ pub fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<S
         arc_r[i] = r;
         trim[i] = r * tan_half[i];
     }
-    const USABLE: f32 = 0.98;
+    const USABLE: f64 = 0.98;
     let mut changed = true;
     while changed {
         changed = false;
@@ -345,8 +345,8 @@ pub fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<S
             Vec2::new(d_in.y, -d_in.x)
         };
         let center = p_in + nrm * arc_r[i];
-        let a0 = f32::atan2(p_in.y - center.y, p_in.x - center.x);
-        let a1 = f32::atan2(p_out.y - center.y, p_out.x - center.x);
+        let a0 = f64::atan2(p_in.y - center.y, p_in.x - center.x);
+        let a1 = f64::atan2(p_out.y - center.y, p_out.x - center.x);
         let (a0, a1) = short_arc(a0, a1);
         out.push(Seg::Arc {
             a: p_in,
@@ -373,7 +373,7 @@ pub fn round_sharp_corners(segs: &[Seg], convex_r: f32, concave_r: f32) -> Vec<S
 mod tests {
     use super::*;
 
-    fn square(side: f32) -> Vec<Seg> {
+    fn square(side: f64) -> Vec<Seg> {
         loop_of_points(&[
             Vec2::new(0.0, 0.0),
             Vec2::new(side, 0.0),
@@ -519,7 +519,7 @@ mod tests {
             center: c,
             radius: 3.0,
             a0: 0.0,
-            a1: std::f32::consts::FRAC_PI_2,
+            a1: std::f64::consts::FRAC_PI_2,
         };
         for (p, d) in seg_samples(&s, 0.25) {
             assert!(

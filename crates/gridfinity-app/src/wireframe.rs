@@ -1,5 +1,5 @@
 
-use glam::Vec3;
+use gridfinity_cad::kernel::math::Vec3;
 use gridfinity_cad::kernel::build::ring_on_plane;
 use gridfinity_cad::kernel::geom::Curve;
 use gridfinity_cad::kernel::sketch::Seg;
@@ -27,7 +27,14 @@ impl Wireframe {
         const CORNERS: [(f32, f32); 4] = [(0.0, -1.0), (0.0, 1.0), (1.0, -1.0), (1.0, 1.0)];
         for idx in [0usize, 1, 2, 2, 1, 3] {
             let (end, side) = CORNERS[idx];
-            self.lines.extend_from_slice(&[a.x, a.y, a.z, b.x, b.y, b.z]);
+            self.lines.extend_from_slice(&[
+                a.x as f32,
+                a.y as f32,
+                a.z as f32,
+                b.x as f32,
+                b.y as f32,
+                b.z as f32,
+            ]);
             self.lines.extend_from_slice(&color);
             self.lines.push(end);
             self.lines.push(side);

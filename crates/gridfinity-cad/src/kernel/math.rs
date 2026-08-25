@@ -5,10 +5,10 @@
 //! surfaces, topology or Gridfinity; it is the layer everything else counts on
 //! agreeing about.
 
-pub use glam::{Mat4, Quat, Vec2, Vec3};
+pub use glam::{DMat4 as Mat4, DQuat as Quat, DVec2 as Vec2, DVec3 as Vec3};
 
 #[inline]
-pub fn vec3_of(x: f32, y: f32, z: f32) -> Vec3 {
+pub fn vec3_of(x: f64, y: f64, z: f64) -> Vec3 {
     Vec3::new(x, y, z)
 }
 
@@ -22,19 +22,19 @@ pub fn vec3_of(x: f32, y: f32, z: f32) -> Vec3 {
 /// angles -- a sweep against its source, a sample's drift from the last one, a
 /// corner's turn -- which is what distinguishes this from `wrap_angle_into`,
 /// where the range is the caller's and the answer must land inside it.
-pub fn wrap_pi(a: f32) -> f32 {
+pub fn wrap_pi(a: f64) -> f64 {
     assert!(
         a.is_finite(),
         "wrapping an angle into a half turn either side of zero needs it finite, got {a}"
     );
     let mut out = a;
-    while out > std::f32::consts::PI {
-        out -= std::f32::consts::TAU;
+    while out > std::f64::consts::PI {
+        out -= std::f64::consts::TAU;
     }
-    while out <= -std::f32::consts::PI {
-        out += std::f32::consts::TAU;
+    while out <= -std::f64::consts::PI {
+        out += std::f64::consts::TAU;
     }
-    let turns = (a - out) / std::f32::consts::TAU;
+    let turns = (a - out) / std::f64::consts::TAU;
     assert!(
         (turns - turns.round()).abs() < 1e-3,
         "wrapping moves an angle by whole turns only, but {a} became {out}, a shift of {turns} \
@@ -55,7 +55,7 @@ pub fn wrap_pi(a: f32) -> f32 {
 /// the range spans at least a full turn or `angle` names a point of it, and is
 /// otherwise the nearest shift below `hi + slack`, which a caller rejects by
 /// testing the range itself.
-pub fn wrap_angle_into(angle: f32, lo: f32, hi: f32, slack: f32) -> f32 {
+pub fn wrap_angle_into(angle: f64, lo: f64, hi: f64, slack: f64) -> f64 {
     assert!(
         angle.is_finite() && lo.is_finite() && hi.is_finite(),
         "wrapping an angle into a range needs all three finite, got {angle} into [{lo}, {hi}]"
@@ -70,12 +70,12 @@ pub fn wrap_angle_into(angle: f32, lo: f32, hi: f32, slack: f32) -> f32 {
     );
     let mut out = angle;
     while out < lo - slack {
-        out += std::f32::consts::TAU;
+        out += std::f64::consts::TAU;
     }
     while out > hi + slack {
-        out -= std::f32::consts::TAU;
+        out -= std::f64::consts::TAU;
     }
-    let turns = (out - angle) / std::f32::consts::TAU;
+    let turns = (out - angle) / std::f64::consts::TAU;
     assert!(
         (turns - turns.round()).abs() < 1e-3,
         "wrapping moves an angle by whole turns only, but {angle} became {out}, a shift of \
@@ -84,11 +84,11 @@ pub fn wrap_angle_into(angle: f32, lo: f32, hi: f32, slack: f32) -> f32 {
     out
 }
 
-pub const WELD: f32 = 1.0e4;
+pub const WELD: f64 = 1.0e4;
 
-pub const WELD_NEAR: f32 = 0.5 / WELD;
+pub const WELD_NEAR: f64 = 0.5 / WELD;
 
-pub const WELD_NEAR_SQ: f32 = WELD_NEAR * WELD_NEAR;
+pub const WELD_NEAR_SQ: f64 = WELD_NEAR * WELD_NEAR;
 
 #[inline]
 pub fn weld_key(p: Vec3) -> (i64, i64, i64) {
@@ -102,83 +102,68 @@ pub fn weld_key(p: Vec3) -> (i64, i64, i64) {
 /// How far the length of a `Dir`, or the cosine between a `Dir` and the axis it
 /// was made perpendicular to, may sit from its exact value.
 ///
-/// A few `f64` ulps, and nothing more: a `Dir` is normalised in `f64` at
-/// construction, so this bounds one `f64` square root and nothing else. It is
-/// eight orders tighter than the 1e-8 linear resolution a transmit file
-/// declares, which is the point -- an `f32` unit vector is unit only to about
-/// 6.7e-8 once widened, six times that resolution, and a Parasolid frustrum
-/// measures it as non-unit and faults the face carrying it.
+/// A few ulps, and nothing more: a `Dir` is normalised at construction, so this
+/// bounds one square root and nothing else. It is seven orders tighter than the
+/// 1e-8 linear resolution a transmit file declares, which is the point. That
+/// margin was once a real defect rather than a formality -- the kernel modelled
+/// in `f32`, where a unit vector is unit only to about 6.7e-8 once widened, six
+/// times the declared resolution, and a Parasolid frustrum measured it as
+/// non-unit and faulted every face carrying a tilted one.
 pub const UNIT_RESIDUE: f64 = 1.0e-15;
 
-/// A direction: a vector of unit length in `f64`.
+/// A direction: a vector of unit length.
 ///
-/// The kernel models in `f32` and a direction is the one quantity that cannot
-/// afford to. Every surface axis, plane normal and reference direction is a
-/// `Dir`, so the property "this is a unit vector" is established once where the
-/// value is made rather than re-established by each consumer, and a writer
-/// emitting one has nothing left to fix up.
+/// Every surface axis, plane normal and reference direction is a `Dir`, so the
+/// property "this is a unit vector" is established once where the value is made
+/// rather than re-established by each consumer, and a writer emitting one has
+/// nothing left to fix up. A transmit file declares `res_linear` 1e-8 and a
+/// Parasolid frustrum measures a direction against it, so `UNIT_RESIDUE` is what
+/// a direction is held to -- seven orders inside that.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Dir {
-    exact: [f64; 3],
-    approx: Vec3,
-}
+pub struct Dir(Vec3);
 
 impl Dir {
-    /// `v` as a direction: widened to `f64`, then normalised there.
-    ///
-    /// `v` may be any non-degenerate finite vector -- this is where an arbitrary
-    /// direction *becomes* unit, so it does not require one going in. What it
-    /// guarantees coming out is a vector whose length is 1 to `UNIT_RESIDUE`.
+    /// `v` as a direction: normalised, so any non-degenerate finite vector goes
+    /// in and a vector of length 1 to `UNIT_RESIDUE` comes out.
     pub fn new(v: Vec3) -> Dir {
-        assert!(
-            v.is_finite() && v.length_squared() > 1e-24,
-            "a direction is made from a finite vector of some length, got {v:?}"
-        );
-        Dir::from_f64([v.x as f64, v.y as f64, v.z as f64])
+        Dir::from_f64([v.x, v.y, v.z])
     }
 
-    /// `v` as a direction, normalised in `f64` from `f64` components, for a
-    /// caller that already holds the exact numbers rather than their `f32` cast.
+    /// `v` as a direction, from components a caller holds loose rather than in a
+    /// `Vec3`.
     pub fn from_f64(v: [f64; 3]) -> Dir {
         let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
         assert!(
             len.is_finite() && len > 1e-12,
             "a direction is made from a finite vector of some length, got {v:?} of length {len}"
         );
-        let unit = [v[0] / len, v[1] / len, v[2] / len];
-        let residue =
-            (unit[0] * unit[0] + unit[1] * unit[1] + unit[2] * unit[2]).sqrt() - 1.0;
+        let unit = Vec3::new(v[0] / len, v[1] / len, v[2] / len);
+        let residue = unit.length() - 1.0;
         assert!(
             residue.abs() <= UNIT_RESIDUE,
-            "one f64 normalisation leaves a direction unit to f64 precision, but {unit:?} has \
-             length {}",
+            "one normalisation leaves a direction unit to the precision the kernel models in, \
+             but {unit:?} has length {}",
             residue + 1.0
         );
-        Dir {
-            exact: unit,
-            approx: Vec3::new(unit[0] as f32, unit[1] as f32, unit[2] as f32),
-        }
+        Dir(unit)
     }
 
-    /// The `f32` view of this direction, which is what the kernel's own
-    /// arithmetic works in. Unit to `f32` precision only -- about 6.7e-8 off, at
-    /// a tilt -- so it is the wrong thing to write to a file; the exact value is
-    /// `components`. Also reached by `Deref`, which is what lets a consumer call
-    /// `Vec3`'s own methods on a direction unchanged.
+    /// This direction as a vector. Also reached by `Deref`, which is what lets a
+    /// consumer call `Vec3`'s own methods on a direction unchanged.
     #[inline]
     pub fn vec(self) -> Vec3 {
-        self.approx
+        self.0
     }
 
-    /// The exact components, for a caller that must not lose the `f64`
-    /// normalisation -- which is every caller writing this direction out.
+    /// The three components, for a caller that wants them loose -- which is
+    /// every caller writing this direction out to a file.
     #[inline]
     pub fn components(self) -> [f64; 3] {
-        self.exact
+        self.0.to_array()
     }
 
     /// This direction with its component along `axis` removed and the remainder
-    /// renormalised, which is one Gram-Schmidt step in `f64`.
+    /// renormalised, which is one Gram-Schmidt step.
     ///
     /// The result is perpendicular to `axis` to `UNIT_RESIDUE` and unit to the
     /// same. `self` must already lean less than `PERP_TOL` out of perpendicular:
@@ -186,68 +171,39 @@ impl Dir {
     /// the axis is the caller's defect rather than something a projection can
     /// repair.
     pub fn perp_to(self, axis: Dir) -> Dir {
-        let (x, a) = (self.exact, axis.exact);
-        let dot = a[0] * x[0] + a[1] * x[1] + a[2] * x[2];
+        let dot = axis.0.dot(self.0);
         assert!(
             dot.abs() < PERP_TOL,
             "a reference direction is perpendicular to its axis, but {self:?} and {axis:?} meet \
              at a cosine of {dot}"
         );
-        let out = Dir::from_f64([
-            x[0] - a[0] * dot,
-            x[1] - a[1] * dot,
-            x[2] - a[2] * dot,
-        ]);
-        let e = out.exact;
-        let residual = a[0] * e[0] + a[1] * e[1] + a[2] * e[2];
+        let out = Dir::new(self.0 - axis.0 * dot);
+        let residual = axis.0.dot(out.0);
         assert!(
             residual.abs() <= UNIT_RESIDUE,
-            "one Gram-Schmidt step leaves a direction perpendicular to f64 precision, but \
-             {out:?} meets {axis:?} at a cosine of {residual}"
+            "one Gram-Schmidt step leaves a direction perpendicular to the precision the kernel \
+             models in, but {out:?} meets {axis:?} at a cosine of {residual}"
         );
         out
     }
 
-    /// The unit direction perpendicular to both, normalised in `f64`. The two
-    /// must not be parallel, where the cross product vanishes and no direction
-    /// is named.
-    ///
-    /// Named apart from `Vec3::cross`, which `Deref` also offers on a `Dir`,
-    /// because the two differ in precision and a caller must say which it
-    /// meant: this one is for a direction that will be written out, the `f32`
-    /// one for the kernel's own arithmetic.
-    pub fn cross_exact(self, other: Dir) -> Dir {
-        let (a, b) = (self.exact, other.exact);
-        Dir::from_f64([
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ])
-    }
-
-    /// The cosine of the angle between the two, in `f64`. Named apart from
-    /// `Vec3::dot` for the reason `cross_exact` is.
-    #[inline]
-    pub fn dot_exact(self, other: Dir) -> f64 {
-        self.exact[0] * other.exact[0]
-            + self.exact[1] * other.exact[1]
-            + self.exact[2] * other.exact[2]
+    /// The unit direction perpendicular to both. The two must not be parallel,
+    /// where the cross product vanishes and no direction is named.
+    pub fn cross_dir(self, other: Dir) -> Dir {
+        Dir::new(self.0.cross(other.0))
     }
 }
 
 /// How far a reference direction may lean out of perpendicular to its axis
 /// before it is the frame the caller built that is wrong, rather than the
 /// precision of the cast that widened it.
-const PERP_TOL: f64 = 1.0e-4;
+const PERP_TOL: f64 = 1.0e-9;
 
 impl std::ops::Neg for Dir {
     type Output = Dir;
     #[inline]
     fn neg(self) -> Dir {
-        Dir {
-            exact: [-self.exact[0], -self.exact[1], -self.exact[2]],
-            approx: -self.approx,
-        }
+        Dir(-self.0)
     }
 }
 
@@ -255,7 +211,7 @@ impl std::ops::Deref for Dir {
     type Target = Vec3;
     #[inline]
     fn deref(&self) -> &Vec3 {
-        &self.approx
+        &self.0
     }
 }
 

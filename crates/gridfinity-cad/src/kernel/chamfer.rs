@@ -29,8 +29,8 @@ struct Chamfer {
     fwd_a: bool,
 }
 
-pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f32, f32)]) -> Result<Solid, String> {
-    let want: HashMap<EdgeId, (f32, f32)> = chamfers
+pub fn chamfer_edges(solid: &Solid, chamfers: &[(EdgeId, f64, f64)]) -> Result<Solid, String> {
+    let want: HashMap<EdgeId, (f64, f64)> = chamfers
         .iter()
         .copied()
         .map(|(e, da, db)| (e, (da, db)))
@@ -338,7 +338,7 @@ fn face_centroid(solid: &Solid, fid: usize) -> Vec3 {
         sum += solid.verts[v].point;
         n += 1;
     }
-    if n > 0 { sum / n as f32 } else { Vec3::ZERO }
+    if n > 0 { sum / n as f64 } else { Vec3::ZERO }
 }
 
 fn intersect_lines(p0: Vec3, d0: Vec3, p1: Vec3, d1: Vec3) -> Option<Vec3> {
@@ -372,7 +372,7 @@ fn rebuild_loop(
     solid: &Solid,
     cm: &HashMap<EdgeId, Chamfer>,
     vinfo: &HashMap<usize, (Vec3, Vec3)>,
-    want: &HashMap<EdgeId, (f32, f32)>,
+    want: &HashMap<EdgeId, (f64, f64)>,
     fi: usize,
     lp: &[(EdgeId, bool)],
     ef: &crate::kernel::topo::EdgeFaces,
@@ -477,7 +477,7 @@ mod tests {
             })
             .collect();
         assert_eq!(top_edges.len(), 4, "box top rim has 4 edges");
-        let chamfers: Vec<(EdgeId, f32, f32)> =
+        let chamfers: Vec<(EdgeId, f64, f64)> =
             top_edges.into_iter().map(|e| (e, 1.0, 1.0)).collect();
         let c = chamfer_edges(&s, &chamfers).expect("chamfer");
         c.validate().expect("chamfered box is manifold");
@@ -497,7 +497,7 @@ mod tests {
                     && (s.verts[ed.v1].point.z - 5.0).abs() < 1e-3
             })
             .collect();
-        let chamfers: Vec<(EdgeId, f32, f32)> =
+        let chamfers: Vec<(EdgeId, f64, f64)> =
             top_edges.into_iter().map(|e| (e, 1.0, 2.0)).collect();
         let c = chamfer_edges(&s, &chamfers).expect("chamfer");
         c.validate().expect("asymmetric chamfer box is manifold");
@@ -522,7 +522,7 @@ mod tests {
             })
             .take(3)
             .collect();
-        let chamfers: Vec<(EdgeId, f32, f32)> =
+        let chamfers: Vec<(EdgeId, f64, f64)> =
             top_edges.into_iter().map(|e| (e, 1.0, 1.0)).collect();
         let err = chamfer_edges(&s, &chamfers).unwrap_err();
         assert!(

@@ -49,7 +49,7 @@ pub use self::spec::*;
 use self::stack::*;
 use self::wall::*;
 
-fn planar(b: &mut Builder, z: f32, up: bool, outer: Loop, inners: Vec<Loop>) {
+fn planar(b: &mut Builder, z: f64, up: bool, outer: Loop, inners: Vec<Loop>) {
     let surface = if up {
         Surface::plane_z(z)
     } else {

@@ -346,12 +346,12 @@ mod tests {
     /// against its surface node, and each used edge's midpoint and endpoints
     /// against its curve node -- or, for a torus section written as an
     /// intersection, against both of the surfaces that intersection lies on.
-    /// This is the f32-versus-res_linear number: it says how far the
+    /// This is the f64-versus-res_linear number: it says how far the
     /// millimetres the kernel computes can sit from the analytic forms a file
     /// declaring 1e-8 m of linear resolution implies.
-    fn deviation(solid: &Solid) -> (f32, f32) {
-        let mut max_surface = 0.0f32;
-        let mut max_curve = 0.0f32;
+    fn deviation(solid: &Solid) -> (f64, f64) {
+        let mut max_surface = 0.0f64;
+        let mut max_curve = 0.0f64;
         let used = used_edges(solid);
         let ef = solid.edge_faces();
         for fi in 0..solid.faces.len() {

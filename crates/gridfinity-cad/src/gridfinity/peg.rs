@@ -20,15 +20,15 @@ use crate::kernel::sketch::{COINCIDENT, Seg, Sketch, ccw_segs};
 use crate::layout::{GridCell, GridEdge, Orientation, cell_edges};
 use std::collections::HashMap;
 
-pub(super) fn peg_profile(c: GridCell, w: f32, r: f32) -> Vec<Seg> {
-    let cx = (c.x as f32 + 0.5) * GRID_PITCH;
-    let cy = (c.y as f32 + 0.5) * GRID_PITCH;
+pub(super) fn peg_profile(c: GridCell, w: f64, r: f64) -> Vec<Seg> {
+    let cx = (c.x as f64 + 0.5) * GRID_PITCH;
+    let cy = (c.y as f64 + 0.5) * GRID_PITCH;
     ccw_segs(&Sketch::rounded_rect(cx, cy, w, w, r))
 }
 
 pub(super) fn peg_seg_free(s: &Seg, c: GridCell, shared: &SharedWithPegs) -> bool {
-    let cx = (c.x as f32 + 0.5) * GRID_PITCH;
-    let cy = (c.y as f32 + 0.5) * GRID_PITCH;
+    let cx = (c.x as f64 + 0.5) * GRID_PITCH;
+    let cy = (c.y as f64 + 0.5) * GRID_PITCH;
     match *s {
         Seg::Line { a, b } => {
             let m = (a + b) * 0.5;
@@ -70,12 +70,12 @@ pub(super) fn peg_seg_free(s: &Seg, c: GridCell, shared: &SharedWithPegs) -> boo
 pub(super) fn split_peg_profile(
     segs: Vec<Seg>,
     c: GridCell,
-    splits: &HashMap<GridEdge, Vec<f32>>,
+    splits: &HashMap<GridEdge, Vec<f64>>,
     arc_points: &[Vec2],
 ) -> Vec<Seg> {
     let [west, east, south, north] = cell_edges(c);
-    let cx = (c.x as f32 + 0.5) * GRID_PITCH;
-    let cy = (c.y as f32 + 0.5) * GRID_PITCH;
+    let cx = (c.x as f64 + 0.5) * GRID_PITCH;
+    let cy = (c.y as f64 + 0.5) * GRID_PITCH;
     let mut out = Vec::with_capacity(segs.len());
     for s in segs {
         let Seg::Line { a, b } = s else {
@@ -89,7 +89,7 @@ pub(super) fn split_peg_profile(
             } = s
             {
                 let (lo, hi) = (a0.min(a1), a0.max(a1));
-                let mut cuts: Vec<f32> = arc_points
+                let mut cuts: Vec<f64> = arc_points
                     .iter()
                     .filter(|p| ((**p - center).length() - OUTER_R).abs() < COINCIDENT)
                     .map(|p| {
@@ -107,12 +107,12 @@ pub(super) fn split_peg_profile(
                     continue;
                 }
                 if a1 >= a0 {
-                    cuts.sort_by(f32::total_cmp);
+                    cuts.sort_by(f64::total_cmp);
                 } else {
                     cuts.sort_by(|x, y| y.total_cmp(x));
                 }
                 cuts.dedup_by(|x, y| (*x - *y).abs() < ARC_ENDPOINT_ANGLE);
-                let at = |t: f32| center + Vec2::new(t.cos(), t.sin()) * radius;
+                let at = |t: f64| center + Vec2::new(t.cos(), t.sin()) * radius;
                 let (mut prev_p, mut prev_t) = (a, a0);
                 for t in cuts {
                     out.push(Seg::Arc {
@@ -153,7 +153,7 @@ pub(super) fn split_peg_profile(
         };
         let coord = |p: Vec2| if horiz { p.x } else { p.y };
         let (c0, c1) = (coord(a), coord(b));
-        let mut cuts: Vec<f32> = stations
+        let mut cuts: Vec<f64> = stations
             .iter()
             .copied()
             .filter(|&t| (t - c0.min(c1)) > COINCIDENT && (c0.max(c1) - t) > COINCIDENT)

@@ -13,8 +13,8 @@ pub struct Vertex {
 #[derive(Clone, Copy, Debug)]
 pub struct Edge {
     pub curve: Curve,
-    pub t0: f32,
-    pub t1: f32,
+    pub t0: f64,
+    pub t1: f64,
     pub v0: VertexId,
     pub v1: VertexId,
 }
@@ -50,7 +50,7 @@ impl Edge {
         };
         out.reserve(n + 1);
         for i in 0..=n {
-            let t = a + (b - a) * (i as f32 / n as f32);
+            let t = a + (b - a) * (i as f64 / n as f64);
             out.push(self.curve.point(t));
         }
     }
@@ -60,7 +60,7 @@ impl Edge {
             Curve::Line { .. } => 1,
             Curve::Circle { .. } | Curve::Ellipse { .. } | Curve::TorusSection { .. } => {
                 let sweep = (self.t1 - self.t0).abs();
-                let exact = (sweep / (std::f32::consts::PI / 2.0)) * arc_segs_per_quarter as f32;
+                let exact = (sweep / (std::f64::consts::PI / 2.0)) * arc_segs_per_quarter as f64;
                 (exact - 1e-3).ceil().max(1.0) as usize
             }
         }
@@ -101,11 +101,14 @@ pub struct Shell {
 /// How much of a millimetre two samples may sit apart and still count as the
 /// same point of a shell's +x extreme.
 ///
-/// It has to sit above the coordinate noise of `f32` at bin scale -- one ulp at
-/// 100 mm is 7.6e-6, so a tolerance near it rounds away and samples at the
+/// It has to sit above the coordinate noise at bin scale -- an `f64` ulp at
+/// 100 mm is 1.4e-14, and a tolerance near *that* rounds away so samples at the
 /// extreme stop tying -- and far below the thinnest feature the model makes,
-/// which is a fraction of a millimetre.
-const EXTREME_TIE_MM: f32 = 1.0e-3;
+/// which is a fraction of a millimetre. It was 1e-3 when the kernel modelled in
+/// `f32`, whose ulp at 100 mm is 7.6e-6; the first version of it was 1e-6, which
+/// was under that ulp and made every sample at the extreme compare `x > x`, so a
+/// split L read as a void.
+const EXTREME_TIE_MM: f64 = 1.0e-9;
 
 /// How many points of a face are read when deciding which side of its shell
 /// the material is on, capped so a face with hundreds of edges costs no more
@@ -216,7 +219,7 @@ impl Solid {
     /// Whether the shell made of `faces` has material inside it rather than
     /// outside.
     fn encloses_material(&self, faces: &[usize]) -> bool {
-        let normals: Vec<(f32, f32)> = faces
+        let normals: Vec<(f64, f64)> = faces
             .iter()
             .flat_map(|&fi| {
                 let sense = if self.faces[fi].sense { 1.0 } else { -1.0 };
@@ -229,8 +232,8 @@ impl Solid {
         let best = normals
             .iter()
             .map(|&(x, _)| x)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let mut outward = f32::NEG_INFINITY;
+            .fold(f64::NEG_INFINITY, f64::max);
+        let mut outward = f64::NEG_INFINITY;
         for &(x, n) in &normals {
             if x > best - EXTREME_TIE_MM {
                 outward = outward.max(n);
@@ -365,10 +368,13 @@ impl Default for Solid {
 /// Both bound quantities the model builds exactly: coplanar faces here are one
 /// flat wall that an outline split cut into bands, so they carry the *same*
 /// plane through the same arithmetic and differ only in the last bits of an
-/// `f32`. These are four orders above that noise and four below the thinnest
+/// `f64`. These are five orders above that noise and nine below the thinnest
 /// feature the model makes, so nothing that is genuinely two planes can pass.
-const SAME_PLANE_DIST: f32 = 1e-4;
-const SAME_PLANE_SIN: f32 = 1e-5;
+/// Coplanarity is not transitive at any precision, so the union-find that grows
+/// a merged face still carries the lever arm: the allowance a member is held to
+/// is `SAME_PLANE_DIST + |Δorigin| * SAME_PLANE_SIN`.
+const SAME_PLANE_DIST: f64 = 1e-9;
+const SAME_PLANE_SIN: f64 = 1e-10;
 
 impl Solid {
     pub fn vertex(&self, id: VertexId) -> Vec3 {
@@ -404,7 +410,7 @@ impl Solid {
         // agree only to `SAME_PLANE_SIN` and whose origins are 73 mm apart are
         // already that far times the angle out of each other's plane, with
         // nothing wrong: it is the same plane, sampled at two distant points
-        // through `f32`. A flat allowance calls that a second plane, and
+        // through `f64`. A flat allowance calls that a second plane, and
         // does so more readily the larger the bin.
         let arm = (ob - oa).length();
         na.cross(nb).length() <= SAME_PLANE_SIN
@@ -801,7 +807,7 @@ impl Solid {
         // The outer loop is the one that encloses the rest, which for loops that
         // do not cross is the one of greatest area.
         let area = |lp: &Vec<(EdgeId, bool)>| {
-            let mut a = 0.0f32;
+            let mut a = 0.0f64;
             for &(e, fwd) in lp {
                 let (s, t) = self.directed(e, fwd);
                 let (p, q) = (self.verts[s].point, self.verts[t].point);
@@ -1277,10 +1283,10 @@ impl Builder {
         b: VertexId,
         center: Vec3,
         axis: Vec3,
-        radius: f32,
+        radius: f64,
         ref_dir: Vec3,
-        a0: f32,
-        a1: f32,
+        a0: f64,
+        a1: f64,
     ) -> (EdgeId, bool) {
         crate::kernel::perf::count(crate::kernel::perf::Metric::BuilderArc);
         let curve = Curve::circle(center, axis, radius, ref_dir);
@@ -1300,8 +1306,8 @@ impl Builder {
         a: VertexId,
         b: VertexId,
         curve: Curve,
-        t0: f32,
-        t1: f32,
+        t0: f64,
+        t1: f64,
     ) -> (EdgeId, bool) {
         assert!(
             matches!(curve, Curve::Ellipse { .. }),
@@ -1322,8 +1328,8 @@ impl Builder {
         a: VertexId,
         b: VertexId,
         curve: Curve,
-        t0: f32,
-        t1: f32,
+        t0: f64,
+        t1: f64,
     ) -> (EdgeId, bool) {
         let mid = curve.point((t0 + t1) * 0.5);
         self.edge_between(a, b, mid, || Edge {

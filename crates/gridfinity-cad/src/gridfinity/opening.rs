@@ -22,9 +22,9 @@ use std::collections::HashSet;
 #[derive(Clone, Copy, Debug)]
 pub(super) struct OpenSpan {
     pub(super) horiz: bool,
-    pub(super) coord: f32,
-    pub(super) lo: f32,
-    pub(super) hi: f32,
+    pub(super) coord: f64,
+    pub(super) lo: f64,
+    pub(super) hi: f64,
 }
 
 pub(super) fn open_spans(cells: &[GridCell], walls: &EffectiveWalls) -> Vec<OpenSpan> {
@@ -38,15 +38,15 @@ pub(super) fn open_spans(cells: &[GridCell], walls: &EffectiveWalls) -> Vec<Open
             match e.orientation {
                 Orientation::H => OpenSpan {
                     horiz: true,
-                    coord: e.y as f32 * p,
-                    lo: e.x as f32 * p,
-                    hi: (e.x + 1) as f32 * p,
+                    coord: e.y as f64 * p,
+                    lo: e.x as f64 * p,
+                    hi: (e.x + 1) as f64 * p,
                 },
                 Orientation::V => OpenSpan {
                     horiz: false,
-                    coord: e.x as f32 * p,
-                    lo: e.y as f32 * p,
-                    hi: (e.y + 1) as f32 * p,
+                    coord: e.x as f64 * p,
+                    lo: e.y as f64 * p,
+                    hi: (e.y + 1) as f64 * p,
                 },
             }
         })

@@ -19,15 +19,15 @@ use crate::kernel::sketch::{Seg, loop_area, point_in_segs, reverse_loop};
 #[derive(Clone, Debug)]
 pub(super) struct Island {
     pub(super) segs: Vec<Seg>,
-    pub(super) top: Option<f32>,
-    pub(super) fr: f32,
+    pub(super) top: Option<f64>,
+    pub(super) fr: f64,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct Notch {
     pub(super) quad: Vec<Seg>,
     pub(super) contact: Vec<Seg>,
-    pub(super) top: f32,
+    pub(super) top: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -37,7 +37,7 @@ pub(super) struct Banded {
     pub(super) notches: Vec<Notch>,
 }
 
-pub(super) fn inner_wall_quad(w: &InnerWall, r: f32) -> Option<Vec<Seg>> {
+pub(super) fn inner_wall_quad(w: &InnerWall, r: f64) -> Option<Vec<Seg>> {
     let a = Vec2::new(w.x1, w.y1);
     let b = Vec2::new(w.x2, w.y2);
     let d = b - a;
@@ -79,8 +79,8 @@ pub(super) fn inner_wall_quad(w: &InnerWall, r: f32) -> Option<Vec<Seg>> {
     let mut out = Vec::with_capacity(n_c * 2);
     for i in 0..n_c {
         let (t_in, t_out, center) = tangents[i];
-        let a0 = f32::atan2(t_in.y - center.y, t_in.x - center.x);
-        let a1 = f32::atan2(t_out.y - center.y, t_out.x - center.x);
+        let a0 = f64::atan2(t_in.y - center.y, t_in.x - center.x);
+        let a1 = f64::atan2(t_out.y - center.y, t_out.x - center.x);
         let (a0, a1) = short_arc(a0, a1);
         out.push(Seg::Arc {
             a: t_in,
@@ -101,7 +101,7 @@ pub(super) fn inner_wall_quad(w: &InnerWall, r: f32) -> Option<Vec<Seg>> {
     Some(out)
 }
 
-pub(super) fn inner_wall_quad_in(w: &InnerWall, r: f32, outer: &[Seg]) -> Option<Vec<Seg>> {
+pub(super) fn inner_wall_quad_in(w: &InnerWall, r: f64, outer: &[Seg]) -> Option<Vec<Seg>> {
     let sharp = inner_wall_quad(w, 0.0)?;
     if r < MIN_QUAD_ROUND {
         return Some(sharp);

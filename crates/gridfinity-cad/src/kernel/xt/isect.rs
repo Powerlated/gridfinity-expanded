@@ -27,7 +27,7 @@ use crate::kernel::xt::text::{self, Index, Writer};
 /// parameterisation; it is not a tolerance on the curve, which the reader takes
 /// from the surfaces, so this is a description dense enough to be unambiguous
 /// rather than one fine enough to measure.
-const CHART_PER_QUARTER: f32 = 8.0;
+const CHART_PER_QUARTER: f64 = 8.0;
 const CHART_MIN_POINTS: usize = 5;
 
 /// An intersection curve ready to write: its chart in the natural tangent's
@@ -57,8 +57,8 @@ pub struct Nodes {
 /// describe a different curve than the kernel built.
 pub fn plan(
     curve: &Curve,
-    t0: f32,
-    t1: f32,
+    t0: f64,
+    t1: f64,
     ends: (Vec3, Vec3),
     faces: [(&Surface, char); 2],
 ) -> Result<Intersection, String> {
@@ -67,10 +67,10 @@ pub fn plan(
         "an edge spans a real parameter range, got {t0} to {t1}"
     );
     let sweep = (t1 - t0).abs();
-    let steps = ((sweep / std::f32::consts::FRAC_PI_2) * CHART_PER_QUARTER).ceil() as usize;
+    let steps = ((sweep / std::f64::consts::FRAC_PI_2) * CHART_PER_QUARTER).ceil() as usize;
     let steps = steps.max(CHART_MIN_POINTS - 1);
     let mut chart: Vec<Vec3> = (0..=steps)
-        .map(|i| curve.point(t0 + (t1 - t0) * (i as f32 / steps as f32)))
+        .map(|i| curve.point(t0 + (t1 - t0) * (i as f64 / steps as f64)))
         .collect();
 
     for (surface, _) in faces {

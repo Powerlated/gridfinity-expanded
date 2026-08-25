@@ -23,7 +23,7 @@ pub(super) type Terminating = HashMap<usize, EdgeId>;
 /// needs a spherical blend, which is unsupported.
 pub(super) fn ends(
     solid: &Solid,
-    want: &HashMap<EdgeId, f32>,
+    want: &HashMap<EdgeId, f64>,
 ) -> Result<(VertexBlends, Terminating), String> {
     let mut vertex_blends: VertexBlends = HashMap::new();
     for &e in want.keys() {
@@ -61,10 +61,10 @@ pub(super) fn ends(
 pub(super) fn salvage(
     solid: &Solid,
     ef: &EdgeFaces,
-    base: &[(EdgeId, f32)],
-    run: &[(EdgeId, f32)],
+    base: &[(EdgeId, f64)],
+    run: &[(EdgeId, f64)],
     depth: u32,
-) -> Vec<(EdgeId, f32)> {
+) -> Vec<(EdgeId, f64)> {
     if run.is_empty() {
         return Vec::new();
     }
@@ -94,7 +94,7 @@ pub(super) fn salvage(
 /// edge id contributes no vertices and so comes back as its own group, leaving
 /// the diagnosis to `check_edges`. Groups carry their edges in request order,
 /// not in path order along the chain.
-pub(super) fn chains(solid: &Solid, blends: &[(EdgeId, f32)]) -> Vec<Vec<(EdgeId, f32)>> {
+pub(super) fn chains(solid: &Solid, blends: &[(EdgeId, f64)]) -> Vec<Vec<(EdgeId, f64)>> {
     let mut parent: Vec<usize> = (0..blends.len()).collect();
     /// Maps a request index to the representative of its group, compressing the
     /// path it walked so later lookups of the same group are one step.
@@ -123,7 +123,7 @@ pub(super) fn chains(solid: &Solid, blends: &[(EdgeId, f32)]) -> Vec<Vec<(EdgeId
             }
         }
     }
-    let mut groups: Vec<(usize, Vec<(EdgeId, f32)>)> = Vec::new();
+    let mut groups: Vec<(usize, Vec<(EdgeId, f64)>)> = Vec::new();
     for (i, &b) in blends.iter().enumerate() {
         let root = find(&mut parent, i);
         match groups.iter_mut().find(|(r, _)| *r == root) {

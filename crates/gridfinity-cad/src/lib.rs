@@ -67,19 +67,19 @@ mod tests {
         let buffer = tess.welded_render_buffer();
         assert_eq!(buffer.len(), mesh.indices.len() * 6);
         for v in buffer.chunks_exact(6) {
-            let p = kernel::math::Vec3::new(v[0], v[1], v[2]);
+            let p = kernel::math::Vec3::new(v[0] as f64, v[1] as f64, v[2] as f64);
             assert!(
                 welded.contains(&kernel::math::weld_key(p)),
                 "{p:?} is not a welded position"
             );
-            assert!((kernel::math::Vec3::new(v[3], v[4], v[5]).length() - 1.0).abs() < 1e-3);
+            assert!((kernel::math::Vec3::new(v[3] as f64, v[4] as f64, v[5] as f64).length() - 1.0).abs() < 1e-3);
         }
 
         let mut positions: Vec<kernel::math::Vec3> = Vec::new();
         let mut index: HashMap<(i64, i64, i64), u32> = HashMap::new();
         let mut indices: Vec<u32> = Vec::new();
         for v in buffer.chunks_exact(6) {
-            let p = kernel::math::Vec3::new(v[0], v[1], v[2]);
+            let p = kernel::math::Vec3::new(v[0] as f64, v[1] as f64, v[2] as f64);
             let next = positions.len() as u32;
             let id = *index.entry(kernel::math::weld_key(p)).or_insert_with(|| {
                 positions.push(p);
@@ -116,11 +116,11 @@ mod tests {
         use crate::kernel::geom::Curve;
         use crate::kernel::math::Vec3;
         let center = Vec3::new(3.0, -2.0, 5.0);
-        let (major, minor) = (4.0f32, 1.5f32);
-        for &offset in &[0.0f32, 1.0, -2.5, 3.9, 5.4] {
+        let (major, minor) = (4.0f64, 1.5f64);
+        for &offset in &[0.0f64, 1.0, -2.5, 3.9, 5.4] {
             let curve = Curve::torus_section(center, Vec3::Z, Vec3::X, offset, major, minor, 1.0);
             for i in 0..=64 {
-                let t = -std::f32::consts::PI + 2.0 * std::f32::consts::PI * (i as f32 / 64.0);
+                let t = -std::f64::consts::PI + 2.0 * std::f64::consts::PI * (i as f64 / 64.0);
                 if !Curve::torus_section_exists(major, minor, offset, t) {
                     continue;
                 }
@@ -148,7 +148,7 @@ mod tests {
         let pos = Curve::torus_section(c, Vec3::Z, Vec3::X, 1.0, 4.0, 1.5, 1.0);
         let neg = Curve::torus_section(c, Vec3::Z, Vec3::X, 1.0, 4.0, 1.5, -1.0);
         for i in 0..16 {
-            let t = i as f32 * 0.3;
+            let t = i as f64 * 0.3;
             let (a, b) = (pos.point(t), neg.point(t));
             assert!((a.x - b.x).abs() < 1e-5 && (a.z - b.z).abs() < 1e-5);
             assert!((a.y + b.y).abs() < 1e-5, "branches must mirror in y");
@@ -222,8 +222,8 @@ mod tests {
     fn emit_box(
         b: &mut crate::kernel::topo::Builder,
         rect: &Sketch,
-        z0: f32,
-        z1: f32,
+        z0: f64,
+        z1: f64,
         outward: bool,
     ) {
         use crate::kernel::build::{ring, wall_between};
@@ -1251,8 +1251,8 @@ mod tests {
 
     #[test]
     fn a_thin_walled_bin_keeps_its_cavity_inside_the_rounded_corner() {
-        for wall_thickness in [0.4f32, 0.8, 1.0, 1.2, 2.0, 3.0] {
-            for cavity_corner_radius in [0.0f32, 0.5, 1.0, 2.5, 4.0] {
+        for wall_thickness in [0.4f64, 0.8, 1.0, 1.2, 2.0, 3.0] {
+            for cavity_corner_radius in [0.0f64, 0.5, 1.0, 2.5, 4.0] {
                 let p = gridfinity::Params {
                     bins: vec![LogicalBin {
                         cells: cells(&[(0, 0)]),
@@ -1452,7 +1452,7 @@ mod tests {
         use std::io::Write;
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        fn legal(v: &[f32]) -> bool {
+        fn legal(v: &[f64]) -> bool {
             let l0 = ((v[2] - v[0]).powi(2) + (v[3] - v[1]).powi(2)).sqrt();
             let l1 = ((v[7] - v[5]).powi(2) + (v[8] - v[6]).powi(2)).sqrt();
             l0 > 5.0
@@ -1461,7 +1461,7 @@ mod tests {
                 && (0.8..=8.0).contains(&v[9])
                 && (2.0..=18.0).contains(&v[10])
         }
-        fn outcome(v: &[f32]) -> String {
+        fn outcome(v: &[f64]) -> String {
             let walls = vec![
                 InnerWall {
                     x1: v[0],
@@ -1516,7 +1516,7 @@ mod tests {
             "w1.width",
             "w1.height",
         ];
-        let mut v: Vec<f32> = vec![
+        let mut v: Vec<f64> = vec![
             51.0, 20.5, 20.5, 58.5, 3.2, 7.0, 30.5, 41.0, 60.5, 3.4, 12.5,
         ];
         let target = outcome(&v);
@@ -1524,7 +1524,7 @@ mod tests {
         for _ in 0..3 {
             for i in 0..v.len() {
                 let orig = v[i];
-                let mut cands: Vec<f32> = vec![
+                let mut cands: Vec<f64> = vec![
                     (orig / 21.0).round() * 21.0,
                     (orig / 10.0).round() * 10.0,
                     (orig / 5.0).round() * 5.0,
@@ -1872,7 +1872,7 @@ mod tests {
             .map(|i| i as crate::kernel::topo::EdgeId)
             .collect();
         assert_eq!(top_edges.len(), 2, "cylinder top should have 2 arc edges");
-        let blends: Vec<_> = top_edges.iter().map(|&e| (e, 2.0_f32)).collect();
+        let blends: Vec<_> = top_edges.iter().map(|&e| (e, 2.0_f64)).collect();
         let blended = fillet_edges(&solid, &blends).expect("cylinder top fillet");
         blended.validate().expect("blended topology valid");
         let mesh = tessellate(&blended, 8).to_mesh();
@@ -1894,14 +1894,14 @@ mod tests {
             .copied()
             .filter(|v| v.x < 2.0 && v.z > 4.9)
             .map(|v| v.z)
-            .fold(f32::INFINITY, f32::min);
+            .fold(f64::INFINITY, f64::min);
         let high = mesh
             .positions
             .iter()
             .copied()
             .filter(|v| v.x > 80.0)
             .map(|v| v.z)
-            .fold(f32::NEG_INFINITY, f32::max);
+            .fold(f64::NEG_INFINITY, f64::max);
         assert!(
             (low - floor_z).abs() < 0.6,
             "low-side floor z {low} â‰ˆ floor_z {floor_z}"
@@ -1911,7 +1911,7 @@ mod tests {
             "high-side floor z {high} should rise above floor_z"
         );
     }
-    fn blends_near(solid: &crate::Solid, a: (f32, f32), b: (f32, f32), d: f32) -> (usize, f32) {
+    fn blends_near(solid: &crate::Solid, a: (f64, f64), b: (f64, f64), d: f64) -> (usize, f64) {
         use crate::kernel::math::Vec2;
         let (a, b) = (Vec2::new(a.0, a.1), Vec2::new(b.0, b.1));
         let ab = b - a;
@@ -1934,7 +1934,7 @@ mod tests {
                 }
                 _ => false,
             })
-            .fold((0usize, 0.0f32), |(n, r), f| match f.surface {
+            .fold((0usize, 0.0f64), |(n, r), f| match f.surface {
                 geom::Surface::Torus { minor_r, .. } => (n + 1, minor_r),
                 _ => (n, r),
             })
@@ -2070,11 +2070,11 @@ mod tests {
             Err(_) => (32, 32),
         };
         let mut cells = Vec::new();
-        let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
-        let r = (w.min(h) as f32) * 0.45;
+        let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+        let r = (w.min(h) as f64) * 0.45;
         for x in 0..w {
             for y in 0..h {
-                let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                let (dx, dy) = (x as f64 + 0.5 - cx, y as f64 + 0.5 - cy);
                 let wob = 1.0 + 0.18 * (dy * 0.9).sin() + 0.12 * (dx * 1.3).cos();
                 if (dx * dx + dy * dy).sqrt() <= r * wob {
                     cells.push(layout::GridCell { x, y });
@@ -2307,7 +2307,7 @@ rebuild #2 {:?} -> {} faces, {} tris",
 
     #[test]
     fn a_drawer_bin_partitioned_into_compartments_is_watertight() {
-        const DIVIDERS: [(f32, f32, f32, f32); 23] = [
+        const DIVIDERS: [(f64, f64, f64, f64); 23] = [
             (0.85, 23.65, 64.25, 23.65),
             (217.45, 28.65, 278.65, 28.65),
             (82.45, 38.65, 120.85, 38.65),

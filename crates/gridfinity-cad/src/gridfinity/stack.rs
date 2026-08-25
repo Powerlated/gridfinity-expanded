@@ -20,15 +20,15 @@ use crate::layout::GridCell;
 pub(super) fn plan_cavity_flat(
     shape: &[Seg],
     islands: &[Island],
-    floor_z: f32,
-    total_h: f32,
-    loop_fr: f32,
+    floor_z: f64,
+    total_h: f64,
+    loop_fr: f64,
 ) -> (
     Vec<(SlabOp, Slab)>,
     SlabOpts,
     Vec<Vec<Seg>>,
     Vec<Vec<Seg>>,
-    Vec<(Seg, f32, f32)>,
+    Vec<(Seg, f64, f64)>,
 ) {
     let mut stack = vec![(
         SlabOp::Union,
@@ -40,7 +40,7 @@ pub(super) fn plan_cavity_flat(
             Slab::new(vec![isl.segs.clone()], floor_z, isl.top.unwrap_or(total_h)),
         ));
     }
-    let mut blends: Vec<(Seg, f32, f32)> = Vec::new();
+    let mut blends: Vec<(Seg, f64, f64)> = Vec::new();
     if loop_fr > MIN_USEFUL_BLEND {
         blends.extend(shape.iter().map(|s| (*s, floor_z, loop_fr)));
     }
@@ -82,16 +82,16 @@ pub(super) fn plan_cavity_flat(
 pub(super) fn plan_cavity_banded(
     bd: &Banded,
     islands: &[Island],
-    floor_z: f32,
-    total_h: f32,
+    floor_z: f64,
+    total_h: f64,
 ) -> (
     Vec<(SlabOp, Slab)>,
     SlabOpts,
     Vec<Vec<Seg>>,
     Vec<Vec<Seg>>,
-    Vec<(Seg, f32, f32)>,
+    Vec<(Seg, f64, f64)>,
 ) {
-    const TRANSITION_R: f32 = 4.0;
+    const TRANSITION_R: f64 = 4.0;
 
     let mut stack = vec![(
         SlabOp::Union,
@@ -133,7 +133,7 @@ pub(super) fn plan_cavity_banded(
         "a top-band loop has zero area, so it is neither void nor island"
     );
 
-    let mut blends: Vec<(Seg, f32, f32)> = Vec::new();
+    let mut blends: Vec<(Seg, f64, f64)> = Vec::new();
     for n in &bd.notches {
         let want = (total_h - n.top).min(TRANSITION_R);
         // Per contact segment, not per notch: the run a ramp blends along can
@@ -151,13 +151,13 @@ pub(super) fn plan_cavity_banded(
     (stack, opts, tops, rim, blends)
 }
 
-pub(super) fn slope_span(cells: &[GridCell], ux: f32, uy: f32) -> (f32, f32) {
-    let mut min_a = f32::INFINITY;
-    let mut max_a = f32::NEG_INFINITY;
+pub(super) fn slope_span(cells: &[GridCell], ux: f64, uy: f64) -> (f64, f64) {
+    let mut min_a = f64::INFINITY;
+    let mut max_a = f64::NEG_INFINITY;
     for c in cells {
         for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-            let x = (c.x + dx) as f32 * GRID_PITCH;
-            let y = (c.y + dy) as f32 * GRID_PITCH;
+            let x = (c.x + dx) as f64 * GRID_PITCH;
+            let y = (c.y + dy) as f64 * GRID_PITCH;
             let a = ux * x + uy * y;
             min_a = min_a.min(a);
             max_a = max_a.max(a);
@@ -166,7 +166,7 @@ pub(super) fn slope_span(cells: &[GridCell], ux: f32, uy: f32) -> (f32, f32) {
     (min_a, (max_a - min_a).max(1e-6))
 }
 
-pub(super) fn uphill_unit(dir: SlopeDir) -> (f32, f32) {
+pub(super) fn uphill_unit(dir: SlopeDir) -> (f64, f64) {
     match dir {
         SlopeDir::PlusX => (-1.0, 0.0),
         SlopeDir::MinusX => (1.0, 0.0),

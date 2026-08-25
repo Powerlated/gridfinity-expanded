@@ -1,6 +1,6 @@
 use crate::layout::{Axis, GridCell, GridFootprint, PITCH, Piece, SplitLine, partition_cells};
 
-pub const BED_MARGIN: f32 = 5.0;
+pub const BED_MARGIN: f64 = 5.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PrinterProfile {
@@ -83,12 +83,12 @@ impl PrinterProfile {
 }
 
 fn max_cells_for_bed(bed: i32) -> i32 {
-    ((bed as f32 - 2.0 * BED_MARGIN) / PITCH as f32).floor() as i32
+    ((bed as f64 - 2.0 * BED_MARGIN) / PITCH as f64).floor() as i32
 }
 
-fn fits(width_mm: f32, depth_mm: f32, bed_w: i32, bed_d: i32) -> bool {
-    let w = bed_w as f32 - 2.0 * BED_MARGIN;
-    let d = bed_d as f32 - 2.0 * BED_MARGIN;
+fn fits(width_mm: f64, depth_mm: f64, bed_w: i32, bed_d: i32) -> bool {
+    let w = bed_w as f64 - 2.0 * BED_MARGIN;
+    let d = bed_d as f64 - 2.0 * BED_MARGIN;
     width_mm <= w && depth_mm <= d
 }
 
@@ -100,8 +100,8 @@ pub fn check_bed_fit(cells: &[GridCell], printer: PrinterProfile) -> BedFitResul
         depth_cells: 0,
     });
     let (w_mm, d_mm) = (
-        f.width_cells as f32 * PITCH as f32,
-        f.depth_cells as f32 * PITCH as f32,
+        f.width_cells as f64 * PITCH as f64,
+        f.depth_cells as f64 * PITCH as f64,
     );
     let normal = fits(w_mm, d_mm, printer.bed_width, printer.bed_depth);
     let rotated = fits(d_mm, w_mm, printer.bed_width, printer.bed_depth);
@@ -118,14 +118,14 @@ fn axis_split_indices(_min: i32, span_cells: i32, max_cells: i32) -> Vec<i32> {
         return Vec::new();
     }
     let chunks = if max_cells > 0 {
-        (span_cells as f32 / max_cells as f32).ceil() as i32
+        (span_cells as f64 / max_cells as f64).ceil() as i32
     } else {
         span_cells
     };
     let n = chunks.min(span_cells).max(1);
     let mut out = Vec::with_capacity((n - 1) as usize);
     for i in 0..n - 1 {
-        let rel = ((i + 1) as f32 * span_cells as f32 / n as f32).round() as i32;
+        let rel = ((i + 1) as f64 * span_cells as f64 / n as f64).round() as i32;
         out.push(rel);
     }
     out

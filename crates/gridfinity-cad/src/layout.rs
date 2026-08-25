@@ -73,10 +73,10 @@ impl GridFootprint {
         })
     }
 
-    pub fn mm(&self) -> (f32, f32) {
+    pub fn mm(&self) -> (f64, f64) {
         (
-            self.width_cells as f32 * PITCH as f32,
-            self.depth_cells as f32 * PITCH as f32,
+            self.width_cells as f64 * PITCH as f64,
+            self.depth_cells as f64 * PITCH as f64,
         )
     }
 }

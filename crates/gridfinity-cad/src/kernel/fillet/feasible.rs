@@ -26,14 +26,14 @@ use crate::kernel::sketch::{Seg, loop_area};
 /// the arc's own axis and the torus degenerates to a ring -- which
 /// `build_torus_blend` asserts against. Every radius handed to `fillet_edges`
 /// keeps at least this much clearance from the arcs it rolls along.
-pub const MIN_TORUS_MAJOR: f32 = 0.1;
+pub const MIN_TORUS_MAJOR: f64 = 0.1;
 
 /// `want`, pulled clear of `seg`'s own radius if a blend that size would
 /// degenerate on it. A straight segment constrains nothing and returns `want`
 /// unchanged; an arc returns at most `radius - MIN_TORUS_MAJOR`, which goes
 /// small or negative on a tight arc and every caller reads as "leave this edge
 /// sharp".
-pub fn blend_radius_along(seg: &Seg, want: f32) -> f32 {
+pub fn blend_radius_along(seg: &Seg, want: f64) -> f64 {
     match *seg {
         Seg::Arc { radius, .. } if (radius - want).abs() < MIN_TORUS_MAJOR => {
             radius - MIN_TORUS_MAJOR
@@ -46,7 +46,7 @@ pub fn blend_radius_along(seg: &Seg, want: f32) -> f32 {
 /// total radius to roll between them -- the sum of the two radii where both are
 /// blended, one radius where only one is. A non-positive `needed` asks for no
 /// blend and always clears.
-pub fn island_clears(island: &[Seg], outer: &[Seg], needed: f32) -> bool {
+pub fn island_clears(island: &[Seg], outer: &[Seg], needed: f64) -> bool {
     needed <= 0.0 || !loops_within(island, outer, needed)
 }
 
@@ -115,10 +115,10 @@ pub fn blendable_segs(shape: &[Seg], allow: &[bool]) -> Vec<bool> {
 /// Sampling can only miss a narrow spot, never invent one, so the bound errs
 /// towards leaving the radius alone. It is an upper bound and not a guarantee:
 /// a passage that narrows between samples still gets through.
-pub fn max_inward_radius(segs: &[Seg]) -> f32 {
-    const STEP: f32 = 0.5;
-    const EPS: f32 = 1e-3;
-    const REACH: f32 = 1e3;
+pub fn max_inward_radius(segs: &[Seg]) -> f64 {
+    const STEP: f64 = 0.5;
+    const EPS: f64 = 1e-3;
+    const REACH: f64 = 1e3;
 
     let area = loop_area(segs);
     assert!(
@@ -129,10 +129,10 @@ pub fn max_inward_radius(segs: &[Seg]) -> f32 {
     );
     let ccw = area > 0.0;
     if segs.len() < 2 {
-        return f32::INFINITY;
+        return f64::INFINITY;
     }
 
-    let mut best = f32::INFINITY;
+    let mut best = f64::INFINITY;
     for s in segs {
         for (p, along) in seg_samples(s, STEP) {
             let inward = if ccw {
@@ -166,7 +166,7 @@ mod tests {
     use super::*;
     use crate::kernel::round::loop_of_points;
 
-    fn rect(w: f32, h: f32) -> Vec<Seg> {
+    fn rect(w: f64, h: f64) -> Vec<Seg> {
         loop_of_points(&[
             Vec2::new(0.0, 0.0),
             Vec2::new(w, 0.0),
@@ -221,7 +221,7 @@ mod tests {
             center: Vec2::ZERO,
             radius: 2.0,
             a0: 0.0,
-            a1: std::f32::consts::FRAC_PI_2,
+            a1: std::f64::consts::FRAC_PI_2,
         };
         assert!(
             (blend_radius_along(&arc, 2.0) - (2.0 - MIN_TORUS_MAJOR)).abs() < 1e-6,

@@ -87,14 +87,14 @@ pub fn containment(loops: &[Vec<Seg>], bbox: &[Aabb]) -> Vec<Vec<usize>> {
     let n = loops.len();
     let all = bbox.iter().fold(Aabb::EMPTY, |a, b| a.union(*b));
     let side = (all.max - all.min).max_element();
-    let k = (n as f32).sqrt().ceil().clamp(1.0, 256.0);
+    let k = (n as f64).sqrt().ceil().clamp(1.0, 256.0);
     let inv = if side > 0.0 { k / side } else { 0.0 };
     let (nx, ny) = (
         (((all.max.x - all.min.x) * inv) as usize + 1).min(256),
         (((all.max.y - all.min.y) * inv) as usize + 1).min(256),
     );
-    let col = |x: f32| (((x - all.min.x) * inv).max(0.0) as usize).min(nx - 1);
-    let row = |y: f32| (((y - all.min.y) * inv).max(0.0) as usize).min(ny - 1);
+    let col = |x: f64| (((x - all.min.x) * inv).max(0.0) as usize).min(nx - 1);
+    let row = |y: f64| (((y - all.min.y) * inv).max(0.0) as usize).min(ny - 1);
 
     let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); nx * ny];
     let mut wide: Vec<u32> = Vec::new();
@@ -159,7 +159,7 @@ mod tests {
     use crate::kernel::math::Vec2;
     use crate::kernel::round::loop_of_points;
 
-    fn square(x: f32, y: f32, s: f32) -> Vec<Seg> {
+    fn square(x: f64, y: f64, s: f64) -> Vec<Seg> {
         loop_of_points(&[
             Vec2::new(x, y),
             Vec2::new(x + s, y),

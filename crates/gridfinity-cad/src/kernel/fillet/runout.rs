@@ -344,7 +344,7 @@ fn planar_face_contains(solid: &Solid, f: usize, p: Vec3) -> bool {
     }
     let uv = surf.project(p);
     let mut crossings = 0u32;
-    let mut poly: Vec<(f32, f32)> = Vec::new();
+    let mut poly: Vec<(f64, f64)> = Vec::new();
     for lp in solid.face_loops(f) {
         poly.clear();
         for &(e, fwd) in lp {

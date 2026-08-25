@@ -10,7 +10,7 @@ fn loop_points(solid: &Solid, lp: &[(EdgeId, bool)]) -> Vec<Vec3> {
         let ed = solid.edges[e];
         let (ta, tb) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
         for k in 0..SAMPLES_PER_EDGE {
-            let f = k as f32 / SAMPLES_PER_EDGE as f32;
+            let f = k as f64 / SAMPLES_PER_EDGE as f64;
             pts.push(ed.curve.point(ta + (tb - ta) * f));
         }
     }
@@ -30,13 +30,13 @@ fn wraps(solid: &Solid, surface: &Surface, lp: &[(EdgeId, bool)]) -> bool {
         return false;
     }
     let prep = surface.prepare();
-    let mut drift = 0.0f32;
-    let mut prev: Option<f32> = None;
+    let mut drift = 0.0f64;
+    let mut prev: Option<f64> = None;
     for &(e, fwd) in lp {
         let ed = solid.edges[e];
         let (ta, tb) = if fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
         for k in 0..=SAMPLES_PER_EDGE {
-            let f = k as f32 / SAMPLES_PER_EDGE as f32;
+            let f = k as f64 / SAMPLES_PER_EDGE as f64;
             let (u, _) = prep.project(ed.curve.point(ta + (tb - ta) * f));
             if let Some(p) = prev {
                 drift += wrap_pi(u - p);
@@ -44,10 +44,10 @@ fn wraps(solid: &Solid, surface: &Surface, lp: &[(EdgeId, bool)]) -> bool {
             prev = Some(u);
         }
     }
-    drift.abs() > std::f32::consts::PI
+    drift.abs() > std::f64::consts::PI
 }
 
-fn outward_area(solid: &Solid, fid: usize, lid: u32) -> Option<f32> {
+fn outward_area(solid: &Solid, fid: usize, lid: u32) -> Option<f64> {
     let face = &solid.faces[fid];
     let lp = solid.loop_by_id(lid);
     if lp.len() < 2 || wraps(solid, &face.surface, lp) {
@@ -57,7 +57,7 @@ fn outward_area(solid: &Solid, fid: usize, lid: u32) -> Option<f32> {
     if pts.len() < 3 {
         return None;
     }
-    let centroid = pts.iter().fold(Vec3::ZERO, |a, &p| a + p) / pts.len() as f32;
+    let centroid = pts.iter().fold(Vec3::ZERO, |a, &p| a + p) / pts.len() as f64;
     let sign = if face.sense { 1.0 } else { -1.0 };
     let normal = face.surface.normal(face.surface.project(centroid)) * sign;
     let a = area_vector(&pts).dot(normal);
@@ -112,7 +112,7 @@ pub fn misoriented_loops(solid: &Solid) -> Vec<(usize, u32)> {
         .flat_map(|f| solid.loop_ids(f).map(move |l| (f, l)))
         .collect();
     let (label, n) = components(solid);
-    let mut vote = vec![0.0f32; n];
+    let mut vote = vec![0.0f64; n];
     for (i, &(fid, lid)) in loops.iter().enumerate() {
         let Some(a) = outward_area(solid, fid, lid) else {
             continue;

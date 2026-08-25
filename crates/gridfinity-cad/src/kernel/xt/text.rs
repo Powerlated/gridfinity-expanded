@@ -69,7 +69,7 @@ const HEADER_RECORD_WIDTH: usize = 80;
 /// form, so this is the residue of one `f64` normalisation and nothing else.
 /// The reader measures these against the file's own 1e-8 resolution, which is
 /// eight orders looser -- the bound is tight because it can be, and a violation
-/// means the arithmetic was done in `f32` somewhere it should not have been.
+/// means the arithmetic was done in `f64` somewhere it should not have been.
 pub const UNIT_RESIDUE: f64 = 1.0e-15;
 
 pub struct Writer {
@@ -151,7 +151,7 @@ impl Writer {
 
     /// A `double` field carrying a length in the kernel's millimetres, written
     /// in the metres the file is in.
-    pub fn dist(&mut self, mm: f32) {
+    pub fn dist(&mut self, mm: f64) {
         assert!(mm.is_finite(), "a transmit file cannot carry the non-finite length {mm}");
         self.real(mm as f64 / MM_PER_M);
     }
@@ -168,12 +168,15 @@ impl Writer {
     /// A `vector` field carrying a direction, written as the three components
     /// the direction already holds.
     ///
-    /// Nothing is normalised here. A `Dir` is unit in `f64` by construction and
-    /// a surface's reference direction is perpendicular to its axis by the same,
-    /// which is the whole reason those are `Dir`s: the file declares a linear
-    /// resolution of 1e-8 and an `f32` unit vector is unit only to about 6.7e-8,
-    /// so a direction that reached this point still needing repair would be one
-    /// the kernel had already got wrong.
+    /// Nothing is normalised here. A `Dir` is unit by construction and a
+    /// surface's reference direction is perpendicular to its axis by the same,
+    /// which is the whole reason those are `Dir`s: a direction that reached this
+    /// point still needing repair would be one the kernel had already got wrong.
+    /// The file declares a linear resolution of 1e-8, and when the kernel
+    /// modelled in `f32` -- where a unit vector is unit only to about 6.7e-8 --
+    /// repairing that here was repairing it after the fact, which is what
+    /// `unit64` and `dir_perp` used to do before both the defect and they were
+    /// retired at the source.
     pub fn dir(&mut self, d: Dir) {
         for c in d.components() {
             self.real(c);
@@ -329,26 +332,32 @@ mod tests {
         );
     }
 
-    /// A direction the kernel built in f32 reaches the file unit to f64, which
-    /// an f32 normalisation cannot deliver: the chamfer normal here is unit to
-    /// 6.7e-8 as an f32, six times the 1e-8 the file declares as its resolution,
-    /// and Onshape reported exactly that face as a fault.
+    /// A tilted direction reaches the file unit to `UNIT_RESIDUE`, seven orders
+    /// inside the 1e-8 `res_linear` the file declares.
+    ///
+    /// The fixture is a direction whose *unnormalised* components are not unit,
+    /// so `Dir` has real work to do and the check cannot pass vacuously, and it
+    /// is tilted because an axis-aligned direction is exactly +-1 in any
+    /// precision and would say nothing. This was once a defect and not a
+    /// formality: the kernel modelled in f32, where a unit vector is unit only
+    /// to about 6.7e-8 once widened -- six times the resolution the file
+    /// declares -- and Onshape faulted every peg chamfer on it while accepting
+    /// the axis-aligned `1-cube`. Modelling in f64 is what retired it at the
+    /// source; this holds the writer to not undoing that on the way out.
     #[test]
-    fn a_tilted_direction_reaches_the_file_unit_to_f64_not_to_f32() {
-        let tilted = Vec3::new(0.0, -0.5, 0.75f32.sqrt()).normalize();
-        let as_f64 = [tilted.x as f64, tilted.y as f64, tilted.z as f64];
-        let f32_residue =
-            (as_f64.iter().map(|c| c * c).sum::<f64>()).sqrt() - 1.0;
+    fn a_tilted_direction_reaches_the_file_unit_to_its_declared_resolution() {
+        let raw = Vec3::new(0.0, -2.0, 3.0);
+        let residue = raw.length() - 1.0;
         assert!(
-            f32_residue.abs() > UNIT_RESIDUE,
-            "the fixture must be a direction f32 cannot make unit in f64, but it is off by \
-             only {f32_residue}"
+            residue.abs() > UNIT_RESIDUE,
+            "the fixture must be a direction that is not already unit, but {raw:?} is off by \
+             only {residue}"
         );
 
         let mut w = Writer::new();
         let i = w.alloc();
         w.begin(PLANE, i);
-        w.dir(Dir::new(tilted));
+        w.dir(Dir::new(raw));
         let emitted: Vec<f64> = w
             .out
             .rsplit('\n')
@@ -359,10 +368,15 @@ mod tests {
             .take(3)
             .map(|t| t.parse().expect("a direction component reads back as a double"))
             .collect();
+        assert!(
+            emitted.iter().any(|c| *c != 0.0 && c.abs() != 1.0),
+            "the fixture is tilted, so no component of {emitted:?} is 0 or +-1 alone"
+        );
         let residue = (emitted.iter().map(|c| c * c).sum::<f64>()).sqrt() - 1.0;
         assert!(
             residue.abs() <= UNIT_RESIDUE,
-            "the emitted direction {emitted:?} must be unit to f64, but is off by {residue}"
+            "the emitted direction {emitted:?} must be unit to {UNIT_RESIDUE}, but is off by \
+             {residue}"
         );
     }
 

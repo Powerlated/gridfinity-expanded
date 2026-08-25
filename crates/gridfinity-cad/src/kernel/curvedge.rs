@@ -18,8 +18,8 @@ use crate::kernel::topo::{Builder, EdgeId, Solid, VertexId};
 #[derive(Clone, Copy)]
 pub struct CurvEdge {
     pub curve: Curve,
-    pub t0: f32,
-    pub t1: f32,
+    pub t0: f64,
+    pub t1: f64,
 }
 
 pub fn as_plane(s: &Surface) -> Option<(Vec3, Vec3)> {
@@ -56,8 +56,8 @@ pub fn emit_edge(
     vs: VertexId,
     ve: VertexId,
     curve: Curve,
-    t0: f32,
-    t1: f32,
+    t0: f64,
+    t1: f64,
 ) -> (EdgeId, bool) {
     match curve {
         Curve::Line { .. } => b.line(vs, ve),

@@ -24,7 +24,14 @@ impl Tessellation {
         for t in &self.tris {
             for i in 0..3 {
                 let (p, n) = (t.pos[i], t.nrm[i]);
-                out.extend_from_slice(&[p.x, p.y, p.z, n.x, n.y, n.z]);
+                out.extend_from_slice(&[
+                    p.x as f32,
+                    p.y as f32,
+                    p.z as f32,
+                    n.x as f32,
+                    n.y as f32,
+                    n.z as f32,
+                ]);
             }
         }
         out
@@ -47,15 +54,22 @@ impl Tessellation {
             for i in 0..3 {
                 let p = representative[&keys[i]];
                 let n = t.nrm[i];
-                out.extend_from_slice(&[p.x, p.y, p.z, n.x, n.y, n.z]);
+                out.extend_from_slice(&[
+                    p.x as f32,
+                    p.y as f32,
+                    p.z as f32,
+                    n.x as f32,
+                    n.y as f32,
+                    n.z as f32,
+                ]);
             }
         }
         out
     }
 
     pub fn bounds(&self) -> (Vec3, Vec3) {
-        let mut min = Vec3::splat(f32::INFINITY);
-        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        let mut min = Vec3::splat(f64::INFINITY);
+        let mut max = Vec3::splat(f64::NEG_INFINITY);
         for t in &self.tris {
             for p in t.pos {
                 min = min.min(p);
@@ -111,8 +125,8 @@ struct Scratch {
     keys: Vec<(i64, i64, i64)>,
     tris: Vec<[usize; 3]>,
     planar: crate::kernel::planar::Planar,
-    u_i: Vec<f32>,
-    v_j: Vec<f32>,
+    u_i: Vec<f64>,
+    v_j: Vec<f64>,
     radial: Vec<Vec3>,
     grid: Vec<Vec3>,
     gnrm: Vec<Vec3>,
@@ -236,11 +250,11 @@ fn tess_faces(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
             for &(s, e) in &sc.spans {
                 let mut prev = sc.uv[s].x;
                 for p in sc.uv.iter_mut().take(e).skip(s + 1) {
-                    while p.x - prev > std::f32::consts::PI {
-                        p.x -= 2.0 * std::f32::consts::PI;
+                    while p.x - prev > std::f64::consts::PI {
+                        p.x -= 2.0 * std::f64::consts::PI;
                     }
-                    while p.x - prev < -std::f32::consts::PI {
-                        p.x += 2.0 * std::f32::consts::PI;
+                    while p.x - prev < -std::f64::consts::PI {
+                        p.x += 2.0 * std::f64::consts::PI;
                     }
                     prev = p.x;
                 }
@@ -250,11 +264,11 @@ fn tess_faces(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
             for &(s, e) in &sc.spans {
                 let mut prev = sc.uv[s].y;
                 for p in sc.uv.iter_mut().take(e).skip(s + 1) {
-                    while p.y - prev > std::f32::consts::PI {
-                        p.y -= 2.0 * std::f32::consts::PI;
+                    while p.y - prev > std::f64::consts::PI {
+                        p.y -= 2.0 * std::f64::consts::PI;
                     }
-                    while p.y - prev < -std::f32::consts::PI {
-                        p.y += 2.0 * std::f32::consts::PI;
+                    while p.y - prev < -std::f64::consts::PI {
+                        p.y += 2.0 * std::f64::consts::PI;
                     }
                     prev = p.y;
                 }
@@ -299,7 +313,7 @@ fn tess_faces(solid: &Solid, arc_segs_per_quarter: usize) -> Tessellation {
         // the analytic normal, not the winding, is the thing that has to give.
         // Negating it there keeps shading and the STL facet normal pointing out
         // of the solid without touching the topology that just closed.
-        let mut vote = 0.0f32;
+        let mut vote = 0.0f64;
         for &[a, b, c] in &sc.tris {
             let geo = (sc.pts3[b] - sc.pts3[a]).cross(sc.pts3[c] - sc.pts3[a]);
             vote += geo.dot(sc.nrm[a] + sc.nrm[b] + sc.nrm[c]);
@@ -346,7 +360,7 @@ fn tess_grid_face(
     solid: &crate::kernel::topo::Solid,
     fid: usize,
     es: &EdgeSamples,
-    sign: f32,
+    sign: f64,
     sc: &mut Scratch,
     out: &mut Tessellation,
 ) -> bool {
@@ -357,7 +371,7 @@ fn tess_grid_quad(
     solid: &crate::kernel::topo::Solid,
     fid: usize,
     es: &EdgeSamples,
-    sign: f32,
+    sign: f64,
     rot: usize,
     sc: &mut Scratch,
     out: &mut Tessellation,
@@ -390,19 +404,19 @@ fn tess_grid_quad(
     let prep = face.surface.prepare();
     let s = &prep;
 
-    let unwrap = |vals: &mut [f32]| {
+    let unwrap = |vals: &mut [f64]| {
         for k in 1..vals.len() {
-            while vals[k] - vals[k - 1] > std::f32::consts::PI {
-                vals[k] -= 2.0 * std::f32::consts::PI;
+            while vals[k] - vals[k - 1] > std::f64::consts::PI {
+                vals[k] -= 2.0 * std::f64::consts::PI;
             }
-            while vals[k] - vals[k - 1] < -std::f32::consts::PI {
-                vals[k] += 2.0 * std::f32::consts::PI;
+            while vals[k] - vals[k - 1] < -std::f64::consts::PI {
+                vals[k] += 2.0 * std::f64::consts::PI;
             }
         }
     };
 
     sc.u_i.clear();
-    let (mut v_lo, mut v_hi) = (0.0f32, 0.0f32);
+    let (mut v_lo, mut v_hi) = (0.0f64, 0.0f64);
     for i in 0..m {
         let (u, v) = s.project(at(e0, i));
         if i == 0 {
@@ -417,7 +431,7 @@ fn tess_grid_quad(
     }
 
     sc.v_j.clear();
-    let (mut u_lo, mut u_hi) = (0.0f32, 0.0f32);
+    let (mut u_lo, mut u_hi) = (0.0f64, 0.0f64);
     for j in 0..n {
         let (u, v) = s.project(at(e1, j));
         if j == 0 {
@@ -471,7 +485,7 @@ fn tess_grid_quad(
             }
         }
     }
-    let mut vote = 0.0f32;
+    let mut vote = 0.0f64;
     for i in 0..m - 1 {
         for j in 0..n - 1 {
             let g = |a: usize, b: usize| sc.grid[a * n + b];
@@ -519,7 +533,7 @@ fn tess_grid_quad(
 }
 
 #[inline]
-fn cross2(uv: &[Vec2], a: usize, b: usize, c: usize) -> f32 {
+fn cross2(uv: &[Vec2], a: usize, b: usize, c: usize) -> f64 {
     (uv[b].x - uv[a].x) * (uv[c].y - uv[a].y) - (uv[b].y - uv[a].y) * (uv[c].x - uv[a].x)
 }
 

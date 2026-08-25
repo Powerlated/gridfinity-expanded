@@ -14,7 +14,7 @@ pub type DirLoop = (Vec<Seg>, bool);
 
 #[derive(Clone, Debug)]
 pub enum PlaneRef {
-    Z { z: f32, up: bool },
+    Z { z: f64, up: bool },
     Named(String),
     Tilted { origin: Vec3, normal: Vec3 },
 }
@@ -33,7 +33,7 @@ impl PlaneRef {
         }
     }
 
-    pub fn z(&self) -> f32 {
+    pub fn z(&self) -> f64 {
         match *self {
             PlaneRef::Z { z, .. } => z,
             PlaneRef::Named(_) | PlaneRef::Tilted { .. } => {
@@ -52,25 +52,25 @@ impl PlaneRef {
 #[derive(Clone, Debug)]
 pub enum HoleProfile {
     Plain {
-        radius: f32,
-        depth: f32,
+        radius: f64,
+        depth: f64,
     },
     Counterbore {
-        bore_r: f32,
-        bore_d: f32,
-        head_r: f32,
-        head_d: f32,
+        bore_r: f64,
+        bore_d: f64,
+        head_r: f64,
+        head_d: f64,
     },
     Countersink {
-        bore_r: f32,
-        bore_d: f32,
-        head_r: f32,
-        head_angle_deg: f32,
+        bore_r: f64,
+        bore_d: f64,
+        head_r: f64,
+        head_angle_deg: f64,
     },
 }
 
 impl HoleProfile {
-    pub fn mouth_radius(&self) -> f32 {
+    pub fn mouth_radius(&self) -> f64 {
         match *self {
             HoleProfile::Plain { radius, .. } => radius,
             HoleProfile::Counterbore { head_r, .. } => head_r,
@@ -101,12 +101,12 @@ pub enum Op {
         to: PlaneRef,
     },
     Loft {
-        profiles: Vec<(String, f32)>,
+        profiles: Vec<(String, f64)>,
         outward: bool,
     },
     Hole {
         at: crate::kernel::math::Vec2,
-        from_z: f32,
+        from_z: f64,
         profile: HoleProfile,
     },
 
@@ -118,8 +118,8 @@ pub enum Op {
     WallFaces {
         lower: Vec<Seg>,
         upper: Vec<Seg>,
-        z0: f32,
-        z1: f32,
+        z0: f64,
+        z1: f64,
         outward: bool,
     },
     SlopedWall {
@@ -133,12 +133,12 @@ pub enum Op {
     Wall {
         lower: Vec<Seg>,
         upper: Vec<Seg>,
-        z0: f32,
-        z1: f32,
+        z0: f64,
+        z1: f64,
         outward: bool,
     },
     Cap {
-        z: f32,
+        z: f64,
         up: bool,
         outer: DirLoop,
         holes: Vec<DirLoop>,
@@ -148,10 +148,10 @@ pub enum Op {
         opts: SlabOpts,
     },
     Fillet {
-        edges: Vec<(Seg, f32, f32)>,
+        edges: Vec<(Seg, f64, f64)>,
     },
     Chamfer {
-        edges: Vec<(Seg, f32, f32, f32)>,
+        edges: Vec<(Seg, f64, f64, f64)>,
     },
     Custom(Box<dyn Fn(&mut Builder) -> Result<(), String>>),
 }
@@ -318,8 +318,8 @@ pub fn run_reporting(
     let _perf = crate::kernel::perf::scope(crate::kernel::perf::Metric::ProgramRun);
     let (nv, ne, nf) = size_hint(prog);
     let mut b = Builder::with_capacity(nv, ne, nf, nf * 4, nf);
-    let mut blends: Vec<(EdgeId, f32)> = Vec::new();
-    let mut chamfers: Vec<(EdgeId, f32, f32)> = Vec::new();
+    let mut blends: Vec<(EdgeId, f64)> = Vec::new();
+    let mut chamfers: Vec<(EdgeId, f64, f64)> = Vec::new();
     let mut report = BlendReport::default();
     let (mut ra, mut rb) = (RingEdges::default(), RingEdges::default());
 
@@ -367,9 +367,9 @@ pub fn run_reporting(
                 if profiles.len() < 2 {
                     return Err(format!("Loft: need ≥2 profiles, got {}", profiles.len()));
                 }
-                let resolved: Vec<(&[Seg], f32)> = profiles
+                let resolved: Vec<(&[Seg], f64)> = profiles
                     .iter()
-                    .map(|(name, z)| -> Result<(&[Seg], f32), String> {
+                    .map(|(name, z)| -> Result<(&[Seg], f64), String> {
                         let p = prog
                             .sketch(name)
                             .ok_or_else(|| format!("Loft: sketch {name:?} not registered"))?;
@@ -501,7 +501,7 @@ pub fn run_reporting(
 /// The plan names a run; the boolean that built the solid may have split or
 /// dropped it, and a selection that no longer names one edge simply goes
 /// unblended -- an unfilleted corner, not a build failure.
-fn find_seg_edge(b: &Builder, seg: &Seg, z: f32) -> Option<EdgeId> {
+fn find_seg_edge(b: &Builder, seg: &Seg, z: f64) -> Option<EdgeId> {
     let start = vec3_of(seg.start().x, seg.start().y, z);
     let end = vec3_of(seg.end().x, seg.end().y, z);
     let mid = match *seg {
@@ -523,11 +523,11 @@ fn find_seg_edge(b: &Builder, seg: &Seg, z: f32) -> Option<EdgeId> {
 fn emit_hole(
     b: &mut Builder,
     at: crate::kernel::math::Vec2,
-    from_z: f32,
+    from_z: f64,
     profile: &HoleProfile,
 ) -> Result<(), String> {
-    let circle = |r: f32| Sketch::circle(at.x, at.y, r).loops.remove(0);
-    let (sections, total_depth): (Vec<(f32, f32)>, f32) = match *profile {
+    let circle = |r: f64| Sketch::circle(at.x, at.y, r).loops.remove(0);
+    let (sections, total_depth): (Vec<(f64, f64)>, f64) = match *profile {
         HoleProfile::Plain { radius, depth } => (vec![(radius, depth)], depth),
         HoleProfile::Counterbore {
             bore_r,
@@ -567,7 +567,7 @@ mod tests {
     use super::*;
     use crate::kernel::sketch::Sketch;
 
-    fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<Seg> {
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Seg> {
         Sketch::rectangle((x0 + x1) * 0.5, (y0 + y1) * 0.5, x1 - x0, y1 - y0)
             .loops
             .remove(0)
@@ -1172,7 +1172,7 @@ mod tests {
             }
             _ => panic!("expected a Plane surface"),
         }
-        let zs: Vec<f32> = s.verts.iter().map(|v| v.point.z).collect();
+        let zs: Vec<f64> = s.verts.iter().map(|v| v.point.z).collect();
         assert!(
             zs.iter().cloned().any(|z| (z - 5.0).abs() > 0.5),
             "vertices lifted off z=5: {zs:?}"

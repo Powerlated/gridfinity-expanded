@@ -28,7 +28,7 @@ pub(super) struct Corner {
     pub e: EdgeId,
     pub fa: usize,
     pub fb: usize,
-    pub r: f32,
+    pub r: f64,
     pub ma: Vec3,
     pub na0: Vec3,
     pub fwd_a: bool,
@@ -56,7 +56,7 @@ pub(super) struct Corner {
 /// there is meaningless.
 pub(super) fn solve(
     solid: &Solid,
-    want: &HashMap<EdgeId, f32>,
+    want: &HashMap<EdgeId, f64>,
     edge_faces: &EdgeFaces,
 ) -> Result<Vec<Corner>, String> {
     let face_outward = |fid: usize, p: Vec3| -> Vec3 {
@@ -159,7 +159,7 @@ pub(super) fn solve(
 ///
 /// Each blend derives that point from its own faces' normals; along a
 /// tangent-continuous chain those are equal in exact arithmetic and differ in the
-/// last bits in f32, which puts the answers a few tenths of a micron apart --
+/// last bits in f64, which puts the answers a few tenths of a micron apart --
 /// above `topo`'s weld quantum, so the builder interns two vertices and the face
 /// they both border is left with an open loop. Deriving the point once and
 /// handing it to both is what closes it; no weld tolerance can, because the gap
@@ -168,6 +168,7 @@ pub(super) fn solve(
 /// answer does not depend on iteration order; averaging would invent a third
 /// point neither blend built.
 pub(super) fn reconcile_shared_ends(
+    solid: &Solid,
     corners: &mut [Corner],
     vertex_blends: &super::chain::VertexBlends,
 ) -> Result<(), String> {
@@ -251,8 +252,10 @@ pub(super) fn reconcile_shared_ends(
                 return Err(format!(
                     "blend chain: edges {} and {} put the {name} at vertex {v} {d:.3e} mm apart \
                      ({a:?} vs {b:?}), over the {bound:.3e} mm a {MAX_JOIN_KINK} rad kink \
-                     allows; they do not share a tangent there",
-                    c0.e, c1.e
+                     allows; they do not share a tangent there. {}",
+                    c0.e,
+                    c1.e,
+                    kink_at(solid, c0.e, c1.e, v, d, c0.r.max(c1.r))
                 ));
             }
         }
@@ -270,6 +273,47 @@ pub(super) fn reconcile_shared_ends(
     Ok(())
 }
 
+/// Describes the turn two blended edges make at the vertex they share, for a
+/// refusal that would otherwise report only how far apart the two answers
+/// landed.
+///
+/// The two headings are each edge's direction out of `v`, taken from its own
+/// supporting curve, and `turn` is the angle between them -- the quantity the
+/// bound is really about, since a kink of `t` radians moves the ball centre by
+/// about `r * t`. Whether that turn is float noise or real geometry is the whole
+/// question when a chain is refused and the distance alone cannot answer it, so
+/// the message also carries the disagreement measured in `f64` ulps at this
+/// vertex's own coordinate, which is the scale a genuine kink has to be read
+/// against.
+fn kink_at(solid: &Solid, e0: EdgeId, e1: EdgeId, v: usize, d: f64, r: f64) -> String {
+    let heading = |e: EdgeId| -> Vec3 {
+        let ed = solid.edges[e];
+        let (at, sign) = if ed.v0 == v { (ed.t0, 1.0) } else { (ed.t1, -1.0) };
+        ed.curve.tangent(at) * sign
+    };
+    let (h0, h1) = (heading(e0).normalize(), heading(e1).normalize());
+    let turn = h0.dot(h1).clamp(-1.0, 1.0).acos();
+    let p = solid.verts[v].point;
+    let ulp = p.x.abs().max(p.y.abs()).max(p.z.abs()) * f64::EPSILON;
+    assert!(
+        r > 0.0 && ulp > 0.0 && turn.is_finite(),
+        "a blended edge has a positive radius, a resolvable vertex coordinate and a real turn, \
+         but r = {r}, the f64 ulp at {p:?} is {ulp} and the turn is {turn}"
+    );
+    format!(
+        "edge {e0} heads {h0:?} and edge {e1} heads {h1:?} out of the vertex, a turn of \
+         {turn:.3e} rad ({:.4} deg); the disagreement is {:.0} f64 ulp(s) at this coordinate, \
+         so it is {}",
+        turn.to_degrees(),
+        d / ulp,
+        if d > 32.0 * ulp {
+            "a real turn in the geometry, not the last bits of a float"
+        } else {
+            "float noise"
+        }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::kernel::math::Vec3;
@@ -279,7 +323,7 @@ mod tests {
         let p = Vec3::new(10.0, 0.0, 0.0);
         let ma = Vec3::new(0.0, 0.0, 1.0);
         let mb = Vec3::new(-1.0, 0.0, 0.0);
-        let r = 2.0_f32;
+        let r = 2.0_f64;
         let sin_theta = ma.cross(mb).length();
         let c = p + r * (ma + mb) / sin_theta;
         assert!(

@@ -5,14 +5,14 @@ use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RectF {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
 }
 
 impl RectF {
-    pub fn new(x: f32, y: f32, w: f32, h: f32) -> RectF {
+    pub fn new(x: f64, y: f64, w: f64, h: f64) -> RectF {
         RectF { x, y, w, h }
     }
 }
@@ -23,7 +23,7 @@ pub struct TracedLoop {
 }
 
 impl TracedLoop {
-    pub fn signed_area(&self) -> f32 {
+    pub fn signed_area(&self) -> f64 {
         polygon_area(&self.pts)
     }
     pub fn is_hole(&self) -> bool {
@@ -39,9 +39,9 @@ impl TracedLoop {
     }
 }
 
-const KEY_SCALE: f32 = 1.0e3;
+const KEY_SCALE: f64 = 1.0e3;
 
-fn key(v: f32) -> i64 {
+fn key(v: f64) -> i64 {
     (v * KEY_SCALE).round() as i64
 }
 
@@ -63,10 +63,10 @@ pub fn trace_rects(pos: &[RectF], neg: &[RectF]) -> Vec<TracedLoop> {
     }
     let (nx, ny) = (xs.len(), ys.len());
 
-    let xf: Vec<f32> = xs.iter().map(|&k| k as f32 / KEY_SCALE).collect();
-    let yf: Vec<f32> = ys.iter().map(|&k| k as f32 / KEY_SCALE).collect();
+    let xf: Vec<f64> = xs.iter().map(|&k| k as f64 / KEY_SCALE).collect();
+    let yf: Vec<f64> = ys.iter().map(|&k| k as f64 / KEY_SCALE).collect();
     let mut occ = vec![false; (nx - 1) * (ny - 1)];
-    let span = |v: &[i64], lo: f32, hi: f32| -> (usize, usize) {
+    let span = |v: &[i64], lo: f64, hi: f64| -> (usize, usize) {
         let a = v.partition_point(|&k| k < key(lo));
         let b = v.partition_point(|&k| k < key(hi));
         (a, b)
@@ -196,8 +196,8 @@ pub fn merge_collinear(pts: &[Vec2]) -> Vec<Vec2> {
 }
 
 pub struct LoopStyle<'a> {
-    pub inset: &'a dyn Fn(usize, Vec2, Vec2) -> f32,
-    pub radius: &'a dyn Fn(usize, bool) -> f32,
+    pub inset: &'a dyn Fn(usize, Vec2, Vec2) -> f64,
+    pub radius: &'a dyn Fn(usize, bool) -> f64,
 }
 
 pub fn shape_loop(lp: &TracedLoop, style: &LoopStyle) -> Vec<Seg> {
@@ -243,7 +243,7 @@ pub fn shape_loop(lp: &TracedLoop, style: &LoopStyle) -> Vec<Seg> {
             din.x * dout.y - din.y * dout.x > 0.0
         })
         .collect();
-    let mut radius: Vec<f32> = (0..n)
+    let mut radius: Vec<f64> = (0..n)
         .map(|i| (style.radius)(i, convex[i]).max(0.0))
         .collect();
     for _ in 0..4 {
@@ -279,8 +279,8 @@ pub fn shape_loop(lp: &TracedLoop, style: &LoopStyle) -> Vec<Seg> {
             let center = corners[j] + (dout - din) * radius[j];
             let arc_start = e;
             let arc_end = corners[j] + dout * radius[j];
-            let a0 = f32::atan2(arc_start.y - center.y, arc_start.x - center.x);
-            let a1 = f32::atan2(arc_end.y - center.y, arc_end.x - center.x);
+            let a0 = f64::atan2(arc_start.y - center.y, arc_start.x - center.x);
+            let a1 = f64::atan2(arc_end.y - center.y, arc_end.x - center.x);
             let (a0, a1) = short_arc(a0, a1);
             segs.push(Seg::Arc {
                 a: arc_start,
@@ -301,12 +301,12 @@ mod tests {
     use crate::kernel::sketch::loop_area;
 
     fn style(
-        inset: f32,
-        rc: f32,
-        rf: f32,
+        inset: f64,
+        rc: f64,
+        rf: f64,
     ) -> (
-        Box<dyn Fn(usize, Vec2, Vec2) -> f32>,
-        Box<dyn Fn(usize, bool) -> f32>,
+        Box<dyn Fn(usize, Vec2, Vec2) -> f64>,
+        Box<dyn Fn(usize, bool) -> f64>,
     ) {
         (
             Box::new(move |_, _, _| inset),
@@ -314,7 +314,7 @@ mod tests {
         )
     }
 
-    fn shape(lp: &TracedLoop, inset: f32, rc: f32, rf: f32) -> Vec<Seg> {
+    fn shape(lp: &TracedLoop, inset: f64, rc: f64, rf: f64) -> Vec<Seg> {
         let (i, r) = style(inset, rc, rf);
         shape_loop(
             lp,
@@ -367,7 +367,7 @@ mod tests {
         );
         assert_eq!(loops.len(), 2);
         assert!(loops.iter().all(|l| !l.is_hole()));
-        let total: f32 = loops.iter().map(|l| l.signed_area()).sum();
+        let total: f64 = loops.iter().map(|l| l.signed_area()).sum();
         assert!((total - 90.0).abs() < 1e-3);
     }
 
@@ -408,7 +408,7 @@ mod tests {
         assert_eq!(loops.len(), 1);
         assert_eq!(loops[0].pts.len(), 6);
         let segs = shape(&loops[0], 0.0, 1.0, 0.5);
-        let arcs: Vec<f32> = segs
+        let arcs: Vec<f64> = segs
             .iter()
             .filter_map(|s| match s {
                 Seg::Arc { radius, .. } => Some(*radius),

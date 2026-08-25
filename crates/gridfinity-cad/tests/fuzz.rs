@@ -40,11 +40,11 @@ impl Rng {
     fn below(&mut self, n: u32) -> u32 {
         (self.next_u64() >> 32) as u32 % n.max(1)
     }
-    fn range(&mut self, lo: f32, hi: f32) -> f32 {
-        let t = (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32;
+    fn range(&mut self, lo: f64, hi: f64) -> f64 {
+        let t = (self.next_u64() >> 40) as f64 / (1u64 << 24) as f64;
         lo + (hi - lo) * t
     }
-    fn quantised(&mut self, lo: f32, hi: f32, step: f32) -> f32 {
+    fn quantised(&mut self, lo: f64, hi: f64, step: f64) -> f64 {
         (self.range(lo, hi) / step).round() * step
     }
     fn chance(&mut self, num: u32, den: u32) -> bool {
@@ -246,10 +246,10 @@ fn gen_cells(rng: &mut Rng, shape: Shape) -> Vec<GridCell> {
     }
 }
 
-fn bin_span(cells: &[GridCell]) -> (f32, f32) {
+fn bin_span(cells: &[GridCell]) -> (f64, f64) {
     let span = |sel: fn(&GridCell) -> i32| {
         let hi = cells.iter().map(sel).max().unwrap_or(0);
-        (hi + 1) as f32 * GRID_PITCH
+        (hi + 1) as f64 * GRID_PITCH
     };
     (span(|c| c.x), span(|c| c.y))
 }
@@ -260,7 +260,7 @@ fn gen_tidy_wall(rng: &mut Rng, cells: &[GridCell]) -> InnerWall {
     let (w, h) = bin_span(cells);
     let m = 10.0;
     let half = GRID_PITCH * 0.5;
-    let at = |rng: &mut Rng, extent: f32| rng.quantised(half, extent - half, half);
+    let at = |rng: &mut Rng, extent: f64| rng.quantised(half, extent - half, half);
     let (x1, y1, x2, y2) = if rng.chance(1, 2) {
         let y = at(rng, h);
         (-m, y, w + m, y)
@@ -446,9 +446,9 @@ fn gen_case(rng: &mut Rng, opts: Options) -> Case {
 const TESS_SEGS: usize = 6;
 const ENCLOSED_PIECE: &str = "surrounded on every side";
 const VOLUME_DRIFT: f64 = 0.002;
-const SPLIT_TOL: f32 = 0.15;
-const QUANTUM: f32 = 20.0;
-const OVERHANG_REACH: f32 = 8.0;
+const SPLIT_TOL: f64 = 0.15;
+const QUANTUM: f64 = 20.0;
+const OVERHANG_REACH: f64 = 8.0;
 
 type Hook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
 
@@ -552,9 +552,9 @@ fn mesh_parts(mesh: &Mesh) -> usize {
     seen.len()
 }
 
-fn well_inside(cells: &[GridCell], x: f32, y: f32) -> bool {
+fn well_inside(cells: &[GridCell], x: f64, y: f64) -> bool {
     cells.iter().any(|c| {
-        let (x0, y0) = (c.x as f32 * GRID_PITCH, c.y as f32 * GRID_PITCH);
+        let (x0, y0) = (c.x as f64 * GRID_PITCH, c.y as f64 * GRID_PITCH);
         x > x0 + SPLIT_TOL
             && x < x0 + GRID_PITCH - SPLIT_TOL
             && y > y0 + SPLIT_TOL
@@ -562,19 +562,19 @@ fn well_inside(cells: &[GridCell], x: f32, y: f32) -> bool {
     })
 }
 
-fn grid_gap(a: &[GridCell], b: &[GridCell]) -> f32 {
-    let mut best = f32::INFINITY;
+fn grid_gap(a: &[GridCell], b: &[GridCell]) -> f64 {
+    let mut best = f64::INFINITY;
     for p in a {
         for q in b {
-            let dx = ((p.x - q.x).abs() - 1).max(0) as f32 * GRID_PITCH;
-            let dy = ((p.y - q.y).abs() - 1).max(0) as f32 * GRID_PITCH;
+            let dx = ((p.x - q.x).abs() - 1).max(0) as f64 * GRID_PITCH;
+            let dy = ((p.y - q.y).abs() - 1).max(0) as f64 * GRID_PITCH;
             best = best.min((dx * dx + dy * dy).sqrt());
         }
     }
     best
 }
 
-fn footprint(mesh: &Mesh) -> Vec<(f32, f32)> {
+fn footprint(mesh: &Mesh) -> Vec<(f64, f64)> {
     let mut seen: HashSet<(i32, i32)> = HashSet::new();
     for p in &mesh.positions {
         seen.insert((
@@ -583,12 +583,12 @@ fn footprint(mesh: &Mesh) -> Vec<(f32, f32)> {
         ));
     }
     seen.into_iter()
-        .map(|(x, y)| (x as f32 / QUANTUM, y as f32 / QUANTUM))
+        .map(|(x, y)| (x as f64 / QUANTUM, y as f64 / QUANTUM))
         .collect()
 }
 
-fn closest(a: &[(f32, f32)], b: &[(f32, f32)]) -> f32 {
-    let mut best = f32::INFINITY;
+fn closest(a: &[(f64, f64)], b: &[(f64, f64)]) -> f64 {
+    let mut best = f64::INFINITY;
     for &(ax, ay) in a {
         for &(bx, by) in b {
             best = best.min(((ax - bx).powi(2) + (ay - by).powi(2)).sqrt());
@@ -641,13 +641,13 @@ fn pieces_of(c: &Case) -> Vec<Vec<GridCell>> {
 /// The height of every bin's cavity floor. `plan_piece` takes it from these two
 /// constants unconditionally, so a face at that z is a floor and nothing else
 /// in the model is.
-const FLOOR_Z: f32 = gridfinity::BASE_TOTAL_HEIGHT + gridfinity::FLOOR_THICKNESS;
+const FLOOR_Z: f64 = gridfinity::BASE_TOTAL_HEIGHT + gridfinity::FLOOR_THICKNESS;
 
 /// How far a normal may sit off `+-Z` and still count as parallel to it. The
 /// two normals are equal in exact arithmetic -- tangency is what a rolling-ball
-/// blend *is* -- so this bounds accumulated f32 error in the blend solve and
+/// blend *is* -- so this bounds accumulated f64 error in the blend solve and
 /// the surface evaluation, nothing about the model.
-const NORMAL_TOL: f32 = 1e-3;
+const NORMAL_TOL: f64 = 1e-3;
 
 /// `(cavity floors, of those, floors that meet every one of their walls sharp)`.
 ///
@@ -880,7 +880,7 @@ fn check(c: &Case) -> Result<(), String> {
             return Ok(());
         }
 
-        let prints: Vec<Vec<(f32, f32)>> = meshes.iter().map(footprint).collect();
+        let prints: Vec<Vec<(f64, f64)>> = meshes.iter().map(footprint).collect();
         for i in 0..pieces.len() {
             for j in (i + 1)..pieces.len() {
                 let want = grid_gap(&pieces[i], &pieces[j]);
@@ -1029,8 +1029,8 @@ fn shrink(c: &Case, sig: &str) -> Case {
     let d = Params::default();
     for (get, set) in [
         (
-            (|p: &Params| p.floor_fillet) as fn(&Params) -> f32,
-            (|p: &mut Params, v: f32| p.floor_fillet = v) as fn(&mut Params, f32),
+            (|p: &Params| p.floor_fillet) as fn(&Params) -> f64,
+            (|p: &mut Params, v: f64| p.floor_fillet = v) as fn(&mut Params, f64),
         ),
         (
             |p| p.cavity_corner_radius,
@@ -1201,7 +1201,7 @@ fn run(opts: Options, default_cases: u32) -> Report {
 /// `floor_fillet: 0.0` is the model declining to round any of them.
 #[test]
 fn a_cavity_floor_is_rounded_exactly_when_the_model_filleted_it() {
-    let bin = |dividers: Vec<GridEdge>, fr: f32| {
+    let bin = |dividers: Vec<GridEdge>, fr: f64| {
         let mut p = Params {
             divider_edges: dividers,
             ..Params::rect(2, 2)

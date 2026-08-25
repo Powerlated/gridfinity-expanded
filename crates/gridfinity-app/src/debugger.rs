@@ -1,6 +1,6 @@
 
 use eframe::egui::{self, Color32, RichText, Sense};
-use glam::Vec3;
+use gridfinity_cad::kernel::math::Vec3;
 use gridfinity_cad::kernel::perf;
 use gridfinity_cad::kernel::program::{Op, Program, run};
 use gridfinity_cad::kernel::sketch::Seg;

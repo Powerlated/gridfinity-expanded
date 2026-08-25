@@ -42,8 +42,8 @@ pub fn carve_to_cells(
     }
     let cell_rect = |c: &GridCell| {
         RectF::new(
-            c.x as f32 * GRID_PITCH,
-            c.y as f32 * GRID_PITCH,
+            c.x as f64 * GRID_PITCH,
+            c.y as f64 * GRID_PITCH,
             GRID_PITCH,
             GRID_PITCH,
         )
@@ -59,12 +59,12 @@ pub fn carve_to_cells(
                 continue;
             }
             let y = if step > 0 {
-                (c.y + 1) as f32 * GRID_PITCH
+                (c.y + 1) as f64 * GRID_PITCH
             } else {
-                c.y as f32 * GRID_PITCH - REENTRANT_FILLET_OVERHANG
+                c.y as f64 * GRID_PITCH - REENTRANT_FILLET_OVERHANG
             };
             rects.push(RectF::new(
-                c.x as f32 * GRID_PITCH,
+                c.x as f64 * GRID_PITCH,
                 y,
                 GRID_PITCH,
                 REENTRANT_FILLET_OVERHANG,

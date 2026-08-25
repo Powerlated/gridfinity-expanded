@@ -38,7 +38,7 @@ pub enum SlopeDir {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BinSlope {
     #[cfg_attr(feature = "serde", serde(rename = "angle"))]
-    pub angle_deg: f32,
+    pub angle_deg: f64,
     pub dir: SlopeDir,
 }
 
@@ -73,12 +73,12 @@ pub fn rect_cells(gx: u32, gy: u32) -> Vec<GridCell> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InnerWall {
-    pub x1: f32,
-    pub y1: f32,
-    pub x2: f32,
-    pub y2: f32,
-    pub width: f32,
-    pub height: Option<f32>,
+    pub x1: f64,
+    pub y1: f64,
+    pub x2: f64,
+    pub y2: f64,
+    pub width: f64,
+    pub height: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -87,10 +87,10 @@ pub struct InnerWall {
 pub struct Params {
     pub bins: Vec<LogicalBin>,
     pub height_units: u32,
-    pub wall_thickness: f32,
-    pub cavity_corner_radius: f32,
+    pub wall_thickness: f64,
+    pub cavity_corner_radius: f64,
     #[cfg_attr(feature = "serde", serde(rename = "innerFilletRadius"))]
-    pub floor_fillet: f32,
+    pub floor_fillet: f64,
     pub magnet_holes: bool,
     pub screw_holes: bool,
     pub open_edges: Vec<GridEdge>,
@@ -274,8 +274,8 @@ impl Params {
         out
     }
 
-    pub fn total_height(&self) -> f32 {
-        BASE_TOTAL_HEIGHT + HEIGHT_PER_UNIT * self.height_units.max(1) as f32
+    pub fn total_height(&self) -> f64 {
+        BASE_TOTAL_HEIGHT + HEIGHT_PER_UNIT * self.height_units.max(1) as f64
     }
 }
 
@@ -285,7 +285,7 @@ pub fn divisions_to_edges(gx: u32, gy: u32, dx: u32, dy: u32) -> Vec<GridEdge> {
         let n = dx.min(gx - 1) as i32;
         let span = gx as i32;
         for i in 0..n {
-            let idx = ((i + 1) as f32 * span as f32 / (n + 1) as f32).round() as i32;
+            let idx = ((i + 1) as f64 * span as f64 / (n + 1) as f64).round() as i32;
             for y in 0..gy as i32 {
                 out.push(GridEdge {
                     x: idx,
@@ -299,7 +299,7 @@ pub fn divisions_to_edges(gx: u32, gy: u32, dx: u32, dy: u32) -> Vec<GridEdge> {
         let n = dy.min(gy - 1) as i32;
         let span = gy as i32;
         for i in 0..n {
-            let idx = ((i + 1) as f32 * span as f32 / (n + 1) as f32).round() as i32;
+            let idx = ((i + 1) as f64 * span as f64 / (n + 1) as f64).round() as i32;
             for x in 0..gx as i32 {
                 out.push(GridEdge {
                     x,

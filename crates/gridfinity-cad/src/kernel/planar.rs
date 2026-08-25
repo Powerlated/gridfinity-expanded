@@ -32,7 +32,7 @@ fn above(a: Vec2, b: Vec2) -> bool {
 }
 
 #[inline]
-fn cross(o: Vec2, a: Vec2, b: Vec2) -> f32 {
+fn cross(o: Vec2, a: Vec2, b: Vec2) -> f64 {
     (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
 }
 
@@ -58,7 +58,7 @@ fn sector(d: Vec2) -> u8 {
 ///
 /// The angle itself cannot be trusted here. Two directions that differ by a
 /// part in 10^8 -- a diagonal running the length of a face, a hair off a
-/// boundary edge it passes over -- round to the *same* f32 angle, and the sort
+/// boundary edge it passes over -- round to the *same* f64 angle, and the sort
 /// then orders them arbitrarily, which sends `next_in_face` into a neighbouring
 /// face and the triangulation covers parts of the region twice. Within one
 /// half-plane the cross product answers the same question and is exact to the
@@ -83,7 +83,7 @@ const STACK: &str = "the monotone stack keeps the chain walked so far";
 
 /// Signed area of `p[s..e]` traversed in order; positive is counter-clockwise.
 pub fn span_ccw(p: &[Vec2], s: usize, e: usize) -> bool {
-    let mut a = 0.0f32;
+    let mut a = 0.0f64;
     for i in s..e {
         let (u, v) = (p[i], p[if i + 1 == e { s } else { i + 1 }]);
         a += u.x * v.y - v.x * u.y;
@@ -633,7 +633,7 @@ mod tests {
         tris
     }
 
-    fn ring(out: &mut Vec<Vec2>, pts: &[(f32, f32)]) -> (usize, usize) {
+    fn ring(out: &mut Vec<Vec2>, pts: &[(f64, f64)]) -> (usize, usize) {
         let s = out.len();
         out.extend(pts.iter().map(|&(x, y)| Vec2::new(x, y)));
         (s, out.len())
@@ -669,7 +669,7 @@ mod tests {
         )];
         for i in 0..6 {
             for j in 0..6 {
-                let (x, y) = (5.0 + i as f32 * 15.0, 5.0 + j as f32 * 15.0);
+                let (x, y) = (5.0 + i as f64 * 15.0, 5.0 + j as f64 * 15.0);
                 spans.push(ring(
                     &mut uv,
                     &[(x, y), (x, y + 10.0), (x + 10.0, y + 10.0), (x + 10.0, y)],
@@ -685,7 +685,7 @@ mod tests {
     /// all simple, disjoint and properly nested. In this face's uv frame the
     /// sweep runs across the bin's 42 mm width, so the two holes of a column
     /// begin and end at exactly the same sweep height.
-    const FOUR_COMPARTMENT_RIM: [&[(f32, f32)]; 5] = [
+    const FOUR_COMPARTMENT_RIM: [&[(f64, f64)]; 5] = [
         &[
             (-0.25, 4.0),
             (-0.25, 38.0),
@@ -891,9 +891,9 @@ mod tests {
     /// hard case.
     #[test]
     fn comb_with_shared_y_coordinates() {
-        let mut pts: Vec<(f32, f32)> = vec![(0.0, 0.0)];
+        let mut pts: Vec<(f64, f64)> = vec![(0.0, 0.0)];
         for k in 0..8 {
-            let x = k as f32 * 10.0;
+            let x = k as f64 * 10.0;
             pts.push((x + 2.0, 0.0));
             pts.push((x + 2.0, 20.0));
             pts.push((x + 8.0, 20.0));
@@ -925,13 +925,13 @@ mod tests {
             seed ^= seed << 13;
             seed ^= seed >> 7;
             seed ^= seed << 17;
-            (seed >> 11) as f32 / (1u64 << 53) as f32
+            (seed >> 11) as f64 / (1u64 << 53) as f64
         };
         for case in 0..200 {
             let n = 5 + (case % 20);
-            let pts: Vec<(f32, f32)> = (0..n)
+            let pts: Vec<(f64, f64)> = (0..n)
                 .map(|k| {
-                    let a = k as f32 / n as f32 * std::f32::consts::TAU;
+                    let a = k as f64 / n as f64 * std::f64::consts::TAU;
                     let r = 5.0 + 15.0 * rnd();
                     (r * a.cos(), r * a.sin())
                 })

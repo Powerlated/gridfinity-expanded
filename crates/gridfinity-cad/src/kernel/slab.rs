@@ -14,23 +14,23 @@ pub enum Op {
 #[derive(Clone, Debug)]
 pub struct Slab {
     pub region: Vec<Vec<Seg>>,
-    pub z0: f32,
-    pub z1: f32,
+    pub z0: f64,
+    pub z1: f64,
 }
 
 impl Slab {
-    pub fn new(region: Vec<Vec<Seg>>, z0: f32, z1: f32) -> Slab {
+    pub fn new(region: Vec<Vec<Seg>>, z0: f64, z1: f64) -> Slab {
         let (z0, z1) = if z0 <= z1 { (z0, z1) } else { (z1, z0) };
         Slab { region, z0, z1 }
     }
 }
 
-const Z_EPS: f32 = 1e-5;
+const Z_EPS: f64 = 1e-5;
 
 #[derive(Clone, Debug, Default)]
 pub struct SlabOpts {
     pub cavity: bool,
-    pub open_at: Vec<f32>,
+    pub open_at: Vec<f64>,
 }
 
 pub fn build_slabs(ops: &[(Op, Slab)]) -> Result<Solid, String> {
@@ -42,7 +42,7 @@ pub fn build_slabs(ops: &[(Op, Slab)]) -> Result<Solid, String> {
     Ok(solid)
 }
 
-pub fn plan_bands(ops: &[(Op, Slab)]) -> Result<(Vec<f32>, Vec<Vec<Vec<Seg>>>), String> {
+pub fn plan_bands(ops: &[(Op, Slab)]) -> Result<(Vec<f64>, Vec<Vec<Vec<Seg>>>), String> {
     if ops.is_empty() {
         return Err("slab: empty stack".into());
     }
@@ -53,8 +53,8 @@ pub fn plan_bands(ops: &[(Op, Slab)]) -> Result<(Vec<f32>, Vec<Vec<Vec<Seg>>>), 
             .collect::<Vec<_>>(),
     );
 
-    let mut zs: Vec<f32> = ops.iter().flat_map(|(_, s)| [s.z0, s.z1]).collect();
-    zs.sort_by(f32::total_cmp);
+    let mut zs: Vec<f64> = ops.iter().flat_map(|(_, s)| [s.z0, s.z1]).collect();
+    zs.sort_by(f64::total_cmp);
     zs.dedup_by(|a, b| (*a - *b).abs() < Z_EPS);
     if zs.len() < 2 {
         return Err("slab: stack has no height".into());
@@ -123,7 +123,7 @@ pub fn emit_slabs(
 
 fn emit_cap(
     b: &mut Builder,
-    z: f32,
+    z: f64,
     up: bool,
     sense: bool,
     outer: &RingEdges,
@@ -173,7 +173,7 @@ mod tests {
     use crate::kernel::sketch::Sketch;
     use crate::kernel::tess::tessellate;
 
-    fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<Vec<Seg>> {
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Vec<Seg>> {
         vec![
             Sketch::rectangle((x0 + x1) * 0.5, (y0 + y1) * 0.5, x1 - x0, y1 - y0)
                 .loops
@@ -181,7 +181,7 @@ mod tests {
         ]
     }
 
-    fn circ(cx: f32, cy: f32, r: f32) -> Vec<Vec<Seg>> {
+    fn circ(cx: f64, cy: f64, r: f64) -> Vec<Vec<Seg>> {
         vec![Sketch::circle(cx, cy, r).loops.remove(0)]
     }
 
@@ -276,7 +276,7 @@ mod tests {
         ])
         .expect("bore");
         watertight(&s);
-        let expect = (400.0 - std::f32::consts::PI as f64 * 9.0) * 5.0;
+        let expect = (400.0 - std::f64::consts::PI as f64 * 9.0) * 5.0;
         assert!(
             (volume(&s) - expect).abs() < 0.2,
             "vol {} vs {expect}",
@@ -328,7 +328,7 @@ mod tests {
         ])
         .expect("blind bore");
         watertight(&s);
-        let expect = 4000.0 - std::f32::consts::PI as f64 * 9.0 * 6.0;
+        let expect = 4000.0 - std::f64::consts::PI as f64 * 9.0 * 6.0;
         assert!(
             (volume(&s) - expect).abs() < 0.2,
             "vol {} vs {expect}",

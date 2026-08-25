@@ -127,15 +127,15 @@ pub(super) fn boundary_steps(cells: &[GridCell]) -> Vec<Vec<Step>> {
 }
 
 pub(super) fn mm(p: (i32, i32)) -> Vec2 {
-    Vec2::new(p.0 as f32 * GRID_PITCH, p.1 as f32 * GRID_PITCH)
+    Vec2::new(p.0 as f64 * GRID_PITCH, p.1 as f64 * GRID_PITCH)
 }
 
 pub(super) fn left_of(d: (i32, i32)) -> Vec2 {
-    Vec2::new(-d.1 as f32, d.0 as f32)
+    Vec2::new(-d.1 as f64, d.0 as f64)
 }
 
 pub(super) fn dirv(d: (i32, i32)) -> Vec2 {
-    Vec2::new(d.0 as f32, d.1 as f32)
+    Vec2::new(d.0 as f64, d.1 as f64)
 }
 
 #[derive(Clone, Copy)]
@@ -162,7 +162,7 @@ pub(super) struct SharedWithPegs {
 
 pub(super) fn author_outer_loop(
     steps: &[Step],
-    inset: &dyn Fn(&GridEdge) -> f32,
+    inset: &dyn Fn(&GridEdge) -> f64,
     walled: &dyn Fn(&GridEdge) -> bool,
     shared: &mut SharedWithPegs,
 ) -> Vec<OuterPiece> {
@@ -221,8 +221,8 @@ pub(super) fn author_outer_loop(
         } else if cross > 0.0 && both_std && same_side {
             let c = mm(s.to);
             let center = c + nrm * (ins + OUTER_R) + n1 * (ins_next + OUTER_R);
-            let a0 = f32::atan2(start.y - center.y, start.x - center.x);
-            let a1 = f32::atan2(end.y - center.y, end.x - center.x);
+            let a0 = f64::atan2(start.y - center.y, start.x - center.x);
+            let a1 = f64::atan2(end.y - center.y, end.x - center.x);
             let (a0, a1) = short_arc(a0, a1);
             pieces.push(OuterPiece {
                 seg: Seg::Arc {
@@ -257,8 +257,8 @@ pub(super) fn author_outer_loop(
                 OUTER_R - ins_next,
                 REENTRANT_FILLET_OVERHANG
             );
-            let a0 = f32::atan2(t1.y - center.y, t1.x - center.x);
-            let a1 = f32::atan2(t2.y - center.y, t2.x - center.x);
+            let a0 = f64::atan2(t1.y - center.y, t1.x - center.x);
+            let a1 = f64::atan2(t2.y - center.y, t2.x - center.x);
             let (a0, a1) = short_arc(a0, a1);
             pieces.push(OuterPiece {
                 seg: Seg::Line { a: start, b: t1 },
@@ -321,7 +321,7 @@ impl OuterLoops {
     pub(super) fn split_outline_at(
         &mut self,
         p: Vec2,
-        peg_splits: &mut HashMap<GridEdge, Vec<f32>>,
+        peg_splits: &mut HashMap<GridEdge, Vec<f64>>,
         peg_arcs: &mut Vec<Vec2>,
     ) {
         for li in 0..self.loops.len() {
@@ -346,7 +346,7 @@ impl OuterLoops {
         &mut self,
         li: usize,
         p: Vec2,
-        peg_splits: &mut HashMap<GridEdge, Vec<f32>>,
+        peg_splits: &mut HashMap<GridEdge, Vec<f64>>,
     ) {
         let pieces = &mut self.loops[li];
         for i in 0..pieces.len() {

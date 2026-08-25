@@ -36,13 +36,13 @@ pub fn frame(index: usize) -> &'static [u8] {
     &frames()[index * FRAME_BYTES..(index + 1) * FRAME_BYTES]
 }
 
-pub fn bounds() -> ([f32; 3], [f32; 3]) {
+pub fn bounds() -> ([f64; 3], [f64; 3]) {
     let h = 2.0 * gridfinity::HEIGHT_PER_UNIT;
     (
         [0.0, 0.0, 0.0],
         [
-            W as f32 * gridfinity::GRID_PITCH,
-            H as f32 * gridfinity::GRID_PITCH,
+            W as f64 * gridfinity::GRID_PITCH,
+            H as f64 * gridfinity::GRID_PITCH,
             h,
         ],
     )

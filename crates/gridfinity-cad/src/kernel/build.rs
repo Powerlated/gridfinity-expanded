@@ -17,14 +17,14 @@ fn ccw(segs: Vec<Seg>) -> Vec<Seg> {
     }
 }
 
-fn seg_radius(s: &Seg) -> Option<f32> {
+fn seg_radius(s: &Seg) -> Option<f64> {
     match s {
         Seg::Arc { radius, .. } => Some(*radius),
         _ => None,
     }
 }
 
-pub fn ring(b: &mut Builder, segs: &[Seg], z: f32) -> RingEdges {
+pub fn ring(b: &mut Builder, segs: &[Seg], z: f64) -> RingEdges {
     let mut out = RingEdges::default();
     ring_into(b, segs, z, &mut out);
     out
@@ -32,7 +32,7 @@ pub fn ring(b: &mut Builder, segs: &[Seg], z: f32) -> RingEdges {
 
 /// `ring` into a caller-owned buffer. Emitting one ring per band allocates two
 /// `Vec`s per call, and a loft of thousands of pegs does that millions of times.
-pub fn ring_into(b: &mut Builder, segs: &[Seg], z: f32, out: &mut RingEdges) {
+pub fn ring_into(b: &mut Builder, segs: &[Seg], z: f64, out: &mut RingEdges) {
     let n = segs.len();
     out.verts.clear();
     out.edges.clear();
@@ -90,7 +90,7 @@ pub fn ring_on_plane(b: &mut Builder, segs: &[Seg], plane: (Vec3, Vec3)) -> Ring
     } else {
         (-normal.x / normal.z, -normal.y / normal.z)
     };
-    let z_of = |p: crate::kernel::math::Vec2| -> f32 {
+    let z_of = |p: crate::kernel::math::Vec2| -> f64 {
         if normal.z.abs() < 1e-9 {
             return origin.z;
         }
@@ -152,8 +152,8 @@ pub fn wall_between(
     segs_hi: &[Seg],
     lo: &RingEdges,
     hi: &RingEdges,
-    za: f32,
-    zb: f32,
+    za: f64,
+    zb: f64,
     outward: bool,
 ) {
     let n = segs_lo.len();
@@ -233,7 +233,7 @@ pub fn wall_between(
     }
 }
 
-pub fn seg_edge(b: &mut Builder, seg: &Seg, z: f32) -> (EdgeId, bool) {
+pub fn seg_edge(b: &mut Builder, seg: &Seg, z: f64) -> (EdgeId, bool) {
     let v0 = b.vertex(vec3_of(seg.start().x, seg.start().y, z));
     let v1 = b.vertex(vec3_of(seg.end().x, seg.end().y, z));
     match *seg {
@@ -260,24 +260,24 @@ pub fn seg_edge(b: &mut Builder, seg: &Seg, z: f32) -> (EdgeId, bool) {
 pub fn wall_seg(
     b: &mut Builder,
     seg: &Seg,
-    za: f32,
-    zb: f32,
-    breaks_l: &[f32],
-    breaks_r: &[f32],
+    za: f64,
+    zb: f64,
+    breaks_l: &[f64],
+    breaks_r: &[f64],
     outward: bool,
 ) {
     let (p0, p1) = (seg.start(), seg.end());
     let bottom = seg_edge(b, seg, za);
     let top = seg_edge(b, seg, zb);
-    let chain = |b: &mut Builder, p: Vec2, breaks: &[f32]| -> Vec<(EdgeId, bool)> {
-        let mut hs: Vec<f32> = vec![za];
+    let chain = |b: &mut Builder, p: Vec2, breaks: &[f64]| -> Vec<(EdgeId, bool)> {
+        let mut hs: Vec<f64> = vec![za];
         hs.extend(
             breaks
                 .iter()
                 .copied()
                 .filter(|&h| h > za + 1e-4 && h < zb - 1e-4),
         );
-        hs.sort_by(f32::total_cmp);
+        hs.sort_by(f64::total_cmp);
         hs.push(zb);
         hs.dedup_by(|x, y| (*x - *y).abs() < 1e-4);
         let mut out = Vec::new();
@@ -318,7 +318,7 @@ pub fn loop_of(r: &RingEdges, forward: bool) -> Loop {
     }
 }
 
-pub fn cap(b: &mut Builder, z: f32, up: bool, outer: &RingEdges, holes: &[&RingEdges]) {
+pub fn cap(b: &mut Builder, z: f64, up: bool, outer: &RingEdges, holes: &[&RingEdges]) {
     let surface = if up {
         Surface::plane_z(z)
     } else {
@@ -336,11 +336,11 @@ pub fn cap(b: &mut Builder, z: f32, up: bool, outer: &RingEdges, holes: &[&RingE
     b.face(surface, true, outer_loop, inner_loops);
 }
 
-pub fn extrude(sketch: &Sketch, z0: f32, z1: f32) -> Solid {
+pub fn extrude(sketch: &Sketch, z0: f64, z1: f64) -> Solid {
     prism(sketch, &[], z0, z1)
 }
 
-pub fn prism(outer: &Sketch, holes: &[Sketch], z0: f32, z1: f32) -> Solid {
+pub fn prism(outer: &Sketch, holes: &[Sketch], z0: f64, z1: f64) -> Solid {
     let mut b = Builder::new();
     let outer_segs = ccw(outer.loops[0].clone());
     let hole_segs: Vec<Vec<Seg>> = holes.iter().map(|h| ccw(h.loops[0].clone())).collect();
@@ -367,7 +367,7 @@ pub fn prism(outer: &Sketch, holes: &[Sketch], z0: f32, z1: f32) -> Solid {
 }
 
 pub struct Ring<'a> {
-    pub z: f32,
+    pub z: f64,
     pub sketch: &'a Sketch,
 }
 
@@ -406,7 +406,7 @@ pub fn loft(rings: &[Ring]) -> Solid {
     b.build()
 }
 
-fn cone_or_cylinder(center: Vec2, r0: f32, z0: f32, r1: f32, z1: f32) -> Surface {
+fn cone_or_cylinder(center: Vec2, r0: f64, z0: f64, r1: f64, z1: f64) -> Surface {
     if (r1 - r0).abs() < 1e-5 {
         return Surface::cylinder_z(vec3_of(center.x, center.y, 0.0), r0);
     }

@@ -25,8 +25,8 @@ pub(super) fn build_baseplate(p: &Params) -> Solid {
             .iter()
             .map(|c| {
                 RectF::new(
-                    c.x as f32 * GRID_PITCH,
-                    c.y as f32 * GRID_PITCH,
+                    c.x as f64 * GRID_PITCH,
+                    c.y as f64 * GRID_PITCH,
                     GRID_PITCH,
                     GRID_PITCH,
                 )
@@ -34,7 +34,7 @@ pub(super) fn build_baseplate(p: &Params) -> Solid {
             .collect::<Vec<_>>(),
         &[],
     );
-    let inset = |_: usize, _: Vec2, _: Vec2| 0.0f32;
+    let inset = |_: usize, _: Vec2, _: Vec2| 0.0f64;
     let radius = |_: usize, convex: bool| if convex { OUTER_R } else { 0.0 };
     let mut outer_top: Vec<Loop> = Vec::new();
     let mut outer_bot: Vec<Loop> = Vec::new();

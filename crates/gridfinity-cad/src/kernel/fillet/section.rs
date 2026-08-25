@@ -27,7 +27,7 @@ use super::{END_AGREE, join_agree};
 pub(super) fn runout_on(
     surface: &Surface,
     cv: Vec3,
-    r: f32,
+    r: f64,
     ta_p: Vec3,
     tb_p: Vec3,
     plane: (Vec3, Vec3),
@@ -71,7 +71,7 @@ pub(super) fn runout_on(
 fn runout_cyl(
     cv: Vec3,
     axis: Vec3,
-    r: f32,
+    r: f64,
     ta_p: Vec3,
     tb_p: Vec3,
     plane: (Vec3, Vec3),
@@ -128,10 +128,10 @@ pub(super) fn respan(ce: &mut CurvEdge, from: Vec3, to: Vec3) {
     let t0 = angle(from);
     let mut sweep = wrap_pi(angle(to) - t0);
     if was != 0.0 && sweep != 0.0 && sweep.signum() != was.signum() {
-        sweep += was.signum() * std::f32::consts::TAU;
+        sweep += was.signum() * std::f64::consts::TAU;
     }
     assert!(
-        sweep.abs() <= std::f32::consts::TAU,
+        sweep.abs() <= std::f64::consts::TAU,
         "blend runout: the tangent circle would sweep {sweep} rad, more than a full turn"
     );
     ce.t0 = t0;
@@ -141,9 +141,9 @@ pub(super) fn respan(ce: &mut CurvEdge, from: Vec3, to: Vec3) {
 /// Whether the closed angular interval `[lo, hi]` contains pi modulo a full
 /// turn -- that is, whether a sweep from `lo` to `hi` passes the point where a
 /// ring's cosine bottoms out at -1.
-fn spans_pi(lo: f32, hi: f32) -> bool {
-    let k = ((lo - std::f32::consts::PI) / std::f32::consts::TAU).ceil();
-    std::f32::consts::PI + k * std::f32::consts::TAU <= hi
+fn spans_pi(lo: f64, hi: f64) -> bool {
+    let k = ((lo - std::f64::consts::PI) / std::f64::consts::TAU).ceil();
+    std::f64::consts::PI + k * std::f64::consts::TAU <= hi
 }
 
 /// Sections a torus blend with a terminating plane **parallel to its axis**, and
@@ -175,8 +175,8 @@ fn spans_pi(lo: f32, hi: f32) -> bool {
 fn runout_torus(
     center: Vec3,
     axis: Vec3,
-    major: f32,
-    minor: f32,
+    major: f64,
+    minor: f64,
     cv: Vec3,
     ta_p: Vec3,
     tb_p: Vec3,
@@ -225,7 +225,7 @@ fn runout_torus(
     }
     let branch = side.signum();
 
-    let minor_angle = |p: Vec3| -> f32 {
+    let minor_angle = |p: Vec3| -> f64 {
         let rel = p - center;
         let h = rel.dot(axis);
         let rad = (rel - axis * h).length();

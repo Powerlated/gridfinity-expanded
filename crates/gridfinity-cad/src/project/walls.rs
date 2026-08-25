@@ -41,15 +41,15 @@ pub struct Wall {
 }
 
 impl Wall {
-    /// The same divider as the model's free-form inner wall, in the f32 the
+    /// The same divider as the model's free-form inner wall, in the f64 the
     /// kernel works in and with no height, meaning full height.
     pub fn to_inner_wall(&self) -> InnerWall {
         InnerWall {
-            x1: self.start.x as f32,
-            y1: self.start.y as f32,
-            x2: self.end.x as f32,
-            y2: self.end.y as f32,
-            width: self.width as f32,
+            x1: self.start.x,
+            y1: self.start.y,
+            x2: self.end.x,
+            y2: self.end.y,
+            width: self.width,
             height: None,
         }
     }

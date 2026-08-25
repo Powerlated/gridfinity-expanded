@@ -8,11 +8,11 @@ use std::time::Instant;
 
 fn blob(w: i32, h: i32) -> Vec<GridCell> {
     let mut cells = Vec::new();
-    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
-    let r = (w.min(h) as f32) * 0.45;
+    let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+    let r = (w.min(h) as f64) * 0.45;
     for x in 0..w {
         for y in 0..h {
-            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+            let (dx, dy) = (x as f64 + 0.5 - cx, y as f64 + 0.5 - cy);
             let wob = 1.0 + 0.18 * (dy * 0.9).sin() + 0.12 * (dx * 1.3).cos();
             if (dx * dx + dy * dy).sqrt() <= r * wob {
                 cells.push(GridCell { x, y });
@@ -22,13 +22,13 @@ fn blob(w: i32, h: i32) -> Vec<GridCell> {
     cells
 }
 
-fn blob_phase(w: i32, h: i32, phase: f32) -> Vec<GridCell> {
+fn blob_phase(w: i32, h: i32, phase: f64) -> Vec<GridCell> {
     let mut cells = Vec::new();
-    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
-    let r = (w.min(h) as f32) * 0.45;
+    let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+    let r = (w.min(h) as f64) * 0.45;
     for x in 0..w {
         for y in 0..h {
-            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+            let (dx, dy) = (x as f64 + 0.5 - cx, y as f64 + 0.5 - cy);
             let wob = 1.0 + 0.18 * (dy * 0.9 + phase).sin() + 0.12 * (dx * 1.3 + phase).cos();
             if (dx * dx + dy * dy).sqrt() <= r * wob {
                 cells.push(GridCell { x, y });
@@ -51,7 +51,7 @@ fn pipeline_bench() {
     };
     const FRAMES: usize = 12;
     let frames: Vec<Params> = (0..FRAMES)
-        .map(|i| params_for(blob_phase(w, h, i as f32 * 0.7), Params::default()))
+        .map(|i| params_for(blob_phase(w, h, i as f64 * 0.7), Params::default()))
         .collect();
 
     let mut serial = f64::INFINITY;

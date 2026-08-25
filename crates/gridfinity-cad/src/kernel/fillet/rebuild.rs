@@ -35,7 +35,7 @@ pub(super) type VertexInfo = HashMap<usize, (Vec3, Vec3)>;
 pub(super) fn touched_faces(
     solid: &Solid,
     bm: &Blends,
-    want: &HashMap<EdgeId, f32>,
+    want: &HashMap<EdgeId, f64>,
 ) -> (Vec<bool>, VertexInfo) {
     let mut vinfo: VertexInfo = HashMap::with_capacity(bm.len() * 2);
     let mut vinfo_order: Vec<EdgeId> = bm.keys().copied().collect();
@@ -74,7 +74,7 @@ pub(super) fn faces(
     bm: &Blends,
     vinfo: &VertexInfo,
     runouts: &Runouts,
-    want: &HashMap<EdgeId, f32>,
+    want: &HashMap<EdgeId, f64>,
     touched: &[bool],
     edge_faces: &EdgeFaces,
     b: &mut Builder,
@@ -347,7 +347,7 @@ fn rebuild_loop(
     bm: &Blends,
     vinfo: &VertexInfo,
     runouts: &Runouts,
-    want: &HashMap<EdgeId, f32>,
+    want: &HashMap<EdgeId, f64>,
     fi: usize,
     lp: &[(EdgeId, bool)],
     ef: &EdgeFaces,

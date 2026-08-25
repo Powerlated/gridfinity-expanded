@@ -67,18 +67,18 @@ fn trace_loops(cells: &[GridCell]) -> Vec<Vec<Pt>> {
     loops
 }
 
-fn to_mm(p: Pt, pitch: f32, origin: Vec2) -> Vec2 {
-    Vec2::new(origin.x + p.0 as f32 * pitch, origin.y + p.1 as f32 * pitch)
+fn to_mm(p: Pt, pitch: f64, origin: Vec2) -> Vec2 {
+    Vec2::new(origin.x + p.0 as f64 * pitch, origin.y + p.1 as f64 * pitch)
 }
 
-fn build_loop(pts: &[Pt], pitch: f32, origin: Vec2, r: f32) -> Vec<Seg> {
+fn build_loop(pts: &[Pt], pitch: f64, origin: Vec2, r: f64) -> Vec<Seg> {
     let n = pts.len();
     if n < 2 {
         return Vec::new();
     }
     let mm: Vec<Vec2> = pts.iter().map(|&p| to_mm(p, pitch, origin)).collect();
 
-    let mut max_r = f32::INFINITY;
+    let mut max_r = f64::INFINITY;
     for i in 0..n {
         let a = mm[i];
         let b = mm[(i + 1) % n];
@@ -118,8 +118,8 @@ fn build_loop(pts: &[Pt], pitch: f32, origin: Vec2, r: f32) -> Vec<Seg> {
             let center = corner + (dout_next - din) * r;
             let arc_start = e;
             let arc_end = corner + dout_next * r;
-            let a0 = f32::atan2(arc_start.y - center.y, arc_start.x - center.x);
-            let a1 = f32::atan2(arc_end.y - center.y, arc_end.x - center.x);
+            let a0 = f64::atan2(arc_start.y - center.y, arc_start.x - center.x);
+            let a1 = f64::atan2(arc_end.y - center.y, arc_end.x - center.x);
             let (a0, a1) = short_arc(a0, a1);
             segs.push(Seg::Arc {
                 a: arc_start,
@@ -137,7 +137,7 @@ fn build_loop(pts: &[Pt], pitch: f32, origin: Vec2, r: f32) -> Vec<Seg> {
 #[derive(Clone, Debug)]
 pub struct RegionLoop {
     pub segs: Vec<Seg>,
-    pub area: f32,
+    pub area: f64,
 }
 
 impl RegionLoop {
@@ -148,12 +148,12 @@ impl RegionLoop {
 
 pub fn region_loops(
     cells: &[GridCell],
-    pitch: f32,
-    corner_radius: f32,
+    pitch: f64,
+    corner_radius: f64,
     origin: Vec2,
 ) -> Vec<RegionLoop> {
     let mut loops = trace_loops(cells);
-    let mut with_area: Vec<(f32, Vec<Pt>)> = loops
+    let mut with_area: Vec<(f64, Vec<Pt>)> = loops
         .drain(..)
         .map(|pts| {
             let mm: Vec<Vec2> = pts.iter().map(|&p| to_mm(p, pitch, origin)).collect();

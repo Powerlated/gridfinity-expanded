@@ -47,18 +47,18 @@ struct PieceOutline {
     loops: OuterLoops,
     shared: SharedWithPegs,
     spans: Vec<OpenSpan>,
-    peg_splits: HashMap<GridEdge, Vec<f32>>,
+    peg_splits: HashMap<GridEdge, Vec<f64>>,
     peg_arcs: Vec<Vec2>,
-    wt: f32,
+    wt: f64,
     openish: bool,
     slope: Option<BinSlope>,
-    total_h: f32,
-    floor_z: f32,
+    total_h: f64,
+    floor_z: f64,
 }
 
 impl PieceOutline {
     /// The cavity's depth: floor to rim.
-    fn cavity_depth(&self) -> f32 {
+    fn cavity_depth(&self) -> f64 {
         self.total_h - self.floor_z
     }
 }
@@ -69,7 +69,7 @@ impl PieceOutline {
 struct PlannedCavity {
     lp: CavityLoop,
     islands: Vec<Island>,
-    fr: f32,
+    fr: f64,
     banded: Option<Banded>,
 }
 
@@ -78,7 +78,7 @@ struct PlannedCavity {
 /// the loops the rim face has to close over them.
 struct CavityOps {
     ops: Vec<(String, POp)>,
-    fillet_edges: Vec<(Seg, f32, f32)>,
+    fillet_edges: Vec<(Seg, f64, f64)>,
     rim_holes: Vec<Vec<Seg>>,
     island_tops: Vec<Vec<Seg>>,
 }
@@ -130,9 +130,9 @@ pub(super) fn plan_piece(
 pub(super) struct SlopedFloor {
     origin: Vec3,
     normal: Vec3,
-    ux: f32,
-    uy: f32,
-    eff_m: f32,
+    ux: f64,
+    uy: f64,
+    eff_m: f64,
 }
 
 impl SlopedFloor {
@@ -174,7 +174,7 @@ impl SlopedFloor {
     }
 
     /// The ramp's height over `pt`, never below the flat floor it starts from.
-    fn z_of(&self, pt: Vec2) -> f32 {
+    fn z_of(&self, pt: Vec2) -> f64 {
         self.origin.z + self.eff_m * (self.ux * pt.x + self.uy * pt.y)
     }
 
@@ -207,7 +207,7 @@ fn author_outline(
 
     let bin_set = crate::layout::cell_set(bin_cells);
     let seam = |e: &GridEdge| classify_edge_in(&bin_set, *e) == EdgeClass::Internal;
-    let inset = |e: &GridEdge| -> f32 { if seam(e) { 0.0 } else { HALF_TOL } };
+    let inset = |e: &GridEdge| -> f64 { if seam(e) { 0.0 } else { HALF_TOL } };
     let walled = |e: &GridEdge| walls.walled.contains(e);
     let mut shared = SharedWithPegs::default();
     let outer_loops: Vec<Vec<OuterPiece>> = boundary_steps(cells)
@@ -281,7 +281,7 @@ fn plan_cavities(
     // The cavity and the wall are two booleans over the same pair of regions,
     // and their results have to weld to each other along the wall they share.
     // One presplit gives both a common segmentation; running each sweep on raw
-    // inputs instead leaves the shared boundary cut at f32-different points and
+    // inputs instead leaves the shared boundary cut at f64-different points and
     // the solid open at an edge nothing pairs with.
     let (shapes, clipped_outline) = if outline.openish {
         let mut pre = presplit_regions(&[shapes, outline_region(&outline.loops)]);
@@ -379,8 +379,8 @@ fn carve_full_walls(
     p: &Params,
     cl: CavityLoop,
     islands: Vec<Island>,
-    rc: f32,
-    fr: f32,
+    rc: f64,
+    fr: f64,
     outline: &PieceOutline,
 ) -> Vec<(CavityLoop, Vec<Island>, Option<Banded>)> {
     let full_walls: Vec<Vec<Seg>> = if outline.slope.is_some() {
@@ -430,7 +430,7 @@ fn carve_full_walls(
             });
         }
     }
-    let carved: f32 = outs.iter().map(|(o, _)| loop_area(o)).sum();
+    let carved: f64 = outs.iter().map(|(o, _)| loop_area(o)).sum();
     assert!(
         carved <= before + COINCIDENT,
         "carving inner walls out of a compartment only removes material, but its {before} mm^2          came back as {carved} mm^2 over {} piece(s)",
@@ -463,13 +463,13 @@ fn carve_full_walls(
 fn band_partial_walls(
     p: &Params,
     entries: &mut [(CavityLoop, Vec<Island>, Option<Banded>)],
-    fr: f32,
+    fr: f64,
     outline: &PieceOutline,
 ) {
     if outline.slope.is_some() {
         return;
     }
-    let partial_walls: Vec<(&InnerWall, Vec<Seg>, f32)> = p
+    let partial_walls: Vec<(&InnerWall, Vec<Seg>, f64)> = p
         .inner_walls
         .iter()
         .filter_map(|w| {
@@ -613,9 +613,9 @@ fn one_closed_loop(pieces: Vec<(Seg, ())>) -> Vec<Seg> {
 /// its ramp blends being `plan_cavity_banded`'s to request.
 fn settle_blend_radii(
     entries: Vec<(CavityLoop, Vec<Island>, Option<Banded>)>,
-    fr: f32,
+    fr: f64,
 ) -> Vec<PlannedCavity> {
-    let clamp = |segs: &[Seg], ball_inside_convex: bool, loop_fr: &mut f32| {
+    let clamp = |segs: &[Seg], ball_inside_convex: bool, loop_fr: &mut f64| {
         for s in segs {
             if let Seg::Arc { radius, .. } = s {
                 if *radius < *loop_fr + MIN_TORUS_MAJOR
@@ -823,10 +823,10 @@ fn emit_open_cavity(
     ci: usize,
     lp: &CavityLoop,
     islands: &[Island],
-    fr: f32,
+    fr: f64,
     ramp: Option<&SlopedFloor>,
-    floor_z: f32,
-    total_h: f32,
+    floor_z: f64,
+    total_h: f64,
     out: &mut CavityOps,
 ) {
     assert!(
@@ -942,7 +942,7 @@ fn emit_sloped_cavity(
             .segs
             .iter()
             .map(|s| z_of(s.start()))
-            .fold(floor_z, f32::max);
+            .fold(floor_z, f64::max);
         let t = isl
             .top
             .filter(|&t| t > slope_max + SLOPE_ISLAND_HEADROOM)
@@ -1064,8 +1064,8 @@ fn emit_pegs(p: &Params, pegs: &[PegRings], tag: &str, prog: &mut Program) {
                 outward: true,
             },
         );
-        let ccx = (c.x as f32 + 0.5) * GRID_PITCH;
-        let ccy = (c.y as f32 + 0.5) * GRID_PITCH;
+        let ccx = (c.x as f64 + 0.5) * GRID_PITCH;
+        let ccy = (c.y as f64 + 0.5) * GRID_PITCH;
         if let Some(profile) = &fastener_profile {
             for (dx, dy) in FASTENER_QUADRANTS {
                 let hx = ccx + dx * FASTENER_INSET;
@@ -1281,12 +1281,12 @@ fn emit_base_and_rim(
 fn emit_wall_sectors(
     wall_loops: &[Vec<Seg>],
     ramp: Option<&SlopedFloor>,
-    floor_z: f32,
-    total_h: f32,
+    floor_z: f64,
+    total_h: f64,
     tag: &str,
     prog: &mut Program,
 ) {
-    let area: f32 = wall_loops.iter().map(|l| loop_area(l)).sum();
+    let area: f64 = wall_loops.iter().map(|l| loop_area(l)).sum();
     assert!(
         wall_loops.is_empty() || area > 0.0,
         "{tag}: the standing wall's {} loop(s) enclose {area} mm^2, so they are not one region \
@@ -1336,7 +1336,7 @@ fn emit_rim_faces(
     top_walls: &[Vec<Seg>],
     island_tops: &[Vec<Seg>],
     rim_holes: &[Vec<Seg>],
-    total_h: f32,
+    total_h: f64,
     tag: &str,
     prog: &mut Program,
 ) {
@@ -1368,9 +1368,9 @@ fn emit_rim_faces(
         let bi = best.expect("total_h hole without a containing face");
         outers[bi].1.push(hole.clone());
     }
-    let net: f32 = outers
+    let net: f64 = outers
         .iter()
-        .map(|(o, hs)| loop_area(o).abs() - hs.iter().map(|h| loop_area(h).abs()).sum::<f32>())
+        .map(|(o, hs)| loop_area(o).abs() - hs.iter().map(|h| loop_area(h).abs()).sum::<f64>())
         .sum();
     assert!(
         outers.is_empty() || net > 0.0,

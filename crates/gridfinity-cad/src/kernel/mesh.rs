@@ -20,8 +20,8 @@ impl Mesh {
         if self.positions.is_empty() {
             return (Vec3::ZERO, Vec3::ZERO);
         }
-        let mut min = Vec3::splat(f32::INFINITY);
-        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        let mut min = Vec3::splat(f64::INFINITY);
+        let mut max = Vec3::splat(f64::NEG_INFINITY);
         for &p in &self.positions {
             min = min.min(p);
             max = max.max(p);
@@ -49,7 +49,14 @@ impl Mesh {
             }
             let n = n / len;
             for p in [a, b, c] {
-                out.extend_from_slice(&[p.x, p.y, p.z, n.x, n.y, n.z]);
+                out.extend_from_slice(&[
+                    p.x as f32,
+                    p.y as f32,
+                    p.z as f32,
+                    n.x as f32,
+                    n.y as f32,
+                    n.z as f32,
+                ]);
             }
         }
         out
@@ -65,9 +72,9 @@ impl Mesh {
             let len = n.length();
             n = if len > 1e-12 { n / len } else { Vec3::ZERO };
             for v in [n, a, b, c] {
-                buf.extend_from_slice(&v.x.to_le_bytes());
-                buf.extend_from_slice(&v.y.to_le_bytes());
-                buf.extend_from_slice(&v.z.to_le_bytes());
+                buf.extend_from_slice(&(v.x as f32).to_le_bytes());
+                buf.extend_from_slice(&(v.y as f32).to_le_bytes());
+                buf.extend_from_slice(&(v.z as f32).to_le_bytes());
             }
             buf.extend_from_slice(&0u16.to_le_bytes());
         }

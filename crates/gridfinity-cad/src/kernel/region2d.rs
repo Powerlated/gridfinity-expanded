@@ -4,7 +4,7 @@ use crate::kernel::perf;
 use crate::kernel::round::seg_mid;
 use crate::kernel::sketch::{Aabb, COINCIDENT, Seg, loop_area, point_in_segs};
 
-const EPS: f32 = 1e-4;
+const EPS: f64 = 1e-4;
 
 /// Shortest piece a split is allowed to leave behind, in millimetres. A cut
 /// nearer than this to an end of the segment it lands on is dropped and the
@@ -12,14 +12,14 @@ const EPS: f32 = 1e-4;
 /// `chain_loops` welds endpoints with -- or a split can leave a piece whose two
 /// ends weld to each other. It is `COINCIDENT`, the same figure `on_seg` accepts
 /// as "on" and every reader of a sweep's output treats as one point.
-const SLIVER: f32 = COINCIDENT;
+const SLIVER: f64 = COINCIDENT;
 
 const _: () = assert!(
     SLIVER > EPS,
     "a split may not leave a piece shorter than the distance chain_loops welds endpoints with"
 );
 
-const BOX_TOL: f32 = 1e-2;
+const BOX_TOL: f64 = 1e-2;
 
 const _: () = assert!(
     BOX_TOL > 1e-3,
@@ -99,9 +99,9 @@ pub fn split_regions<T: Copy>(a: &[Vec<(Seg, T)>], b: &[Vec<(Seg, T)>]) -> Regio
         );
     }
     let _perf = perf::scope(perf::Metric::SplitRegions);
-    let mut a_cuts: Vec<Vec<Vec<(f32, Vec2)>>> =
+    let mut a_cuts: Vec<Vec<Vec<(f64, Vec2)>>> =
         a.iter().map(|l| vec![Vec::new(); l.len()]).collect();
-    let mut b_cuts: Vec<Vec<Vec<(f32, Vec2)>>> =
+    let mut b_cuts: Vec<Vec<Vec<(f64, Vec2)>>> =
         b.iter().map(|l| vec![Vec::new(); l.len()]).collect();
     let b_boxes: Vec<Vec<Aabb>> = b
         .iter()
@@ -195,7 +195,7 @@ pub fn presplit_regions(regions: &[Vec<Vec<Seg>>]) -> Vec<Vec<Vec<Seg>>> {
             }
         }
     }
-    let mut cuts: Vec<Vec<Vec<Vec<(f32, Vec2)>>>> = regions
+    let mut cuts: Vec<Vec<Vec<Vec<(f64, Vec2)>>>> = regions
         .iter()
         .map(|r| r.iter().map(|l| vec![Vec::new(); l.len()]).collect())
         .collect();
@@ -308,23 +308,23 @@ pub fn region_intersection(a: &[Vec<Seg>], b: &[Vec<Seg>]) -> Vec<Vec<Seg>> {
     untag(chain_loops(kept))
 }
 
-fn line_param(a: Vec2, b: Vec2, p: Vec2) -> f32 {
+fn line_param(a: Vec2, b: Vec2, p: Vec2) -> f64 {
     let d = b - a;
     let l2 = d.length_squared();
     if l2 <= 0.0 { 0.0 } else { (p - a).dot(d) / l2 }
 }
 
-fn seg_param(seg: &Seg, p: Vec2) -> f32 {
+fn seg_param(seg: &Seg, p: Vec2) -> f64 {
     match *seg {
         Seg::Line { a, b } => line_param(a, b, p),
         Seg::Arc { center, a0, a1, .. } => {
             let (lo, hi) = (a0.min(a1), a0.max(a1));
             let mut th = (p.y - center.y).atan2(p.x - center.x);
             while th < lo - 1e-6 {
-                th += std::f32::consts::TAU;
+                th += std::f64::consts::TAU;
             }
             while th > hi + 1e-6 {
-                th -= std::f32::consts::TAU;
+                th -= std::f64::consts::TAU;
             }
             th
         }
@@ -354,7 +354,7 @@ fn on_seg(seg: &Seg, p: Vec2) -> bool {
     }
 }
 
-fn circle_line_pts(center: Vec2, radius: f32, q0: Vec2, q1: Vec2) -> Vec<Vec2> {
+fn circle_line_pts(center: Vec2, radius: f64, q0: Vec2, q1: Vec2) -> Vec<Vec2> {
     let e = q1 - q0;
     let f = q0 - center;
     let qa = e.length_squared();
@@ -371,7 +371,7 @@ fn circle_line_pts(center: Vec2, radius: f32, q0: Vec2, q1: Vec2) -> Vec<Vec2> {
         .collect()
 }
 
-fn circle_circle_pts(c0: Vec2, r0: f32, c1: Vec2, r1: f32) -> Vec<Vec2> {
+fn circle_circle_pts(c0: Vec2, r0: f64, c1: Vec2, r1: f64) -> Vec<Vec2> {
     let d = (c1 - c0).length();
     if d < 1e-9 || d > r0 + r1 - EPS || d < (r0 - r1).abs() + EPS {
         return Vec::new();
@@ -434,7 +434,7 @@ pub fn seg_seg_points(p: &Seg, q: &Seg) -> Vec<Vec2> {
 /// piece is shorter than `SLIVER`, unless `seg` was already shorter than that
 /// itself, because `chain_loops` welds endpoints within `EPS` and would join a
 /// shorter piece's two ends to each other.
-fn split_seg(seg: &Seg, cuts: &mut Vec<(f32, Vec2)>) -> Vec<Seg> {
+fn split_seg(seg: &Seg, cuts: &mut Vec<(f64, Vec2)>) -> Vec<Seg> {
     let out = split_seg_inner(seg, cuts);
     assert!(!out.is_empty(), "a split left no pieces of {seg:?}");
     assert!(
@@ -469,7 +469,7 @@ fn split_seg(seg: &Seg, cuts: &mut Vec<(f32, Vec2)>) -> Vec<Seg> {
     out
 }
 
-fn split_seg_inner(seg: &Seg, cuts: &mut Vec<(f32, Vec2)>) -> Vec<Seg> {
+fn split_seg_inner(seg: &Seg, cuts: &mut Vec<(f64, Vec2)>) -> Vec<Seg> {
     match *seg {
         Seg::Line { a, b } => {
             // The margin is a distance, not a fraction. A parametric epsilon is
@@ -574,7 +574,7 @@ pub fn chain_loops<T: Copy>(segs: Vec<(Seg, T)>) -> Vec<Vec<(Seg, T)>> {
                 break;
             }
             let (kx, ky) = key(cur);
-            let mut best: Option<(usize, f32)> = None;
+            let mut best: Option<(usize, f64)> = None;
             for dx in -1..=1 {
                 for dy in -1..=1 {
                     let Some(list) = buckets.get(&(kx + dx, ky + dy)) else {
@@ -644,11 +644,11 @@ mod tests {
     use super::*;
     use crate::kernel::sketch::Sketch;
 
-    fn area(loops: &[Vec<Seg>]) -> f32 {
+    fn area(loops: &[Vec<Seg>]) -> f64 {
         loops.iter().map(|l| loop_area(l)).sum()
     }
 
-    fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<Seg> {
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Seg> {
         Sketch::rectangle((x0 + x1) * 0.5, (y0 + y1) * 0.5, x1 - x0, y1 - y0)
             .loops
             .remove(0)
@@ -766,7 +766,7 @@ mod tests {
             center: Vec2::new(5.0, 5.0),
             radius: 5.0,
             a0: 0.0,
-            a1: std::f32::consts::FRAC_PI_2,
+            a1: std::f64::consts::FRAC_PI_2,
         };
         let hits: usize = b[0].iter().map(|s| seg_seg_points(&corner, s).len()).sum();
         assert_eq!(
@@ -775,7 +775,7 @@ mod tests {
         );
         let i = region_intersection(&a, &b);
         assert!(!i.is_empty(), "arc/arc intersection produced nothing");
-        assert!(area(&i) > 0.0 && area(&i) < std::f32::consts::PI * 16.0);
+        assert!(area(&i) > 0.0 && area(&i) < std::f64::consts::PI * 16.0);
         assert_conserved(&a, &b);
     }
 
@@ -784,7 +784,7 @@ mod tests {
         let a = vec![rect(0.0, 0.0, 20.0, 20.0)];
         let b = vec![Sketch::circle(10.0, 10.0, 4.0).loops.remove(0)];
         let d = region_difference(&a, &b);
-        let expect = 400.0 - std::f32::consts::PI * 16.0;
+        let expect = 400.0 - std::f64::consts::PI * 16.0;
         assert!(
             (area(&d) - expect).abs() < 1e-2,
             "bore area {} vs {expect}",
@@ -793,14 +793,14 @@ mod tests {
     }
 }
 
-fn arc_covers(a0: f32, a1: f32, ang: f32) -> bool {
+fn arc_covers(a0: f64, a1: f64, ang: f64) -> bool {
     let (lo, hi) = (a0.min(a1), a0.max(a1));
-    let two_pi = std::f32::consts::TAU;
+    let two_pi = std::f64::consts::TAU;
     let k = ((lo - ang) / two_pi).ceil();
     ang + k * two_pi <= hi + 1e-6
 }
 
-pub fn point_seg_distance(p: Vec2, seg: &Seg) -> f32 {
+pub fn point_seg_distance(p: Vec2, seg: &Seg) -> f64 {
     match *seg {
         Seg::Line { a, b } => {
             let d = b - a;
@@ -820,7 +820,7 @@ pub fn point_seg_distance(p: Vec2, seg: &Seg) -> f32 {
             a1,
         } => {
             let v = p - center;
-            if v.length() > 1e-9 && arc_covers(a0, a1, f32::atan2(v.y, v.x)) {
+            if v.length() > 1e-9 && arc_covers(a0, a1, f64::atan2(v.y, v.x)) {
                 (v.length() - radius).abs()
             } else {
                 (p - a).length().min((p - b).length())
@@ -848,18 +848,18 @@ fn extremal_points(seg: &Seg, toward: Vec2) -> Vec<Vec2> {
                 .map(|&d| center + d * radius)
                 .filter(|q| {
                     let v = *q - center;
-                    arc_covers(a0, a1, f32::atan2(v.y, v.x))
+                    arc_covers(a0, a1, f64::atan2(v.y, v.x))
                 })
                 .collect()
         }
     }
 }
 
-pub fn seg_seg_distance(p: &Seg, q: &Seg) -> f32 {
+pub fn seg_seg_distance(p: &Seg, q: &Seg) -> f64 {
     if !seg_seg_points(p, q).is_empty() {
         return 0.0;
     }
-    let mut best = f32::INFINITY;
+    let mut best = f64::INFINITY;
     for (x, y) in [(p, q), (q, p)] {
         for e in [x.start(), x.end()] {
             best = best.min(point_seg_distance(e, y));
@@ -883,9 +883,9 @@ pub fn seg_seg_distance(p: &Seg, q: &Seg) -> f32 {
     best
 }
 
-pub fn min_loop_distance(a: &[Seg], b: &[Seg]) -> f32 {
+pub fn min_loop_distance(a: &[Seg], b: &[Seg]) -> f64 {
     let _perf = perf::scope(perf::Metric::MinLoopDistance);
-    let mut best = f32::INFINITY;
+    let mut best = f64::INFINITY;
     for p in a {
         for q in b {
             best = best.min(seg_seg_distance(p, q));
@@ -898,13 +898,13 @@ pub fn min_loop_distance(a: &[Seg], b: &[Seg]) -> f32 {
 }
 
 #[inline]
-fn aabb_gap(x: Aabb, y: Aabb) -> f32 {
+fn aabb_gap(x: Aabb, y: Aabb) -> f64 {
     let dx = (y.min.x - x.max.x).max(x.min.x - y.max.x).max(0.0);
     let dy = (y.min.y - x.max.y).max(x.min.y - y.max.y).max(0.0);
     (dx * dx + dy * dy).sqrt()
 }
 
-pub fn loops_within(a: &[Seg], b: &[Seg], limit: f32) -> bool {
+pub fn loops_within(a: &[Seg], b: &[Seg], limit: f64) -> bool {
     let _perf = perf::scope(perf::Metric::MinLoopDistance);
     if a.is_empty() || b.is_empty() || limit <= 0.0 {
         return false;
@@ -929,9 +929,9 @@ pub fn loops_within(a: &[Seg], b: &[Seg], limit: f32) -> bool {
 mod distance_tests {
     use super::*;
     use crate::kernel::sketch::Sketch;
-    use std::f32::consts::PI;
+    use std::f64::consts::PI;
 
-    fn line(ax: f32, ay: f32, bx: f32, by: f32) -> Seg {
+    fn line(ax: f64, ay: f64, bx: f64, by: f64) -> Seg {
         Seg::Line {
             a: Vec2::new(ax, ay),
             b: Vec2::new(bx, by),
@@ -1061,7 +1061,7 @@ mod prune_verification {
     #[test]
     fn the_verification_pass_actually_runs_when_enabled() {
         let _g = verifying();
-        let apart = |x: f32| {
+        let apart = |x: f64| {
             vec![vec![vec![
                 Seg::Line {
                     a: Vec2::new(x, 0.0),

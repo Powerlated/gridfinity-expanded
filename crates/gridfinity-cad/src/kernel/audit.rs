@@ -3,7 +3,7 @@ use crate::kernel::math::{Vec3, weld_key};
 use crate::kernel::topo::{EdgeId, Solid, VertexId};
 use std::collections::HashMap;
 
-const GEO_TOL: f32 = 1e-3;
+const GEO_TOL: f64 = 1e-6;
 
 #[derive(Debug, Clone, Default)]
 pub struct AuditReport {
@@ -262,7 +262,7 @@ pub fn face_loop_self_crossing(solid: &Solid, fid: usize) -> Option<SelfCrossing
                 _ => PER_EDGE,
             };
             for k in 0..n {
-                let f = k as f32 / n as f32;
+                let f = k as f64 / n as f64;
                 let t = if fwd {
                     ed.t0 + (ed.t1 - ed.t0) * f
                 } else {
@@ -278,11 +278,11 @@ pub fn face_loop_self_crossing(solid: &Solid, fid: usize) -> Option<SelfCrossing
         for &(s, e) in &spans {
             let mut prev = pts[s].x;
             for p in pts.iter_mut().take(e).skip(s + 1) {
-                while p.x - prev > std::f32::consts::PI {
-                    p.x -= std::f32::consts::TAU;
+                while p.x - prev > std::f64::consts::PI {
+                    p.x -= std::f64::consts::TAU;
                 }
-                while p.x - prev < -std::f32::consts::PI {
-                    p.x += std::f32::consts::TAU;
+                while p.x - prev < -std::f64::consts::PI {
+                    p.x += std::f64::consts::TAU;
                 }
                 prev = p.x;
             }
@@ -292,11 +292,11 @@ pub fn face_loop_self_crossing(solid: &Solid, fid: usize) -> Option<SelfCrossing
         for &(s, e) in &spans {
             let mut prev = pts[s].y;
             for p in pts.iter_mut().take(e).skip(s + 1) {
-                while p.y - prev > std::f32::consts::PI {
-                    p.y -= std::f32::consts::TAU;
+                while p.y - prev > std::f64::consts::PI {
+                    p.y -= std::f64::consts::TAU;
                 }
-                while p.y - prev < -std::f32::consts::PI {
-                    p.y += std::f32::consts::TAU;
+                while p.y - prev < -std::f64::consts::PI {
+                    p.y += std::f64::consts::TAU;
                 }
                 prev = p.y;
             }
@@ -475,10 +475,10 @@ fn audit_edge_on_surface(solid: &Solid, defects: &mut Vec<Defect>) {
         let mut mid_p = Vec3::ZERO;
         for &fi in &edge_faces[ei] {
             let surface = solid.faces[fi].surface;
-            let mut worst = 0.0f32;
+            let mut worst = 0.0f64;
             let mut worst_p = Vec3::ZERO;
             for k in 0..=SAMPLES {
-                let t = edge.t0 + (edge.t1 - edge.t0) * (k as f32 / SAMPLES as f32);
+                let t = edge.t0 + (edge.t1 - edge.t0) * (k as f64 / SAMPLES as f64);
                 let p = edge.curve.point(t);
                 if k == SAMPLES / 2 {
                     mid_p = p;
@@ -587,7 +587,7 @@ fn audit_loop_containment(solid: &Solid, defects: &mut Vec<Defect>) {
             continue;
         }
         let to_uv = |p: Vec3| face.surface.project(p);
-        let mut outer_uv: Vec<[f32; 2]> = Vec::new();
+        let mut outer_uv: Vec<[f64; 2]> = Vec::new();
         for &(e, fwd) in loops[0] {
             let s = &edge_pts[&e];
             let chain: Vec<Vec3> = if fwd {
@@ -608,7 +608,7 @@ fn audit_loop_containment(solid: &Solid, defects: &mut Vec<Defect>) {
         unwrap_angular(&mut outer_uv, face.surface);
 
         for (li, lp) in loops[1..].iter().enumerate() {
-            let mut worst_out: f32 = 0.0;
+            let mut worst_out: f64 = 0.0;
             let mut worst_uv = [0.0, 0.0];
             let mut worst_p = Vec3::ZERO;
             let mut any_out = false;
@@ -659,7 +659,7 @@ fn audit_loop_containment(solid: &Solid, defects: &mut Vec<Defect>) {
         if !matches!(face.surface, Surface::Plane { .. }) {
             continue;
         }
-        let area = |uv: &[[f32; 2]]| -> f32 {
+        let area = |uv: &[[f64; 2]]| -> f64 {
             let mut a = 0.0;
             for i in 0..uv.len() {
                 let j = (i + 1) % uv.len();
@@ -669,7 +669,7 @@ fn audit_loop_containment(solid: &Solid, defects: &mut Vec<Defect>) {
         };
         let mut net = area(&outer_uv).abs();
         for lp in loops[1..].iter() {
-            let mut hole: Vec<[f32; 2]> = Vec::new();
+            let mut hole: Vec<[f64; 2]> = Vec::new();
             for &(e, fwd) in lp.iter() {
                 let sp = &edge_pts[&e];
                 let chain: Vec<Vec3> = if fwd {
@@ -700,34 +700,34 @@ fn audit_loop_containment(solid: &Solid, defects: &mut Vec<Defect>) {
     }
 }
 
-fn unwrap_angular(uv: &mut Vec<[f32; 2]>, surface: crate::kernel::geom::Surface) {
+fn unwrap_angular(uv: &mut Vec<[f64; 2]>, surface: crate::kernel::geom::Surface) {
     use crate::kernel::geom::Surface;
     if matches!(surface, Surface::Plane { .. }) {
         return;
     }
     for k in 1..uv.len() {
-        while uv[k][0] - uv[k - 1][0] > std::f32::consts::PI {
-            uv[k][0] -= 2.0 * std::f32::consts::PI;
+        while uv[k][0] - uv[k - 1][0] > std::f64::consts::PI {
+            uv[k][0] -= 2.0 * std::f64::consts::PI;
         }
-        while uv[k][0] - uv[k - 1][0] < -std::f32::consts::PI {
-            uv[k][0] += 2.0 * std::f32::consts::PI;
+        while uv[k][0] - uv[k - 1][0] < -std::f64::consts::PI {
+            uv[k][0] += 2.0 * std::f64::consts::PI;
         }
     }
 }
 
-fn snap_to_unwrapped(uv: &mut [f32; 2], outer: &[[f32; 2]]) {
+fn snap_to_unwrapped(uv: &mut [f64; 2], outer: &[[f64; 2]]) {
     let nearest = outer.iter().min_by_key(|o| {
         let dv = (uv[1] - o[1]).abs();
         dv.to_bits()
     });
     if let Some(o) = nearest {
         let du = uv[0] - o[0];
-        let shift = (du / (2.0 * std::f32::consts::PI)).round() * 2.0 * std::f32::consts::PI;
+        let shift = (du / (2.0 * std::f64::consts::PI)).round() * 2.0 * std::f64::consts::PI;
         uv[0] -= shift;
     }
 }
 
-fn signed_outside_distance(uv: (f32, f32), poly: &[[f32; 2]]) -> f32 {
+fn signed_outside_distance(uv: (f64, f64), poly: &[[f64; 2]]) -> f64 {
     let (px, py) = (uv.0, uv.1);
     let n = poly.len();
     let mut inside = false;
@@ -743,7 +743,7 @@ fn signed_outside_distance(uv: (f32, f32), poly: &[[f32; 2]]) -> f32 {
         }
         j = i;
     }
-    let mut mind2 = f32::INFINITY;
+    let mut mind2 = f64::INFINITY;
     for w in 0..n {
         let a = poly[w];
         let b = poly[(w + 1) % n];
@@ -756,7 +756,7 @@ fn signed_outside_distance(uv: (f32, f32), poly: &[[f32; 2]]) -> f32 {
     if inside { -dist } else { dist }
 }
 
-fn dist2_point_to_seg(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+fn dist2_point_to_seg(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
     let dx = bx - ax;
     let dy = by - ay;
     let l2 = dx * dx + dy * dy;
@@ -776,7 +776,7 @@ fn face_outward_normal(solid: &Solid, fi: usize, p: Vec3) -> Vec3 {
     if f.sense { n } else { -n }
 }
 
-fn dist_to_surface(p: Vec3, s: Surface) -> f32 {
+fn dist_to_surface(p: Vec3, s: Surface) -> f64 {
     match s {
         Surface::Plane { origin, normal, .. } => (p - origin).dot(*normal).abs(),
         Surface::Cylinder {

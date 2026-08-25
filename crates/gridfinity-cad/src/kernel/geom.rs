@@ -14,9 +14,9 @@
 //! than a solve and what lets a writer emit the reference direction verbatim.
 
 use crate::kernel::math::{Dir, Vec3};
-use std::f32::consts::PI;
+use std::f64::consts::PI;
 
-pub type Uv = (f32, f32);
+pub type Uv = (f64, f64);
 
 /// The unit direction perpendicular to `axis` that lies nearest `hint`, or an
 /// arbitrary perpendicular where `hint` is parallel to the axis and names none.
@@ -36,11 +36,11 @@ pub fn perp_unit(axis: Dir, hint: Vec3) -> Dir {
 ///
 /// `ref_dir` is already perpendicular to `axis` -- every constructor here stores
 /// it that way -- so this is a read and a cross product, not an
-/// orthogonalisation. The pair is returned in `f32` because it feeds the
+/// orthogonalisation. The pair is returned in `f64` because it feeds the
 /// kernel's own arithmetic; a caller needing the exact reference direction takes
 /// it off the surface.
 pub fn radial_frame(axis: Dir, ref_dir: Dir) -> (Vec3, Vec3) {
-    (ref_dir.vec(), axis.cross_exact(ref_dir).vec())
+    (ref_dir.vec(), axis.cross_dir(ref_dir).vec())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -53,27 +53,27 @@ pub enum Surface {
     Cylinder {
         base: Vec3,
         axis: Dir,
-        radius: f32,
+        radius: f64,
         ref_dir: Dir,
     },
     Cone {
         pvec: Vec3,
         axis: Dir,
-        radius: f32,
-        half_angle: f32,
+        radius: f64,
+        half_angle: f64,
         ref_dir: Dir,
     },
     Torus {
         center: Vec3,
         axis: Dir,
-        major_r: f32,
-        minor_r: f32,
+        major_r: f64,
+        minor_r: f64,
         ref_dir: Dir,
     },
     Sphere {
         center: Vec3,
         axis: Dir,
-        radius: f32,
+        radius: f64,
         ref_dir: Dir,
     },
 }
@@ -102,7 +102,7 @@ impl Surface {
         }
     }
 
-    pub fn plane_z(z: f32) -> Surface {
+    pub fn plane_z(z: f64) -> Surface {
         Surface::Plane {
             origin: Vec3::new(0.0, 0.0, z),
             normal: Dir::from_f64([0.0, 0.0, 1.0]),
@@ -117,14 +117,14 @@ impl Surface {
         let Surface::Plane { normal, x_axis, .. } = *self else {
             panic!("only a plane has an in-plane basis, got {self:?}");
         };
-        (x_axis.vec(), normal.cross_exact(x_axis).vec())
+        (x_axis.vec(), normal.cross_dir(x_axis).vec())
     }
 
-    pub fn cylinder_z(base: Vec3, radius: f32) -> Surface {
+    pub fn cylinder_z(base: Vec3, radius: f64) -> Surface {
         Surface::cylinder(base, Vec3::Z, radius, Vec3::X)
     }
 
-    pub fn cylinder(base: Vec3, axis: Vec3, radius: f32, ref_dir: Vec3) -> Surface {
+    pub fn cylinder(base: Vec3, axis: Vec3, radius: f64, ref_dir: Vec3) -> Surface {
         let axis = Dir::new(axis);
         Surface::Cylinder {
             base,
@@ -136,7 +136,7 @@ impl Surface {
 
     /// The half-cone whose apex is at `apex` and which opens along +Z, its
     /// radius reaching `tan(half_angle)` one millimetre above the apex.
-    pub fn cone_z(apex: Vec3, half_angle: f32) -> Surface {
+    pub fn cone_z(apex: Vec3, half_angle: f64) -> Surface {
         Surface::cone(
             apex + Vec3::Z,
             Vec3::Z,
@@ -155,13 +155,13 @@ impl Surface {
     /// turning over, so the kernel names it too rather than leaving the choice
     /// to whoever reads the surface later. `axis` is stored pointing at the
     /// apex, opposite `open`, as a CONE node carries it.
-    pub fn cone(pvec: Vec3, open: Vec3, radius: f32, half_angle: f32, ref_dir: Vec3) -> Surface {
+    pub fn cone(pvec: Vec3, open: Vec3, radius: f64, half_angle: f64, ref_dir: Vec3) -> Surface {
         assert!(
             radius > 0.0,
             "a cone is named by a positive radius at a point of its axis, got {radius}"
         );
         assert!(
-            half_angle > 0.0 && half_angle < std::f32::consts::FRAC_PI_2,
+            half_angle > 0.0 && half_angle < std::f64::consts::FRAC_PI_2,
             "a cone's half angle lies strictly between zero and a quarter turn, got {half_angle}"
         );
         let axis = -Dir::new(open);
@@ -199,7 +199,7 @@ impl Surface {
         -axis
     }
 
-    pub fn torus_z(center: Vec3, major_r: f32, minor_r: f32) -> Surface {
+    pub fn torus_z(center: Vec3, major_r: f64, minor_r: f64) -> Surface {
         Surface::torus(center, Vec3::Z, major_r, minor_r, Vec3::X)
     }
 
@@ -214,7 +214,7 @@ impl Surface {
     /// is positive. A face cannot span both, its normal vanishing where they
     /// meet, so the surface names the sheet rather than leaving a later reader
     /// to infer it from the face.
-    pub fn torus(center: Vec3, axis: Vec3, major_r: f32, minor_r: f32, ref_dir: Vec3) -> Surface {
+    pub fn torus(center: Vec3, axis: Vec3, major_r: f64, minor_r: f64, ref_dir: Vec3) -> Surface {
         assert!(
             major_r != 0.0 && minor_r > 0.0,
             "a torus has a non-zero major radius and a positive minor one, got major {major_r} \
@@ -239,8 +239,8 @@ impl Surface {
     pub fn torus_through(
         center: Vec3,
         axis: Vec3,
-        major_r: f32,
-        minor_r: f32,
+        major_r: f64,
+        minor_r: f64,
         ref_dir: Vec3,
         on: Vec3,
     ) -> Surface {
@@ -266,7 +266,7 @@ impl Surface {
         out
     }
 
-    pub fn sphere(center: Vec3, radius: f32) -> Surface {
+    pub fn sphere(center: Vec3, radius: f64) -> Surface {
         Surface::Sphere {
             center,
             axis: Dir::from_f64([0.0, 0.0, 1.0]),
@@ -276,7 +276,7 @@ impl Surface {
     }
 
     #[inline]
-    fn radial_at(u: f32, d0: Vec3, d1: Vec3) -> Vec3 {
+    fn radial_at(u: f64, d0: Vec3, d1: Vec3) -> Vec3 {
         u.cos() * d0 + u.sin() * d1
     }
 
@@ -309,7 +309,7 @@ impl Surface {
         }
     }
 
-    fn normal_r(&self, radial: Vec3, v: f32) -> Vec3 {
+    fn normal_r(&self, radial: Vec3, v: f64) -> Vec3 {
         match *self {
             Surface::Plane { normal, .. } => normal.vec(),
             Surface::Cylinder { .. } => radial.normalize(),
@@ -326,7 +326,7 @@ impl Surface {
         }
     }
 
-    fn normal_ignores_v(&self, _v0: f32, _v1: f32) -> bool {
+    fn normal_ignores_v(&self, _v0: f64, _v1: f64) -> bool {
         match *self {
             Surface::Plane { .. } | Surface::Cylinder { .. } => true,
             Surface::Cone { .. } => true,
@@ -342,7 +342,7 @@ impl Surface {
         self.normal_r(Surface::radial_at(uv.0, d0, d1), uv.1)
     }
 
-    pub fn signed_distance(&self, p: Vec3) -> f32 {
+    pub fn signed_distance(&self, p: Vec3) -> f64 {
         match *self {
             Surface::Plane { origin, normal, .. } => (p - origin).dot(normal.vec()),
             Surface::Cylinder {
@@ -410,7 +410,7 @@ impl Surface {
         }
     }
 
-    pub fn uv_orientation(&self) -> f32 {
+    pub fn uv_orientation(&self) -> f64 {
         match *self {
             Surface::Plane { .. }
             | Surface::Cylinder { .. }
@@ -528,7 +528,7 @@ impl Prepared {
     }
 
     #[inline]
-    pub fn radial(&self, u: f32) -> Vec3 {
+    pub fn radial(&self, u: f64) -> Vec3 {
         Surface::radial_at(u, self.d0, self.d1)
     }
 
@@ -538,17 +538,17 @@ impl Prepared {
     }
 
     #[inline]
-    pub fn normal_at(&self, radial: Vec3, v: f32) -> Vec3 {
+    pub fn normal_at(&self, radial: Vec3, v: f64) -> Vec3 {
         self.surface.normal_r(radial, v)
     }
 
     #[inline]
-    pub fn normal_ignores_v(&self, v0: f32, v1: f32) -> bool {
+    pub fn normal_ignores_v(&self, v0: f64, v1: f64) -> bool {
         self.surface.normal_ignores_v(v0, v1)
     }
 }
 
-fn wrap_angle(a: f32) -> f32 {
+fn wrap_angle(a: f64) -> f64 {
     let mut a = a % (2.0 * PI);
     if a < 0.0 {
         a += 2.0 * PI;
@@ -565,24 +565,24 @@ pub enum Curve {
     Circle {
         center: Vec3,
         axis: Dir,
-        radius: f32,
+        radius: f64,
         ref_dir: Dir,
     },
     Ellipse {
         center: Vec3,
         axis: Dir,
         x_axis: Dir,
-        major: f32,
-        minor: f32,
+        major: f64,
+        minor: f64,
     },
     TorusSection {
         center: Vec3,
         axis: Dir,
         ref_dir: Dir,
-        major: f32,
-        minor: f32,
-        offset: f32,
-        branch: f32,
+        major: f64,
+        minor: f64,
+        offset: f64,
+        branch: f64,
     },
 }
 
@@ -598,13 +598,13 @@ impl Curve {
         }
     }
 
-    pub fn circle_z(center: Vec3, radius: f32) -> Curve {
+    pub fn circle_z(center: Vec3, radius: f64) -> Curve {
         Curve::circle(center, Vec3::Z, radius, Vec3::X)
     }
 
     /// The circle of `radius` about `center` in the plane through it normal to
     /// `axis`, with its parameter measured from the projection of `ref_dir`.
-    pub fn circle(center: Vec3, axis: Vec3, radius: f32, ref_dir: Vec3) -> Curve {
+    pub fn circle(center: Vec3, axis: Vec3, radius: f64, ref_dir: Vec3) -> Curve {
         let axis = Dir::new(axis);
         Curve::Circle {
             center,
@@ -614,7 +614,7 @@ impl Curve {
         }
     }
 
-    pub fn point(&self, t: f32) -> Vec3 {
+    pub fn point(&self, t: f64) -> Vec3 {
         match *self {
             Curve::Line { p0, dir } => p0 + t * dir.vec(),
             Curve::Circle {
@@ -633,7 +633,7 @@ impl Curve {
                 major,
                 minor,
             } => {
-                let y = axis.cross_exact(x_axis).vec();
+                let y = axis.cross_dir(x_axis).vec();
                 center + (major * t.cos()) * x_axis.vec() + (minor * t.sin()) * y
             }
             Curve::TorusSection {
@@ -657,7 +657,7 @@ impl Curve {
     /// d(point)/dt, in closed form. Not normalised -- callers wanting a
     /// direction normalise it themselves, and a zero-length result means the
     /// parameterisation is stationary there.
-    pub fn tangent(&self, t: f32) -> Vec3 {
+    pub fn tangent(&self, t: f64) -> Vec3 {
         match *self {
             Curve::Line { dir, .. } => dir.vec(),
             Curve::Circle {
@@ -676,7 +676,7 @@ impl Curve {
                 minor,
                 ..
             } => {
-                let y = axis.cross_exact(x_axis).vec();
+                let y = axis.cross_dir(x_axis).vec();
                 -(major * t.sin()) * x_axis.vec() + (minor * t.cos()) * y
             }
             Curve::TorusSection {
@@ -712,7 +712,7 @@ impl Curve {
 
     /// The ellipse of `major` and `minor` radii centred at `centre`, lying in
     /// the plane normal to `axis` with its parameter measured from `x_axis`.
-    pub fn ellipse(centre: Vec3, axis: Vec3, x_axis: Vec3, major: f32, minor: f32) -> Curve {
+    pub fn ellipse(centre: Vec3, axis: Vec3, x_axis: Vec3, major: f64, minor: f64) -> Curve {
         assert!(
             major >= minor && minor > 0.0,
             "an ellipse is named by its major and then its minor radius, both positive, got \
@@ -742,9 +742,9 @@ impl Curve {
         centre: Vec3,
         a: Vec3,
         b: Vec3,
-        t0: f32,
-        t1: f32,
-    ) -> (Curve, f32, f32) {
+        t0: f64,
+        t1: f64,
+    ) -> (Curve, f64, f64) {
         let (aa, bb, ab) = (a.dot(a), b.dot(b), a.dot(b));
         let theta = 0.5 * (2.0 * ab).atan2(aa - bb);
         let (s, c) = theta.sin_cos();
@@ -758,7 +758,7 @@ impl Curve {
         );
         if x.length() < y.length() {
             (x, y) = (y, -x);
-            shift += std::f32::consts::FRAC_PI_2;
+            shift += std::f64::consts::FRAC_PI_2;
         }
         let normal = x.cross(y);
         assert!(
@@ -794,17 +794,17 @@ impl Curve {
         else {
             panic!("only an ellipse has conjugate axes, got {self:?}");
         };
-        (x_axis.vec() * major, axis.cross_exact(x_axis).vec() * minor)
+        (x_axis.vec() * major, axis.cross_dir(x_axis).vec() * minor)
     }
 
     pub fn torus_section(
         center: Vec3,
         axis: Vec3,
         plane_normal: Vec3,
-        plane_offset: f32,
-        major: f32,
-        minor: f32,
-        branch: f32,
+        plane_offset: f64,
+        major: f64,
+        minor: f64,
+        branch: f64,
     ) -> Curve {
         let axis = Dir::new(axis);
         Curve::TorusSection {
@@ -818,7 +818,7 @@ impl Curve {
         }
     }
 
-    pub fn torus_section_exists(major: f32, minor: f32, offset: f32, t: f32) -> bool {
+    pub fn torus_section_exists(major: f64, minor: f64, offset: f64, t: f64) -> bool {
         let rad = major + minor * t.cos();
         rad > 0.0 && offset.abs() <= rad
     }

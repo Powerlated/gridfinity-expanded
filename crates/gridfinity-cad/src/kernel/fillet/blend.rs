@@ -177,7 +177,7 @@ fn build_cyl_blend(
     ta_p1: Vec3,
     tb_p0: Vec3,
     tb_p1: Vec3,
-    r: f32,
+    r: f64,
     fwd_a: bool,
 ) -> Result<Fillet, String> {
     let dir = match ed.curve {
@@ -232,8 +232,8 @@ fn circle_span(
     ref_dir: Dir,
     p0: Vec3,
     p1: Vec3,
-    src: (f32, f32),
-) -> (f32, f32) {
+    src: (f64, f64),
+) -> (f64, f64) {
     let (d0, d1) = crate::kernel::geom::radial_frame(axis, ref_dir);
     let angle = |p: Vec3| {
         let v = p - center;
@@ -241,11 +241,11 @@ fn circle_span(
     };
     let span = src.1 - src.0;
     let t0 = angle(p0);
-    if span.abs() >= std::f32::consts::TAU - 1e-3 {
+    if span.abs() >= std::f64::consts::TAU - 1e-3 {
         return (t0, t0 + span);
     }
     let want = angle(p1);
-    let miss = |s: f32| wrap_pi(t0 + s - want).abs();
+    let miss = |s: f64| wrap_pi(t0 + s - want).abs();
     let sweep = if miss(span.abs()) <= miss(-span.abs()) {
         span.abs()
     } else {
@@ -271,8 +271,8 @@ fn build_torus_blend(
     ta_p1: Vec3,
     tb_p0: Vec3,
     tb_p1: Vec3,
-    r: f32,
-    cyl: (Vec3, Vec3, f32),
+    r: f64,
+    cyl: (Vec3, Vec3, f64),
     fwd_a: bool,
 ) -> Result<Fillet, String> {
     let (cyl_base, cyl_axis, _cyl_radius) = cyl;
@@ -387,11 +387,11 @@ fn connect_arc(center: Vec3, along: Vec3, from_pt: Vec3, to_pt: Vec3) -> Result<
     let sweep = {
         let v = to_pt - center;
         let mut a = v.dot(d1).atan2(v.dot(ref_dir));
-        while a > std::f32::consts::PI {
-            a -= 2.0 * std::f32::consts::PI;
+        while a > std::f64::consts::PI {
+            a -= 2.0 * std::f64::consts::PI;
         }
-        while a < -std::f32::consts::PI {
-            a += 2.0 * std::f32::consts::PI;
+        while a < -std::f64::consts::PI {
+            a += 2.0 * std::f64::consts::PI;
         }
         a
     };
@@ -419,7 +419,7 @@ mod tests {
         let ce = connect_arc(center, axis, from, to).expect("a quarter-turn ball corner");
         assert!(approx(ce.curve.point(ce.t0), from), "arc start");
         assert!(approx(ce.curve.point(ce.t1), to), "arc end");
-        assert!(((ce.t1 - ce.t0).abs() - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
+        assert!(((ce.t1 - ce.t0).abs() - std::f64::consts::FRAC_PI_2).abs() < 1e-4);
     }
 
     #[test]
@@ -429,7 +429,7 @@ mod tests {
         let ref_dir = Dir::new(Vec3::X);
         let p0 = Vec3::new(80.0, 5.45, 23.7);
         let p1 = Vec3::new(78.55, 4.0, 23.7);
-        let src = (0.0, -std::f32::consts::FRAC_PI_2);
+        let src = (0.0, -std::f64::consts::FRAC_PI_2);
         let (t0, t1) = circle_span(center, axis, ref_dir, p0, p1, src);
         let c = Curve::circle(center, *axis, 1.45, *ref_dir);
         assert!(approx(c.point(t0), p0), "span start {:?}", c.point(t0));
@@ -440,10 +440,10 @@ mod tests {
     fn circle_span_keeps_a_full_turn_a_full_turn() {
         let center = Vec3::ZERO;
         let p = Vec3::new(3.0, 0.0, 0.0);
-        let src = (0.0, std::f32::consts::TAU);
+        let src = (0.0, std::f64::consts::TAU);
         let (t0, t1) = circle_span(center, Dir::new(Vec3::Z), Dir::new(Vec3::X), p, p, src);
         assert!(
-            (t1 - t0 - std::f32::consts::TAU).abs() < 1e-4,
+            (t1 - t0 - std::f64::consts::TAU).abs() < 1e-4,
             "sweep {}",
             t1 - t0
         );

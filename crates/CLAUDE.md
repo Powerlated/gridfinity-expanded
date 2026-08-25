@@ -99,14 +99,14 @@ Run with `-- --ignored`; the counts below are what a deliberate run should repro
 
 | profile | varies | status at default seed |
 | --- | --- | --- |
-| `fuzz_inner_walls` | freeform walls on a fixed 2×2 | **red 21/150** — 9 defects |
+| `fuzz_inner_walls` | freeform walls on a fixed 2×2 | **red 20/150** — 8 defects |
 | `fuzz_tidy_inner_walls` | tidy walls, up to 3 so they cross | green |
-| `fuzz_wall_openings` | `open_edges` + `divider_edges` on rectangles | green |
+| `fuzz_wall_openings` | `open_edges` + `divider_edges` on rectangles | **red 2/150** — 1 defect, new at f64 |
 | `fuzz_openings_and_inner_walls` | both at once | green (was 6/150) |
 | `fuzz_bin_shapes` | polyominoes, flood-fill pieces | green |
 | `fuzz_split_pieces` | polyominoes, `SplitLine`s + `partition_cells` | green (was 1/120) |
 | `fuzz_stripped_polyominoes` | polyominoes, **half** the perimeter wall opened | green (was 15/150) |
-| `fuzz_params_broad` | everything, incl. reentrant corners, slope, baseplate | **red 7/400** — 3 defects |
+| `fuzz_params_broad` | everything, incl. reentrant corners, slope, baseplate | **red 8/400** — 4 defects |
 
 Every red was already failing before, on a `known` list or behind a `require_blends` opt-out or both. Nothing is a regression; the counts are the backlog. `fuzz_inner_walls` went 8 → 9 classes at the same 21 cases when the blend-chain kink became an `Err` instead of an assertion: cases that used to abort now report a named refusal, which is a class the old message absorbed. Compare **case counts**. Check the table before assuming a failure is yours. `fuzz_wall_openings` additionally clean at six seeds (default, 1, 7, 13, 42, 99) and at `FUZZ_CASES=600`.
 
@@ -456,17 +456,29 @@ Pure logic beside `printers.rs`, no kernel dependency, four modules: `rects` (ax
 
 Pipeline: **`sketch` → `build` (features) → `topo` (B-rep solid) → `fillet` → `tess` → `mesh` → STL**, or the same B-rep straight out as Parasolid XT via **`xt`** — no tessellation on that path. Paths under `src/kernel/` unless noted.
 
-### `Dir`, in `math.rs` — directions are f64
+### The kernel models in f64
 
-**A direction is `Dir`, never `Vec3`: unit in f64, established at construction.** The kernel models in f32 and a direction is the one quantity that cannot afford to — an f32 unit vector is unit only to about **6.7e-8** once widened, six times the `res_linear` of 1e-8 a transmit file declares, and a Parasolid frustrum measures that as non-unit and faults the face. That was a real Onshape refusal, and repairing it in the writer was repairing it after the fact.
+**`Vec2`/`Vec3` are `glam`'s `DVec2`/`DVec3`, and every coordinate, parameter and tolerance in `gridfinity-cad` is `f64`.** Four functions narrow to `f32`, all of them at the very end and all of them because their consumer is: `Mesh::flat_vertices`, `Mesh::to_stl_binary` (binary STL is `f32` by spec), `Tessellation::render_buffer` and `welded_render_buffer` (wgpu vertex buffers). Nothing upstream of those is `f32`.
 
-`Dir` holds both views: `exact: [f64; 3]` for whoever writes it out (`components()`), `approx: Vec3` for the kernel's own arithmetic (`vec()`, and `Deref`, which is what lets consumers call `Vec3`'s methods on a direction unchanged — `*axis` where an operator needs the vector). `Dir::new` normalises in f64 and asserts the residue against `UNIT_RESIDUE` = 1e-15; `perp_to` is one f64 Gram-Schmidt step and asserts the residual the same way.
+**What it bought, precisely: the drawer's blend-chain kink.** The refusal was `edges 3832 and 3835 put the ball centre at vertex 2180 4.236e-2 mm apart`, a **1.0114°** turn where the two edges should be tangent. The configuration is a **tangency**: a divider's rounded end cap (circle centre `(80.85, 175.25)`, r 0.6) meets the neighbouring divider's face at `x = 80.85 + 0.6 = 81.45` in exactly one point. A tangency is where a line/circle solve **square-root-amplifies** representation error -- the crossings sit at `±sqrt(2·r·δ)` for `δ` the miss -- so `δ` of 9.35e-5 mm, about **12 f32 ulps at 81 mm**, came out as 0.0106 mm of offset and 1.01° of turn, two orders past the 0.5° `MAX_JOIN_KINK` allows. At f64 the same 12 ulps is 1.7e-13 mm and the turn is 4e-5°. Retired: the drawer now lands **259 of 283** floor fillets where it landed 175 of 204, and its first refusal is a different class entirely.
 
-**The exact accessors are named apart: `dot_exact`, `cross_exact`.** A plain `.dot` on a `Dir` resolves through `Deref` to `Vec3::dot` and keeps its f32 meaning. Inherent methods win over deref, so naming them `dot`/`cross` silently promoted kernel arithmetic to f64 at every call site that had been doing f32 — which is a precision change nobody asked for, hidden behind an unchanged-looking line.
+**What it did not buy: the fuzz backlog, which is structural.** `fuzz_inner_walls` 21/150 → **20/150**, `fuzz_params_broad` 7/400 → **8/400**. The largest classes are missing B-rep operators -- the ramp running out into a needle, runout onto a cylinder, three blended edges at a vertex -- and no precision reaches them. Do not expect a precision change to move a count that names a missing capability.
 
-Every surface axis, plane normal, reference direction and line direction is a `Dir`. A rotational surface stores `ref_dir` **already perpendicular to its axis**, so `radial_frame` is a read and a cross product rather than an orthogonalisation, and `Surface::Plane` needs no `v_dir` — it is `normal × x_axis`, and a stored second copy could disagree.
+**The tolerances that only ever absorbed `f32` noise came down with it**, and the lib gate and all eight profiles were byte-identical across the change -- which is the evidence that they were allowance rather than judgement. `END_AGREE` 1e-4 → 1e-9 and `ON_EDGE` 1e-3 → 1e-8 (two derivations of one point, now bounded near the 1.4e-14 an `f64` ulp is at 100 mm); `EXTREME_TIE_MM` 1e-3 → 1e-9; `SAME_PLANE_DIST` 1e-4 → 1e-9 and `SAME_PLANE_SIN` 1e-5 → 1e-10; `PERP_TOL` 1e-4 → 1e-9; `audit`'s `GEO_TOL` 1e-3 → 1e-6.
 
-### `geom.rs`
+**Two were deliberately left alone, and the reason is the rule.** `isect::TOL` (1e-5) separates a genuine tangency or parallel from a near one -- a statement about the *model's* scale, not the arithmetic's -- and `xt::validate::ON_GEOMETRY_M` is `res_linear` itself, because what it asks is whether a **reader** would accept the file and a tolerance the validator picks for itself is a number the reader has never heard of. Tighten a tolerance when it was standing in for the precision; leave it when it is standing for a feature size or someone else's contract. `SLIVER`/`COINCIDENT`, `BOX_TOL` and `weld_key`'s quantum are the same kind and are untouched.
+
+**It cost one profile.** `fuzz_wall_openings` went green → **2/150**, one class: a 0.175 mm sliver edge at a reentrant corner left unpaired (`edge 416 used fwd=1 bwd=0`, from `(84.152, 42.0)` to `(84.066, 42.152)`). Not a tolerance -- 0.175 mm is far above `SLIVER` in either precision -- but a configuration the f32 geometry happened not to produce. Undiagnosed.
+
+**Cost in time:** a fitted drawer builds in 0.67 s against 0.40 s and exports its STLs in 1.05 s against 0.83 s. `Tri` doubled to 144 bytes and the profile's note that tessellation is memory-bound is why that shows up in export more than anywhere else.
+
+**`Dir` collapsed to a single vector.** It used to hold `exact: [f64; 3]` beside `approx: Vec3` because the kernel modelled in `f32` and a direction was the one quantity that could not afford to: an `f32` unit vector is unit only to about 6.7e-8 once widened, six times the `res_linear` of 1e-8 a transmit file declares, and Onshape faulted every peg chamfer on it. With the kernel in `f64` the two views are the same number, so `Dir` is a newtype over `Vec3`, `components()` reads it out for the writer, and `dot_exact`/`cross_exact` -- named apart precisely *because* the two precisions differed -- are gone; `Deref`'s own `dot` is the same arithmetic, and `cross_dir` is the one that returns a `Dir`. `Dir::new` still normalises and asserts against `UNIT_RESIDUE`, because a direction being unit is a property worth establishing once wherever the value is made, independent of precision.
+
+**The wasm boundary widened too**, and that removed a conversion rather than adding one: a JavaScript number *is* an IEEE double, so `gridfinity-wasm`'s `f32` parameters were narrowing one on the way in. Its vertex buffers stay `f32` (they are `Float32Array` views and wgpu uploads). Same for the packer: `project/` was always `f64`, so `Wall::to_inner_wall` and `optimize`'s `drawer_params` no longer cast at all.
+
+**`gridfinity-app` is the one crate that stays mixed**, because egui screen space is `f32` and the kernel is `f64`. `main.rs` imports `glam::Vec3` (every use of it there is render-side), `wireframe.rs` imports the kernel's and narrows where points reach the line buffer, and `editor.rs` narrows an `InnerWall`'s millimetres where they reach the painter. `render_point` is the one named crossing.
+
+### `geom.rs`### `geom.rs`
 
 Analytic `Surface` (`Plane`/`Cylinder`/`Cone`/`Torus`/`Sphere`) and `Curve` (`Line`/`Circle`/`Ellipse`/`TorusSection`). `TorusSection` = torus cut by a plane **parallel to its axis** — implicitly a quartic, which is why a plane split through a floor-fillet corner blend used to be inexpressible. Not solved numerically: fixing minor angle `t` fixes ring radius `major + minor·cos t`, hence `cos u = offset / rad`, so the section parameterises exactly in `t` with `branch = ±1` picking the half. `torus_section_exists` reports where `|offset| <= rad` bounds the domain; outside it the section does not exist and the caller must not sample.
 

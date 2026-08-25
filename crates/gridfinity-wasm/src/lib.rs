@@ -17,22 +17,22 @@ const ARC_SEGMENTS_PER_QUARTER: usize = 16;
 struct Wall {
     start: Point2,
     end: Point2,
-    width: f32,
+    width: f64,
 }
 
 #[derive(serde::Deserialize)]
 struct Point2 {
-    x: f32,
-    y: f32,
+    x: f64,
+    y: f64,
 }
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BinParams {
     bin_id: String,
-    height: f32,
-    perimeter_thickness: f32,
-    fillet_radius: f32,
+    height: f64,
+    perimeter_thickness: f64,
+    fillet_radius: f64,
     fasteners: Fasteners,
     cells: Vec<GridCell>,
     openings: Vec<GridEdge>,
@@ -196,7 +196,16 @@ pub fn badapple_fps() -> f64 {
 #[wasm_bindgen]
 pub fn badapple_bounds() -> js_sys::Float32Array {
     let (min, max) = gridfinity_cad::badapple::bounds();
-    js_sys::Float32Array::from(&[min[0], min[1], min[2], max[0], max[1], max[2]][..])
+    js_sys::Float32Array::from(
+        &[
+            min[0] as f32,
+            min[1] as f32,
+            min[2] as f32,
+            max[0] as f32,
+            max[1] as f32,
+            max[2] as f32,
+        ][..],
+    )
 }
 
 #[wasm_bindgen]
@@ -271,7 +280,7 @@ mod tests {
     #[test]
     fn height_maps_to_the_same_total_millimetres() {
         for units in 2..=20u32 {
-            let mm = units as f32 * 7.0;
+            let mm = units as f64 * 7.0;
             let json = ONE_CELL.replace("\"height\": 21", &format!("\"height\": {mm}"));
             let p = parse(&json)[0].to_params();
             assert_eq!(
@@ -381,7 +390,7 @@ mod tests {
             {"x":0,"y":1},{"x":2,"y":1},{"x":0,"y":2},{"x":1,"y":2},{"x":2,"y":2}]"#;
         const U: &str = r#""cells":[{"x":0,"y":0},{"x":1,"y":0},{"x":2,"y":0},
             {"x":0,"y":1},{"x":2,"y":1},{"x":0,"y":2},{"x":2,"y":2}]"#;
-        let cases: &[(&str, f32, f32, &str, &str)] = &[
+        let cases: &[(&str, f64, f64, &str, &str)] = &[
             ("ring baseline", 21.0, 2.8, RING, "[]"),
             ("ring + fillet 5", 21.0, 5.0, RING, "[]"),
             ("U + slider-max fillet", 14.0, 5.6, U, "[]"),
