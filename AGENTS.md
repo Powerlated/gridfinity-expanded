@@ -111,7 +111,7 @@ Changing the geometry pipeline (`src/lib/geometry/`, `src/lib/project/`, `crates
 - `cargo test --release --workspace -- --ignored --nocapture` — the fuzzers, benchmarks and perf reports, all `#[ignore]`d so no ordinary run pays for them
 - `npm run test:e2e` — Chromium Playwright smoke
 - `npm run classify:changes -- <base> <head>` — CI gate classification
-- `cargo run -- optimize <in.toml> --format <stl|parasolid_x_t> <out> [--view]` — headless drawer fitting; `examples/drawer.toml` is a worked input. Its report's **Soundness** section names what was checked and on what; a failure is a named error and exit 1, and never a partial file — `fit` runs under the app's `catch` and the STL writer tessellates every piece before writing any.
+- `cargo run -- optimize <in.toml> --format <stl|parasolid_x_t> <out> [--view]` — headless drawer fitting; `examples/drawer.toml` is a worked input. Its report's **Soundness** section names what was checked and on what; a failure is a named error and exit 1, and never a partial file — `fit` runs under the app's `catch` and the STL writer tessellates every piece before writing any. `--view` opens the fit in the egui debugger with a wireframe box around every packed object, red where the object stands taller than the compartment it was packed into; see `crates/CLAUDE.md`.
 
 Lint + build on every non-trivial code change. Don't add Vitest coverage by default during rapid feature development; run existing Vitest when changing printer, cut-to-part, or export behavior it covers.
 

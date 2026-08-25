@@ -11,8 +11,9 @@
 //! build every piece, and read back what each piece is made of. Each stage's
 //! result is kept on the `Run` rather than recomputed, so `report` prints what
 //! was actually built. `run` is the whole
-//! invocation and returns the `Params` to show when `--view` was given, so the
-//! window opens on the bin already in memory rather than on a file written for
+//! invocation and returns the `View` to show when `--view` was given -- the bin
+//! and the boxes of the objects it was cut for -- so the window opens on the fit
+//! already in memory rather than on a file written for
 //! it. Failure at any stage is an `Err` and never a partial file -- `fit` runs
 //! under the app's own `catch`, so an invariant the kernel asserts while
 //! building arrives as a named error and exit 1 rather than a backtrace, and it
@@ -22,6 +23,7 @@ use crate::export::{self, Format};
 use crate::input::{self, Spec};
 use crate::report;
 use gridfinity_cad::gridfinity::{self, BinPiece, InnerWall, LogicalBin, Mode, Params};
+use gridfinity_cad::kernel::math::Vec3;
 use gridfinity_cad::kernel::program::BlendReport;
 use gridfinity_cad::kernel::topo::Solid;
 use gridfinity_cad::layout::{GridCell, Piece, SplitLine, partition_cells};
@@ -67,6 +69,65 @@ impl Run {
     pub fn claim_margin(&self) -> f64 {
         self.spec.clearance + self.spec.divider_thickness / 2.0
     }
+}
+
+/// One placed object's box, in the bin's own millimetre coordinates: what the
+/// packer reserved for it, standing on the cavity floor.
+///
+/// `fits` is whether the object's stated height clears the cavity, which is the
+/// same question the report's warnings answer in words -- a box that does not
+/// fit still stands its full height, poking out of the bin it was packed into,
+/// because hiding that is hiding the warning.
+pub struct ObjectBox {
+    pub min: Vec3,
+    pub max: Vec3,
+    pub fits: bool,
+}
+
+/// Everything `--view` opens the window on: the bin to rebuild, and the boxes of
+/// the objects it was cut for.
+pub struct View {
+    pub params: Params,
+    pub boxes: Vec<ObjectBox>,
+}
+
+/// Every placed instance's boxes, lifted from the packer's millimetre rectangles
+/// into the bin's own coordinates: each part rectangle standing on the cavity
+/// floor, rising by the height its object declared, or filling the cavity when
+/// it declared none.
+///
+/// `packing_area` is already in the bin's coordinates, so a placement's
+/// rectangles need no transform -- the rotation the packer chose is baked into
+/// the rectangles themselves. An object made of several boxes contributes one
+/// box per part rather than one bounding box over all of them, so an L-shaped
+/// object reads as the L it is and not as the rectangle around it.
+fn object_boxes(run: &Run) -> Vec<ObjectBox> {
+    let depth = run.spec.cavity_depth();
+    let floor = gridfinity::BASE_TOTAL_HEIGHT + gridfinity::FLOOR_THICKNESS;
+    let mut out = Vec::new();
+    for placement in &run.result.placements {
+        let object = run
+            .spec
+            .objects
+            .iter()
+            .find(|o| o.pack.id == placement.object_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the packer placed {:?}, which is not one of the {} objects it was given",
+                    placement.object_id,
+                    run.spec.objects.len()
+                )
+            });
+        let height = object.height.unwrap_or(depth);
+        for part in &placement.parts {
+            out.push(ObjectBox {
+                min: Vec3::new(part.x, part.y, floor),
+                max: Vec3::new(part.right(), part.bottom(), floor + height),
+                fits: height <= depth,
+            });
+        }
+    }
+    out
 }
 
 /// What one built piece is made of, and what the audit had to say that was not
@@ -235,8 +296,9 @@ fn fit(spec: Spec) -> Result<Run, String> {
 }
 
 /// One `optimize` invocation, end to end: read, fit, write, report. Returns the
-/// bin to open a window on when `--view` was given, and `None` otherwise.
-pub fn run(rest: &[String]) -> Result<Option<Params>, String> {
+/// bin to open a window on, and the object boxes to draw in it, when `--view`
+/// was given, and `None` otherwise.
+pub fn run(rest: &[String]) -> Result<Option<View>, String> {
     let args = parse_args(rest)?;
     args.format.check_output(&args.output)?;
     let text = std::fs::read_to_string(&args.input)
@@ -252,7 +314,10 @@ pub fn run(rest: &[String]) -> Result<Option<Params>, String> {
     run.export_time = started.elapsed();
 
     report::print(&run, &written);
-    Ok(args.view.then_some(run.params))
+    Ok(args.view.then(|| View {
+        boxes: object_boxes(&run),
+        params: run.params,
+    }))
 }
 
 #[cfg(test)]
@@ -332,6 +397,71 @@ size = [34, 34]
             "four compartments in one bin need dividers between them"
         );
         assert_eq!(run.wall_report.generated, run.result.walls.len());
+    }
+
+    /// The same drawer, with the heights stated: one block that clears the
+    /// cavity and one that does not.
+    const TALL: &str = "[drawer]
+width = 84
+depth = 84
+
+[settings]
+effort = \"quick\"
+height_units = 3
+
+[[objects]]
+name = \"low\"
+quantity = 2
+size = [34, 34, 5]
+
+[[objects]]
+name = \"high\"
+quantity = 2
+size = [34, 34, 200]
+";
+
+    #[test]
+    fn every_placed_object_stands_on_the_cavity_floor_inside_the_packing_area() {
+        let spec = input::parse(TALL).expect("the fixture is a valid run");
+        let run = fit(spec).expect("a two-cell drawer of four blocks builds");
+        let boxes = object_boxes(&run);
+
+        assert_eq!(
+            boxes.len(),
+            run.result.placements.len(),
+            "each of these objects is a single box, so it contributes exactly one"
+        );
+        let floor = gridfinity::BASE_TOTAL_HEIGHT + gridfinity::FLOOR_THICKNESS;
+        for b in &boxes {
+            assert!(
+                (b.min.z - floor).abs() < 1e-9,
+                "a packed object stands on the cavity floor at {floor}, not at {}",
+                b.min.z
+            );
+            assert!(
+                b.min.x >= run.area.x
+                    && b.min.y >= run.area.y
+                    && b.max.x <= run.area.right()
+                    && b.max.y <= run.area.bottom(),
+                "the packer placed {b_min:?}..{b_max:?} outside the {area:?} it packs into",
+                b_min = b.min,
+                b_max = b.max,
+                area = run.area
+            );
+        }
+        let too_tall: Vec<&ObjectBox> = boxes.iter().filter(|b| !b.fits).collect();
+        assert_eq!(
+            too_tall.len(),
+            2,
+            "the two 200 mm objects do not clear a {} mm cavity",
+            run.spec.cavity_depth()
+        );
+        for b in too_tall {
+            assert!(
+                b.max.z - b.min.z > run.spec.cavity_depth(),
+                "an object that does not fit still stands its full height, or the drawing                  hides the warning"
+            );
+        }
     }
 
     #[test]

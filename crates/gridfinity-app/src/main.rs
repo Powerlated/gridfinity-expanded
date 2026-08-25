@@ -201,7 +201,9 @@ usage:
                           which is a directory and is created if it does not exist
   --format parasolid_x_t  writes every piece as a body of one Parasolid transmit
                           file at <output>
-  --view        opens the fitted bin in the debugger once it is written
+  --view        opens the fitted bin in the debugger once it is written, with a
+                wireframe box around every packed object -- red where the object
+                stands taller than the compartment it was packed into
 ";
 
 /// Dispatches the command line: `optimize` runs the fitter and opens a window
@@ -215,7 +217,7 @@ fn main() -> eframe::Result<()> {
     let initial = match argv.split_first() {
         Some((first, rest)) if first == "optimize" => match optimize::run(rest) {
             Ok(view) => match view {
-                Some(params) => Some(params),
+                Some(view) => Some(view),
                 None => return Ok(()),
             },
             Err(message) => {
@@ -233,8 +235,8 @@ fn main() -> eframe::Result<()> {
     window(initial)
 }
 
-/// Opens the construction debugger, on the given bin when there is one.
-fn window(initial: Option<Params>) -> eframe::Result<()> {
+/// Opens the construction debugger, on the given fit when there is one.
+fn window(initial: Option<optimize::View>) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
@@ -259,6 +261,8 @@ struct App {
     camera: Camera,
     quality: Quality,
     labels: Vec<wireframe::Label>,
+    object_boxes: Vec<optimize::ObjectBox>,
+    show_object_boxes: bool,
     dirty: bool,
     program_dirty: bool,
     tri_count: usize,
@@ -280,7 +284,7 @@ struct BadApple {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, initial: Option<Params>) -> App {
+    fn new(cc: &eframe::CreationContext<'_>, initial: Option<optimize::View>) -> App {
         let state =
             cc.wgpu_render_state.as_ref().expect("this build requires the wgpu backend");
         let gpu = Gpu {
@@ -292,8 +296,14 @@ impl App {
             Renderer::new(&gpu.device, &state.adapter)
                 .expect("the wgpu backend must build the viewport pipelines"),
         ));
+        let (params, object_boxes) = match initial {
+            Some(view) => (view.params, view.boxes),
+            None => (Params::default(), Vec::new()),
+        };
         let mut app = App {
-            params: initial.unwrap_or_default(),
+            show_object_boxes: !object_boxes.is_empty(),
+            object_boxes,
+            params,
             editor: Editor::default(),
             debugger: Debugger::default(),
             printer: DEFAULT_PRINTER,
@@ -341,6 +351,12 @@ impl App {
         if dbg_solid.is_none() && self.debugger.is_shown() {
             for (profile, plane) in self.debugger.sketch_planes() {
                 wf.add_sketch(profile, plane, PREVIEW_RES, wireframe::SKETCH_BLACK);
+            }
+        }
+        if self.show_object_boxes {
+            for b in &self.object_boxes {
+                let color = if b.fits { wireframe::OBJECT_BLUE } else { wireframe::OBJECT_RED };
+                wf.add_box(b.min, b.max, color);
             }
         }
         self.labels = wf.labels;
@@ -802,6 +818,22 @@ impl App {
                 self.export_config(&ctx);
             }
         });
+        if !self.object_boxes.is_empty() {
+            let too_tall = self.object_boxes.iter().filter(|b| !b.fits).count();
+            let mut show = self.show_object_boxes;
+            if ui
+                .checkbox(&mut show, format!("Object boxes ({too_tall} too tall)"))
+                .on_hover_text(
+                    "The boxes the packer reserved for the fitted objects, standing on the \
+                     cavity floor. Red is an object taller than the compartment it was \
+                     packed into.",
+                )
+                .changed()
+            {
+                self.show_object_boxes = show;
+                self.dirty = true;
+            }
+        }
         ui.label(format!("{} triangles", self.tri_count));
         if !self.status.is_empty() {
             ui.add_space(4.0);
