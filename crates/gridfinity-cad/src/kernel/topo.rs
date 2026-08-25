@@ -960,6 +960,85 @@ impl Solid {
         EdgeFaces { off, flat }
     }
 
+    /// The vertices no edge names, in ascending id order.
+    ///
+    /// The builder interns a vertex the moment a construction asks for one, and
+    /// a construction that then discards the edge it was for leaves the vertex
+    /// behind. Such a vertex is on no face, bounds nothing and is written to no
+    /// export -- a point floating in the arena. `compact_vertices` is what
+    /// removes them; this is what names them.
+    pub fn orphan_vertices(&self) -> Vec<VertexId> {
+        let mut named = vec![false; self.verts.len()];
+        for e in &self.edges {
+            named[e.v0] = true;
+            named[e.v1] = true;
+        }
+        (0..self.verts.len()).filter(|&v| !named[v]).collect()
+    }
+
+    /// The edges no face's loop uses, in ascending id order.
+    ///
+    /// `validate` rejects these outright and `validate_ignoring_unused_edges`
+    /// tolerates them, because the interning arena outlives the edges a
+    /// construction abandoned. An orphan edge bounds no face, so it is a curve
+    /// floating in the arena the way an orphan vertex is a point.
+    pub fn orphan_edges(&self) -> Vec<EdgeId> {
+        let mut used = vec![false; self.edges.len()];
+        for &(e, _) in &self.loop_edges {
+            used[e] = true;
+        }
+        (0..self.edges.len()).filter(|&e| !used[e]).collect()
+    }
+
+    /// Drops every vertex no edge names, renumbering the survivors in place and
+    /// repointing each edge's endpoints at their new ids.
+    ///
+    /// Face loops name edges, not vertices, so they are untouched. Vertex ids
+    /// are meaningful only within one solid -- nothing selects geometry by one
+    /// across a build, the way blend selections name `EdgeId`s -- which is what
+    /// makes this safe where compacting edges is not.
+    fn compact_vertices(&mut self) {
+        let orphans = self.orphan_vertices();
+        if orphans.is_empty() {
+            return;
+        }
+        let before = self.verts.len();
+        let mut orphan = vec![false; before];
+        for &v in &orphans {
+            orphan[v] = true;
+        }
+        let mut remap = vec![usize::MAX; before];
+        let mut next = 0usize;
+        for v in 0..before {
+            if !orphan[v] {
+                remap[v] = next;
+                self.verts.swap(next, v);
+                next += 1;
+            }
+        }
+        self.verts.truncate(next);
+        assert_eq!(
+            before - next,
+            orphans.len(),
+            "compacting drops exactly the vertices no edge names, but {} of {before} went and              {} were orphans",
+            before - next,
+            orphans.len()
+        );
+        for e in &mut self.edges {
+            for v in [&mut e.v0, &mut e.v1] {
+                assert!(
+                    remap[*v] != usize::MAX,
+                    "vertex {v} is named by an edge, so it was not an orphan and survives                      compaction"
+                );
+                *v = remap[*v];
+            }
+        }
+        assert!(
+            self.orphan_vertices().is_empty(),
+            "compaction leaves every remaining vertex named by an edge"
+        );
+    }
+
     fn compact_edges(&mut self) {
         let mut used = vec![false; self.edges.len()];
         for &(e, _) in &self.loop_edges {
@@ -1362,9 +1441,19 @@ impl Builder {
         solid
     }
 
+    /// Builds without validating and drops whatever the construction stranded:
+    /// the edges no face kept, then the vertices no surviving edge names.
+    ///
+    /// This is the exit a **resumed** builder must take. `resume` carries the
+    /// whole vertex and edge arena forward so that ids resolved before the
+    /// rebuild -- which is how blends are selected -- stay valid across it, and
+    /// a local rewrite then replaces the edges at the corner it reshaped. Both
+    /// the replaced edges and the vertices that were named by nothing else are
+    /// left behind by that, and neither belongs in the finished solid.
     pub fn build_compact_unvalidated(self) -> Solid {
         let mut s = self.build_unvalidated();
         s.compact_edges();
+        s.compact_vertices();
         s
     }
 }

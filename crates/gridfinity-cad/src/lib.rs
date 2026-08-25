@@ -216,6 +216,109 @@ mod tests {
         assert!((size.z - 5.0).abs() < 1e-3, "z {}", size.z);
     }
 
+    /// Emits a closed box into `b`. `outward` false makes it a void: the faces
+    /// carry their normals into the box, so the material is whatever is outside
+    /// it.
+    fn emit_box(
+        b: &mut crate::kernel::topo::Builder,
+        rect: &Sketch,
+        z0: f32,
+        z1: f32,
+        outward: bool,
+    ) {
+        use crate::kernel::build::{ring, wall_between};
+        use crate::kernel::geom::Surface;
+        use crate::kernel::math::{Vec3, vec3_of};
+        use crate::kernel::topo::Loop;
+        let segs = rect.loops[0].clone();
+        let lo = ring(b, &segs, z0);
+        let hi = ring(b, &segs, z1);
+        wall_between(b, &segs, &segs, &lo, &hi, z0, z1, outward);
+        // A cavity's walls traverse exactly like a solid's -- `outward` flips
+        // only the surface normal -- so its caps must too, or the two disagree
+        // and the ring is left unpaired. Winding is solid either way and
+        // `sense` is what carries the material side.
+        b.face(
+            Surface::plane_z(z1),
+            outward,
+            Loop::new(hi.edges.clone()),
+            vec![],
+        );
+        b.face(
+            Surface::plane(vec3_of(0.0, 0.0, z0), -Vec3::Z),
+            outward,
+            Loop::new(lo.edges.iter().rev().map(|&(e, d)| (e, !d)).collect()),
+            vec![],
+        );
+    }
+
+    /// Two lumps of material in one solid are two shells, and both of them have
+    /// their material inside. This is the reading `carve_to_cells` refuses when
+    /// the piece's cells are one island: a second shell there is material that
+    /// broke off the part.
+    #[test]
+    fn two_separated_lumps_of_material_are_two_shells_that_both_enclose_it() {
+        let mut b = crate::kernel::topo::Builder::new();
+        emit_box(&mut b, &Sketch::rectangle(0.0, 0.0, 10.0, 10.0), 0.0, 5.0, true);
+        emit_box(&mut b, &Sketch::rectangle(50.0, 0.0, 10.0, 10.0), 0.0, 5.0, true);
+        let solid = b.build();
+        solid.validate().expect("two disjoint boxes are each closed");
+
+        let shells = solid.shells();
+        assert_eq!(shells.len(), 2, "two lumps of material are two shells");
+        assert!(
+            shells.iter().all(|sh| sh.encloses_material),
+            "each lump has its own material inside it"
+        );
+    }
+
+    /// A void sealed inside material is a second shell with the material
+    /// *outside* it. Nothing downstream of the carve can see this -- it
+    /// tessellates and welds like any other closed surface, and only the X_T
+    /// writer refused it -- so it is the shell's own material side that names
+    /// it.
+    #[test]
+    fn a_void_sealed_inside_material_is_a_shell_that_encloses_none() {
+        let mut b = crate::kernel::topo::Builder::new();
+        emit_box(&mut b, &Sketch::rectangle(0.0, 0.0, 20.0, 20.0), 0.0, 10.0, true);
+        emit_box(&mut b, &Sketch::rectangle(0.0, 0.0, 10.0, 10.0), 2.0, 8.0, false);
+        let solid = b.build();
+        solid.validate().expect("a box around a sealed cavity is closed");
+
+        let shells = solid.shells();
+        assert_eq!(shells.len(), 2, "the outer surface and the cavity's");
+        assert_eq!(
+            shells.iter().filter(|sh| sh.encloses_material).count(),
+            1,
+            "exactly one of the two has material inside it; the other bounds the void"
+        );
+    }
+
+    /// Every solid the kernel hands out is free of geometry nothing names: a
+    /// vertex on no edge and an edge on no face are both left behind by a local
+    /// rebuild, which resumes on the whole arena so that ids resolved before it
+    /// survive it, and `build_compact_unvalidated` is where they are dropped.
+    ///
+    /// The floor fillet is the one op in a bin that strands any: before it every
+    /// prefix of the program is clean, and it leaves the cavity corner's old
+    /// tangent points and the junctions `fuse_collinear_edges` dissolved.
+    #[test]
+    fn a_built_bin_carries_no_vertex_or_edge_that_nothing_names() {
+        for (gx, gy) in [(1, 1), (2, 2), (3, 2)] {
+            let solid = gridfinity::build(&Params::rect(gx, gy));
+            assert!(
+                solid.orphan_vertices().is_empty(),
+                "{gx}x{gy} keeps {} vertex(es) no edge names",
+                solid.orphan_vertices().len()
+            );
+            assert!(
+                solid.orphan_edges().is_empty(),
+                "{gx}x{gy} keeps {} edge(s) no face uses",
+                solid.orphan_edges().len()
+            );
+        }
+    }
+
     #[test]
     fn rounded_rect_prism_is_valid_and_watertight() {
         let s = Sketch::rounded_rect(0.0, 0.0, 40.0, 30.0, 5.0);

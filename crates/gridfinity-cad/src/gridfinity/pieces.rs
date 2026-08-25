@@ -17,7 +17,7 @@ use crate::kernel::math::{Vec2, Vec3};
 use crate::kernel::rectregion::{RectF, trace_rects};
 use crate::kernel::split::{Cut, Side, trim};
 use crate::kernel::topo::Solid;
-use crate::layout::{GridCell, partition_cells};
+use crate::layout::{GridCell, compartments, partition_cells};
 
 /// Cut one printable piece out of the finished bin: keep the material inside the
 /// vertical prism over the piece's cells. A piece is any connected polyomino, not
@@ -79,10 +79,75 @@ pub fn carve_to_cells(
         return Err("a piece traced no boundary".into());
     }
     let cut = Cut::prism(&loops, Vec3::Z)?;
-    if !straddles(whole, &cut) {
-        return Ok(whole.clone());
+    let piece = if straddles(whole, &cut) {
+        trim(whole, &cut)?
+    } else {
+        whole.clone()
+    };
+    assert_piece_is_sound(&piece, piece_cells);
+    Ok(piece)
+}
+
+/// Asserts that `piece` is the sound, printable body its cell set describes.
+///
+/// A piece leaves here closed and manifold, geometrically sound under `audit`,
+/// bounded by exactly one shell per connected island of `piece_cells` with
+/// material inside every one of them, and carrying no vertex or edge that
+/// nothing names. Cutting is the last thing that happens to a bin, so this is
+/// the last point at which any of it can be stated -- past here the piece is
+/// triangles or a transmit file, where a detached lump of material reads as
+/// ordinary geometry.
+///
+/// The island count comes from `layout::compartments` over the cells with no
+/// divider between any of them, which is the same connected-components pass the
+/// cavity walk runs on: a piece cut into two arms must come back as two shells,
+/// and a piece that is one polyomino must come back as one.
+fn assert_piece_is_sound(piece: &Solid, piece_cells: &[GridCell]) {
+    if let Err(e) = piece.validate() {
+        panic!("a carved piece is not a closed manifold: {e}");
     }
-    trim(whole, &cut)
+    let audited = crate::audit(piece);
+    assert!(
+        audited.is_ok(),
+        "a carved piece is not geometrically sound:
+{audited}"
+    );
+    let orphan_verts = piece.orphan_vertices();
+    assert!(
+        orphan_verts.is_empty(),
+        "a carved piece carries {} vertex(es) no edge names, the first at {:?}",
+        orphan_verts.len(),
+        piece.verts[orphan_verts[0]].point
+    );
+    let orphan_edges = piece.orphan_edges();
+    assert!(
+        orphan_edges.is_empty(),
+        "a carved piece carries {} edge(s) no face uses, the first being edge {}",
+        orphan_edges.len(),
+        orphan_edges[0]
+    );
+    let shells = piece.shells();
+    let voids: Vec<usize> = shells
+        .iter()
+        .enumerate()
+        .filter(|(_, sh)| !sh.encloses_material)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        voids.is_empty(),
+        "a carved piece encloses {} void(s) of {} shell(s); shell {} has the material outside it,          so it bounds a cavity sealed inside the part",
+        voids.len(),
+        shells.len(),
+        voids[0]
+    );
+    let islands = compartments(piece_cells, &Default::default()).len();
+    assert_eq!(
+        shells.len(),
+        islands,
+        "a piece of {} cell(s) in {islands} island(s) is bounded by one shell per island, but          this one has {} -- material stands detached from the part",
+        piece_cells.len(),
+        shells.len()
+    );
 }
 
 pub(super) fn piece_is_enclosed(bin_cells: &[GridCell], piece_cells: &[GridCell]) -> bool {

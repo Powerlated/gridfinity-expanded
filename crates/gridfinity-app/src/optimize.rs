@@ -8,17 +8,22 @@
 //! of packing and building is the same mistake reported far too late. `fit`: resolve the drawer to a
 //! cell grid and a packing rectangle, pack the objects into it, turn the
 //! boundaries between them into dividers, split the bin for the printer's bed,
-//! and build every piece. Each stage's result is kept on the `Run` rather than
-//! recomputed, so `report` prints what was actually built. `run` is the whole
+//! build every piece, and read back what each piece is made of. Each stage's
+//! result is kept on the `Run` rather than recomputed, so `report` prints what
+//! was actually built. `run` is the whole
 //! invocation and returns the `Params` to show when `--view` was given, so the
 //! window opens on the bin already in memory rather than on a file written for
-//! it. Failure at any stage is an `Err` and never a partial file.
+//! it. Failure at any stage is an `Err` and never a partial file -- `fit` runs
+//! under the app's own `catch`, so an invariant the kernel asserts while
+//! building arrives as a named error and exit 1 rather than a backtrace, and it
+//! fires before the writer has touched anything.
 
 use crate::export::{self, Format};
 use crate::input::{self, Spec};
 use crate::report;
 use gridfinity_cad::gridfinity::{self, BinPiece, InnerWall, LogicalBin, Mode, Params};
 use gridfinity_cad::kernel::program::BlendReport;
+use gridfinity_cad::kernel::topo::Solid;
 use gridfinity_cad::layout::{GridCell, Piece, SplitLine, partition_cells};
 use gridfinity_cad::printers::compute_auto_split_lines;
 use gridfinity_cad::project::drawer::{DrawerGrid, MAX_GRID, drawer_cells, drawer_grid, packing_area};
@@ -50,6 +55,7 @@ pub struct Run {
     pub parts: Vec<Piece>,
     pub pieces: Vec<BinPiece>,
     pub blends: BlendReport,
+    pub soundness: Vec<PieceSoundness>,
     pub pack_time: Duration,
     pub build_time: Duration,
     pub export_time: Duration,
@@ -61,6 +67,45 @@ impl Run {
     pub fn claim_margin(&self) -> f64 {
         self.spec.clearance + self.spec.divider_thickness / 2.0
     }
+}
+
+/// What one built piece is made of, and what the audit had to say that was not
+/// serious enough to stop it.
+///
+/// Every field here is read off a piece that has already passed the gate in
+/// `carve_to_cells`, so `shells` is the piece's island count and the audit
+/// carried no errors. It is printed so a run says out loud that the check
+/// happened and on what -- a silent gate and a missing gate read the same.
+pub struct PieceSoundness {
+    pub name: String,
+    pub shells: usize,
+    pub faces: usize,
+    pub edges: usize,
+    pub verts: usize,
+    pub warnings: usize,
+}
+
+/// What each built piece is made of, in the order the model built them.
+fn soundness_of(pieces: &[BinPiece]) -> Vec<PieceSoundness> {
+    pieces
+        .iter()
+        .map(|piece| {
+            let solid: &Solid = &piece.solid;
+            assert!(
+                solid.orphan_vertices().is_empty() && solid.orphan_edges().is_empty(),
+                "{} reached the report with geometry nothing names, which the carve gate refuses",
+                piece.name
+            );
+            PieceSoundness {
+                name: piece.name.clone(),
+                shells: solid.shells().len(),
+                faces: solid.faces.len(),
+                edges: solid.edges.len(),
+                verts: solid.verts.len(),
+                warnings: gridfinity_cad::audit(solid).warnings().count(),
+            }
+        })
+        .collect()
 }
 
 /// The command line as `Args`, or a message saying what is wrong with it. The
@@ -168,6 +213,8 @@ fn fit(spec: Spec) -> Result<Run, String> {
         parts.len()
     );
 
+    let soundness = soundness_of(&pieces);
+
     Ok(Run {
         spec,
         grid,
@@ -180,6 +227,7 @@ fn fit(spec: Spec) -> Result<Run, String> {
         parts,
         pieces,
         blends,
+        soundness,
         pack_time,
         build_time,
         export_time: Duration::ZERO,
@@ -194,7 +242,7 @@ pub fn run(rest: &[String]) -> Result<Option<Params>, String> {
     let text = std::fs::read_to_string(&args.input)
         .map_err(|e| format!("could not read {}: {e}", args.input.display()))?;
     let spec = input::parse(&text).map_err(|e| format!("{}: {e}", args.input.display()))?;
-    let mut run = fit(spec)?;
+    let mut run = crate::catch(|| fit(spec))?;
 
     let started = Instant::now();
     let written = match args.format {
@@ -304,6 +352,41 @@ size = [34, 34]
             covered, want,
             "the pieces must partition the bin's cells exactly, covering each once"
         );
+    }
+
+    /// Every piece a run writes is one lump of material with nothing floating
+    /// beside it. `carve_to_cells` asserts this as it produces each piece, so
+    /// reaching here at all is most of the check; what this adds is that the
+    /// report's own copy of the numbers agrees with the solids it was read off,
+    /// since a report that recomputed them could disagree with what was written.
+    #[test]
+    fn every_piece_it_writes_is_one_sound_body() {
+        let spec = input::parse(SMALL).expect("the fixture is a valid run");
+        let run = fit(spec).expect("a two-cell drawer of four blocks builds");
+
+        assert_eq!(run.soundness.len(), run.pieces.len());
+        for (piece, sound) in run.pieces.iter().zip(&run.soundness) {
+            assert_eq!(sound.name, piece.name);
+            assert_eq!(
+                sound.shells, 1,
+                "{} is one rectangular slab of cells, so it is one shell",
+                piece.name
+            );
+            assert_eq!(sound.faces, piece.solid.faces.len());
+            assert_eq!(sound.edges, piece.solid.edges.len());
+            assert_eq!(sound.verts, piece.solid.verts.len());
+            assert!(
+                piece.solid.shells().iter().all(|sh| sh.encloses_material),
+                "{} bounds no sealed void",
+                piece.name
+            );
+            assert!(
+                piece.solid.orphan_vertices().is_empty()
+                    && piece.solid.orphan_edges().is_empty(),
+                "{} carries no geometry nothing names",
+                piece.name
+            );
+        }
     }
 
     #[test]

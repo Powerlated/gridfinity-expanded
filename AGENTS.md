@@ -38,6 +38,7 @@ Prefer Mantine controls/layout over custom UI. Cross-app control styling → `th
 
 - Tabs read/write only through `useAppStore()` commands. Keep `Design`, `BinParameters`, `Bin` plain and structured-clone compatible.
 - The UI alone enforces validity — controls constrain their own ranges and dependent values. No store clamping, no validation layer. A shape change resets that bin's openings, walls, and cuts, then reseeds required cuts.
+- **A carved piece is checked where it is produced, not where it is written.** `carve_to_cells` asserts that every piece it returns is a closed manifold, audits clean, is bounded by exactly one shell per island of its cells with material inside every one of them, and carries no vertex or edge that nothing names. That covers the STL path, the X_T path, the preview and the `optimize` command at once, because a piece is only ever made in that one place. Do not add a second, weaker check downstream, and do not relax this one: a shell too many is material that broke off the part, and nothing after the carve can see it — a detached lump tessellates and welds like any other closed surface.
 - `generateGeometry()` is the sole production geometry path. Geometry must not plan cuts, name parts, inspect printers, validate input, normalize coordinates, or localize. Manifoldness is verified in the Rust kernel only; no TypeScript manifold verifier exists or may be reintroduced.
 - Preview data may be grouped, coloured and positioned; export data must preserve coordinates, topology, orientation, and per-piece meaning. Both consume the identical `BinPiece.vertices` buffer (`Tessellation::welded_render_buffer()`); a piece never moves in the buffer. Never export the raw unwelded `render_buffer()` — it leaks.
 - **Split pieces sit exactly where the kernel put them.** There is no kerf and no preview gap: carved pieces abut on the cut plane. The viewer's "Show gaps" button drives an *explode view* instead — `previewLayout()` hands each piece a unit `apartDirection` (piece centroid away from the bin centroid), the wasm `Viewer` owns the displacement (`set_explode`, millimetres along that direction), and `ModelViewer` eases the distance per frame. Nothing about it reaches the geometry or the export path.
@@ -110,7 +111,7 @@ Changing the geometry pipeline (`src/lib/geometry/`, `src/lib/project/`, `crates
 - `cargo test --release --workspace -- --ignored --nocapture` — the fuzzers, benchmarks and perf reports, all `#[ignore]`d so no ordinary run pays for them
 - `npm run test:e2e` — Chromium Playwright smoke
 - `npm run classify:changes -- <base> <head>` — CI gate classification
-- `cargo run -- optimize <in.toml> --format <stl|parasolid_x_t> <out> [--view]` — headless drawer fitting; `examples/drawer.toml` is a worked input
+- `cargo run -- optimize <in.toml> --format <stl|parasolid_x_t> <out> [--view]` — headless drawer fitting; `examples/drawer.toml` is a worked input. Its report's **Soundness** section names what was checked and on what; a failure is a named error and exit 1, and never a partial file — `fit` runs under the app's `catch` and the STL writer tessellates every piece before writing any.
 
 Lint + build on every non-trivial code change. Don't add Vitest coverage by default during rapid feature development; run existing Vitest when changing printer, cut-to-part, or export behavior it covers.
 

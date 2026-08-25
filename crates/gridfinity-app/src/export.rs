@@ -83,24 +83,32 @@ pub struct Written {
 
 /// Every piece written into `dir` as its own binary STL, named as the model
 /// names it. The directory is created when it does not exist.
+///
+/// Every piece is tessellated before any file is written, so a piece the
+/// tessellator refuses -- `tessellate` asserts its own mesh is watertight --
+/// leaves the directory as it found it rather than half a set of parts.
 pub fn write_stl_dir(dir: &Path, pieces: &[BinPiece]) -> Result<Vec<Written>, String> {
     assert!(
         !pieces.is_empty(),
         "an export with no pieces reached the writer, which has nothing to write"
     );
+    let files: Vec<(PathBuf, Vec<u8>, usize)> = pieces
+        .iter()
+        .map(|piece| {
+            let mesh = tessellate(&piece.solid, EXPORT_RES).to_mesh();
+            (dir.join(&piece.name), mesh.to_stl_binary(), mesh.tri_count())
+        })
+        .collect();
     std::fs::create_dir_all(dir)
         .map_err(|e| format!("could not create the output directory {}: {e}", dir.display()))?;
     let mut out = Vec::with_capacity(pieces.len());
-    for piece in pieces {
-        let mesh = tessellate(&piece.solid, EXPORT_RES).to_mesh();
-        let bytes = mesh.to_stl_binary();
-        let path = dir.join(&piece.name);
+    for (path, bytes, tris) in files {
         std::fs::write(&path, &bytes)
             .map_err(|e| format!("could not write {}: {e}", path.display()))?;
         out.push(Written {
             path,
             bytes: bytes.len(),
-            contents: Contents::Triangles(mesh.tri_count()),
+            contents: Contents::Triangles(tris),
         });
     }
     Ok(out)

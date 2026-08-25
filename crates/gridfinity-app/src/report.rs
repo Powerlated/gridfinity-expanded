@@ -1,9 +1,10 @@
 //! What an `optimize` run tells the user about itself.
 //!
-//! `print` writes the whole report to stdout in nine sections -- the drawer it
+//! `print` writes the whole report to stdout in ten sections -- the drawer it
 //! resolved, the objects it was given, how the packing went, where each instance
 //! landed, the dividers that came out of it, what became of the rounding, how the
-//! bin had to be split for the printer, the files written, and the warnings. Nothing here decides
+//! bin had to be split for the printer, what each built piece is made of, the
+//! files written, and the warnings. Nothing here decides
 //! anything: every number is read back off the finished `Run`, so the report
 //! cannot disagree with the geometry. The section helpers (`heading`, `field`,
 //! `row`) exist only so the columns line up; the measurement helpers (`mm`,
@@ -97,6 +98,7 @@ pub fn print(run: &Run, written: &[Written]) {
     dividers(run);
     rounding(run);
     printing(run);
+    soundness(run);
     output(run, written);
     warnings(run);
 }
@@ -444,6 +446,39 @@ fn printing(run: &Run) {
 
 /// Every file written, with its size and what it holds, and how long each stage
 /// took.
+/// What the pieces are made of, one row each.
+///
+/// Every piece listed here has already passed the gate in `carve_to_cells` --
+/// closed, manifold, geometrically sound, one shell per island of its cells with
+/// material inside it, and carrying nothing that no face or edge names. This
+/// section says so with the numbers it holds, because a check that leaves no
+/// trace in the output is indistinguishable from one that never ran.
+fn soundness(run: &Run) {
+    heading("Soundness");
+    field(
+        "checked",
+        &format!(
+            "{} piece(s): closed manifold, audit clean, one shell per island, no stray geometry",
+            run.soundness.len()
+        ),
+    );
+    row(&format!(
+        "{:<38}{:>8}{:>10}{:>10}{:>10}{:>10}",
+        "piece", "shells", "faces", "edges", "verts", "warnings"
+    ));
+    for p in &run.soundness {
+        row(&format!(
+            "{:<38}{:>8}{:>10}{:>10}{:>10}{:>10}",
+            p.name,
+            p.shells,
+            thousands(p.faces as i64),
+            thousands(p.edges as i64),
+            thousands(p.verts as i64),
+            p.warnings
+        ));
+    }
+}
+
 fn output(run: &Run, written: &[Written]) {
     heading("Output");
     for w in written {
