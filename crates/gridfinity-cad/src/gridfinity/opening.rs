@@ -27,14 +27,14 @@ pub(super) struct OpenSpan {
     pub(super) hi: f64,
 }
 
-pub(super) fn open_spans(cells: &[GridCell], walls: &EffectiveWalls) -> Vec<OpenSpan> {
+pub(super) fn open_spans(cells: &[GridCell], pitch: f64, walls: &EffectiveWalls) -> Vec<OpenSpan> {
     let set: HashSet<GridCell> = cells.iter().copied().collect();
     walls
         .open
         .iter()
         .filter(|e| edge_inside_cell(&set, e).is_some())
         .map(|e| {
-            let p = GRID_PITCH;
+            let p = pitch;
             match e.orientation {
                 Orientation::H => OpenSpan {
                     horiz: true,

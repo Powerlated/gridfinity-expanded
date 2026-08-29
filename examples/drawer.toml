@@ -3,11 +3,15 @@
 #   cargo run -- optimize examples/drawer.toml --format stl out
 #   cargo run -- optimize examples/drawer.toml --format parasolid_x_t drawer.x_t --view
 
+# Every measurement may be a bare number of millimetres or a string carrying a
+# unit: mm, cm, m, in, ft. See examples/ikea-alex-drawer-1.toml.
+
 [drawer]
 width = 400            # the drawer's inside measurements, in mm
 depth = 300
 
 [settings]             # every key here is optional
+grid_size = 42         # the cell pitch; 42 mm is the Gridfinity standard
 divider_thickness = 1.2
 clearance = 0.5
 effort = "standard"    # quick | standard | thorough

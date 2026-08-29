@@ -485,8 +485,9 @@ mod tests {
             400.0,
             300.0,
             crate::project::drawer::MAX_GRID,
+            gridfinity::GRID_PITCH,
         ));
-        let lines = crate::printers::compute_auto_split_lines(&cells, printer);
+        let lines = crate::printers::compute_auto_split_lines(&cells, printer, gridfinity::GRID_PITCH);
         assert!(
             !lines.is_empty(),
             "a 9 x 7 baseplate is 378 x 294 mm and fits no {} bed, so it must be split",
@@ -510,7 +511,8 @@ mod tests {
             assert!(
                 crate::printers::check_bed_fit(
                     &crate::layout::partition_cells(&cells, &lines)[piece.piece].cells,
-                    printer
+                    printer,
+                    gridfinity::GRID_PITCH,
                 )
                 .fits,
                 "{} still does not fit the bed it was split for",
@@ -523,6 +525,114 @@ mod tests {
         assert!(
             (summed - whole).abs() < whole * 1e-3,
             "the {} pieces hold {summed} mm3 of the intact plate's {whole} mm3",
+            pieces.len()
+        );
+    }
+
+    /// The XY extent of a solid, as `(min_x, max_x, min_y, max_y)`.
+    fn xy_extent(solid: &Solid) -> (f64, f64, f64, f64) {
+        solid.verts.iter().fold(
+            (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY),
+            |(lx, hx, ly, hy), v| {
+                (
+                    lx.min(v.point.x),
+                    hx.max(v.point.x),
+                    ly.min(v.point.y),
+                    hy.max(v.point.y),
+                )
+            },
+        )
+    }
+
+    /// A plate margin is the drawer millimetres the grid does not cover, and the
+    /// plate spans them: half on each side of the cell grid, so the grid stays
+    /// centred and the plate's outer dimension is the drawer's own. The sockets
+    /// do not move -- the bin still drops into the same cells.
+    #[test]
+    fn a_plate_margin_grows_the_outline_around_a_centred_grid() {
+        let (mx, my) = (16.0, 5.0);
+        let p = gridfinity::Params {
+            mode: Mode::Baseplate,
+            plate_margin_x: mx,
+            plate_margin_y: my,
+            ..gridfinity::Params::rect(2, 2)
+        };
+        let plain = gridfinity::build(&gridfinity::Params {
+            mode: Mode::Baseplate,
+            ..gridfinity::Params::rect(2, 2)
+        });
+        let solid = gridfinity::build(&p);
+        let span = 2.0 * gridfinity::GRID_PITCH;
+        let (lx, hx, ly, hy) = xy_extent(&solid);
+        assert!(
+            (lx + mx / 2.0).abs() < 1e-9
+                && (hx - (span + mx / 2.0)).abs() < 1e-9
+                && (ly + my / 2.0).abs() < 1e-9
+                && (hy - (span + my / 2.0)).abs() < 1e-9,
+            "a {span} mm grid with {mx} x {my} mm of margin spans {lx}..{hx} by {ly}..{hy}"
+        );
+        assert!(
+            (hx - lx - (span + mx)).abs() < 1e-9 && (hy - ly - (span + my)).abs() < 1e-9,
+            "the plate's outer dimension is the drawer's own, grid plus margin"
+        );
+        let plain_vol = signed_volume(&tessellate(&plain, 6).to_mesh());
+        let vol = signed_volume(&tessellate(&solid, 6).to_mesh());
+        assert!(
+            vol > plain_vol,
+            "the flange is material, so {vol} mm3 must exceed the unflanged plate's {plain_vol} mm3"
+        );
+        let shells = solid.shells();
+        assert_eq!(shells.len(), 1, "a flanged rectangular plate is one plate");
+        assert!(shells[0].encloses_material, "the flanged plate bounds no material");
+    }
+
+    /// The flange survives the carve: a split plate's pieces are each sound and
+    /// hold, between them, the whole flanged plate. Conservation is what catches
+    /// a prism that cut the flange off or claimed it twice -- per-piece
+    /// manifoldness passes straight over both.
+    #[test]
+    fn a_flanged_baseplate_carves_into_pieces_that_keep_the_flange() {
+        let printer = crate::printers::DEFAULT_PRINTER;
+        let cells = crate::project::drawer::drawer_cells(crate::project::drawer::drawer_grid(
+            400.0,
+            300.0,
+            crate::project::drawer::MAX_GRID,
+            gridfinity::GRID_PITCH,
+        ));
+        let lines =
+            crate::printers::compute_auto_split_lines(&cells, printer, gridfinity::GRID_PITCH);
+        let p = gridfinity::Params {
+            mode: Mode::Baseplate,
+            plate_margin_x: 400.0 - 9.0 * gridfinity::GRID_PITCH,
+            plate_margin_y: 300.0 - 7.0 * gridfinity::GRID_PITCH,
+            bins: vec![LogicalBin {
+                cells: cells.clone(),
+                split_lines: lines.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let whole_solid = gridfinity::build(&p);
+        let (lx, hx, ly, hy) = xy_extent(&whole_solid);
+        assert!(
+            (hx - lx - 400.0).abs() < 1e-9 && (hy - ly - 300.0).abs() < 1e-9,
+            "a plate fitted to a 400 x 300 mm drawer spans {} x {} mm",
+            hx - lx,
+            hy - ly
+        );
+        let pieces = gridfinity::try_build_pieces(&p).expect("a flanged drawer baseplate builds");
+        assert_eq!(pieces.len(), crate::layout::partition_cells(&cells, &lines).len());
+        for piece in &pieces {
+            let shells = piece.solid.shells();
+            assert_eq!(shells.len(), 1, "{} is one plate", piece.name);
+            assert!(shells[0].encloses_material, "{} bounds no material", piece.name);
+        }
+        let vol = |s: &Solid| signed_volume(&tessellate(s, 6).to_mesh());
+        let whole = vol(&whole_solid);
+        let summed: f64 = pieces.iter().map(|pc| vol(&pc.solid)).sum();
+        assert!(
+            (summed - whole).abs() < whole * 1e-3,
+            "the {} flanged pieces hold {summed} mm3 of the intact plate's {whole} mm3",
             pieces.len()
         );
     }
@@ -1205,7 +1315,7 @@ mod tests {
         let vol = |s: &Solid| signed_volume(&tessellate(s, 6).to_mesh());
         let mut sum = 0.0;
         for (i, part) in parts.iter().enumerate() {
-            let piece = gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &part.cells)
+            let piece = gridfinity::carve_to_cells(&whole, p.pitch, &p.bins[0].cells, &part.cells)
                 .unwrap_or_else(|e| panic!("piece {i}: {e}"));
             piece.validate().unwrap_or_else(|e| panic!("piece {i}: {e}"));
             assert_watertight(&tessellate(&piece, 6).to_mesh());
@@ -1229,9 +1339,9 @@ mod tests {
         };
         let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None, &[]).unwrap();
         let corner =
-            gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(1, 0)])).unwrap();
+            gridfinity::carve_to_cells(&whole, p.pitch, &p.bins[0].cells, &cells(&[(1, 0)])).unwrap();
         let ell =
-            gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(0, 0), (0, 1), (1, 1)]))
+            gridfinity::carve_to_cells(&whole, p.pitch, &p.bins[0].cells, &cells(&[(0, 0), (0, 1), (1, 1)]))
                 .unwrap();
         for piece in [&corner, &ell] {
             piece.validate().expect("manifold");
@@ -1259,7 +1369,7 @@ mod tests {
         let whole_v = vol(&whole);
         let mut sum = 0.0;
         for part in parts {
-            let piece = gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(part))
+            let piece = gridfinity::carve_to_cells(&whole, p.pitch, &p.bins[0].cells, &cells(part))
                 .unwrap_or_else(|e| panic!("{shape:?} -> {part:?}: {e}"));
             piece.validate().unwrap_or_else(|e| panic!("{part:?}: {e}"));
             assert_watertight(&tessellate(&piece, 12).to_mesh());
@@ -1423,7 +1533,7 @@ mod tests {
         };
         let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None, &[]).unwrap();
         let middle =
-            gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(1, 0)])).unwrap();
+            gridfinity::carve_to_cells(&whole, p.pitch, &p.bins[0].cells, &cells(&[(1, 0)])).unwrap();
         let rim_faces = |s: &crate::Solid| -> (usize, usize) {
             let top = tessellate(s, 6).bounds().1.z;
             let mut n = 0;
@@ -1499,7 +1609,7 @@ mod tests {
                 ..gridfinity::Params::default()
             };
             let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None, &[]).unwrap();
-            let err = gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(1, 1)]))
+            let err = gridfinity::carve_to_cells(&whole, p.pitch, &p.bins[0].cells, &cells(&[(1, 1)]))
                 .expect_err("an enclosed piece must be refused");
             assert!(
                 err.contains("surrounded on every side"),
@@ -1520,7 +1630,7 @@ mod tests {
         let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None, &[]).unwrap();
         let whole_vol = signed_volume(&tessellate(&whole, 6).to_mesh());
         for arm in [(1, 0), (0, 1), (2, 1), (1, 2)] {
-            let piece = gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[arm]))
+            let piece = gridfinity::carve_to_cells(&whole, p.pitch, &p.bins[0].cells, &cells(&[arm]))
                 .unwrap_or_else(|e| panic!("arm {arm:?}: {e}"));
             let vol = signed_volume(&tessellate(&piece, 6).to_mesh());
             assert!(
@@ -1591,6 +1701,7 @@ mod tests {
                 },
                 LogicalBin::rect(1, 1),
             ],
+            pitch: 21.0,
             height_units: 6,
             wall_thickness: 2.2,
             cavity_corner_radius: 0.5,
@@ -1615,6 +1726,8 @@ mod tests {
                 width: 1.2,
                 height: Some(6.5),
             }],
+            plate_margin_x: 6.0,
+            plate_margin_y: 12.5,
             mode: Mode::Baseplate,
         };
         let s = p.rust_literal();
@@ -1622,12 +1735,15 @@ mod tests {
             "GridCell { x: 1, y: 2 }",
             "SplitLine { axis: Axis::Y, index: 1 }",
             "BinSlope { angle_deg: 9.0, dir: SlopeDir::PlusX }",
+            "pitch: 21.0",
             "height_units: 6",
             "wall_thickness: 2.2",
             "cavity_corner_radius: 0.5",
             "floor_fillet: 1.25",
             "magnet_holes: true",
             "screw_holes: true",
+            "plate_margin_x: 6.0",
+            "plate_margin_y: 12.5",
             "mode: Mode::Baseplate",
             "orientation: Orientation::H",
             "orientation: Orientation::V",
@@ -1646,7 +1762,14 @@ mod tests {
         );
         // A default `Params` carries none of that noise.
         let d = Params::default().rust_literal();
-        for unwanted in ["height_units", "magnet_holes", "mode:", "inner_walls"] {
+        for unwanted in [
+            "pitch",
+            "height_units",
+            "magnet_holes",
+            "mode:",
+            "inner_walls",
+            "plate_margin",
+        ] {
             assert!(
                 !d.contains(unwanted),
                 "a default config should not mention {unwanted}:\n{d}"

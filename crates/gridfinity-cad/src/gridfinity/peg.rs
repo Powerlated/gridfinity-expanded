@@ -20,15 +20,15 @@ use crate::kernel::sketch::{COINCIDENT, Seg, Sketch, ccw_segs};
 use crate::layout::{GridCell, GridEdge, Orientation, cell_edges};
 use std::collections::HashMap;
 
-pub(super) fn peg_profile(c: GridCell, w: f64, r: f64) -> Vec<Seg> {
-    let cx = (c.x as f64 + 0.5) * GRID_PITCH;
-    let cy = (c.y as f64 + 0.5) * GRID_PITCH;
+pub(super) fn peg_profile(c: GridCell, pitch: f64, w: f64, r: f64) -> Vec<Seg> {
+    let cx = (c.x as f64 + 0.5) * pitch;
+    let cy = (c.y as f64 + 0.5) * pitch;
     ccw_segs(&Sketch::rounded_rect(cx, cy, w, w, r))
 }
 
-pub(super) fn peg_seg_free(s: &Seg, c: GridCell, shared: &SharedWithPegs) -> bool {
-    let cx = (c.x as f64 + 0.5) * GRID_PITCH;
-    let cy = (c.y as f64 + 0.5) * GRID_PITCH;
+pub(super) fn peg_seg_free(s: &Seg, c: GridCell, pitch: f64, shared: &SharedWithPegs) -> bool {
+    let cx = (c.x as f64 + 0.5) * pitch;
+    let cy = (c.y as f64 + 0.5) * pitch;
     match *s {
         Seg::Line { a, b } => {
             let m = (a + b) * 0.5;
@@ -70,12 +70,13 @@ pub(super) fn peg_seg_free(s: &Seg, c: GridCell, shared: &SharedWithPegs) -> boo
 pub(super) fn split_peg_profile(
     segs: Vec<Seg>,
     c: GridCell,
+    pitch: f64,
     splits: &HashMap<GridEdge, Vec<f64>>,
     arc_points: &[Vec2],
 ) -> Vec<Seg> {
     let [west, east, south, north] = cell_edges(c);
-    let cx = (c.x as f64 + 0.5) * GRID_PITCH;
-    let cy = (c.y as f64 + 0.5) * GRID_PITCH;
+    let cx = (c.x as f64 + 0.5) * pitch;
+    let cy = (c.y as f64 + 0.5) * pitch;
     let mut out = Vec::with_capacity(segs.len());
     for s in segs {
         let Seg::Line { a, b } = s else {

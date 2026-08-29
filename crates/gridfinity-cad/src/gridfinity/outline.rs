@@ -126,8 +126,8 @@ pub(super) fn boundary_steps(cells: &[GridCell]) -> Vec<Vec<Step>> {
     loops
 }
 
-pub(super) fn mm(p: (i32, i32)) -> Vec2 {
-    Vec2::new(p.0 as f64 * GRID_PITCH, p.1 as f64 * GRID_PITCH)
+pub(super) fn mm(p: (i32, i32), pitch: f64) -> Vec2 {
+    Vec2::new(p.0 as f64 * pitch, p.1 as f64 * pitch)
 }
 
 pub(super) fn left_of(d: (i32, i32)) -> Vec2 {
@@ -162,6 +162,7 @@ pub(super) struct SharedWithPegs {
 
 pub(super) fn author_outer_loop(
     steps: &[Step],
+    pitch: f64,
     inset: &dyn Fn(&GridEdge) -> f64,
     walled: &dyn Fn(&GridEdge) -> bool,
     shared: &mut SharedWithPegs,
@@ -175,8 +176,8 @@ pub(super) fn author_outer_loop(
         let nrm = left_of(s.dir());
         let ins = inset(&s.edge);
         let ins_next = inset(&s_next.edge);
-        let from = mm(s.from);
-        let to = mm(s.to);
+        let from = mm(s.from, pitch);
+        let to = mm(s.to, pitch);
         let is_std = (ins - HALF_TOL).abs() < INSET_SAME;
 
         let a = from + d * PEG_TANGENT + nrm * ins;
@@ -219,7 +220,7 @@ pub(super) fn author_outer_loop(
                 edge: None,
             });
         } else if cross > 0.0 && both_std && same_side {
-            let c = mm(s.to);
+            let c = mm(s.to, pitch);
             let center = c + nrm * (ins + OUTER_R) + n1 * (ins_next + OUTER_R);
             let a0 = f64::atan2(start.y - center.y, start.x - center.x);
             let a1 = f64::atan2(end.y - center.y, end.x - center.x);
@@ -238,7 +239,7 @@ pub(super) fn author_outer_loop(
             });
             shared.corners.insert(s.to);
         } else if cross < 0.0 && both_std && same_side && corner_walled {
-            let q = mm(s.to) + nrm * ins + n1 * ins_next;
+            let q = mm(s.to, pitch) + nrm * ins + n1 * ins_next;
             let center = q - nrm * OUTER_R - n1 * OUTER_R;
             let t1 = center + nrm * OUTER_R;
             let t2 = center + n1 * OUTER_R;
@@ -284,7 +285,7 @@ pub(super) fn author_outer_loop(
             });
         } else {
             shared.squared.insert(s.to);
-            let q = mm(s.to) + nrm * ins + n1 * ins_next;
+            let q = mm(s.to, pitch) + nrm * ins + n1 * ins_next;
             pieces.push(OuterPiece {
                 seg: Seg::Line { a: start, b: q },
                 shared: false,

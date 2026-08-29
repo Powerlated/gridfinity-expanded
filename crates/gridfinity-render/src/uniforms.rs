@@ -27,6 +27,7 @@ pub struct PostUniform {
     pub near_far: [f32; 2],
     pub params: [f32; 4],
     pub flags: [f32; 4],
+    pub source_texel: [f32; 4],
 }
 
 #[repr(C)]
@@ -41,7 +42,7 @@ pub struct LineUniform {
 
 const _: () = {
     assert!(size_of::<SceneUniform>() == 240);
-    assert!(size_of::<PostUniform>() == 208);
+    assert!(size_of::<PostUniform>() == 224);
     assert!(size_of::<LineUniform>() == 96);
     assert!(size_of::<SceneUniform>() % 16 == 0);
     assert!(size_of::<PostUniform>() % 16 == 0);
@@ -56,6 +57,7 @@ const _: () = {
     assert!(std::mem::offset_of!(PostUniform, target_size) == 144);
     assert!(std::mem::offset_of!(PostUniform, params) == 176);
     assert!(std::mem::offset_of!(PostUniform, flags) == 192);
+    assert!(std::mem::offset_of!(PostUniform, source_texel) == 208);
 };
 
 pub fn mat(value: &Mat4) -> [f32; 16] {

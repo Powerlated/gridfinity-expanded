@@ -8,40 +8,109 @@
 //! every object turned into an edge-connected part list in millimetres with the
 //! quantity wanted. `parse` is the whole transformation, and every failure it
 //! returns names the object and the key at fault.
+//!
+//! Every measurement in the file is a `Length`: a bare number of millimetres, or
+//! a string carrying a unit, so a drawer measured with an imperial tape is
+//! written as it was measured rather than converted by hand.
 
 use gridfinity_cad::gridfinity::{
-    BASE_TOTAL_HEIGHT, FLOOR_THICKNESS, HEIGHT_PER_UNIT, buildable_floor_fillet,
+    BASE_TOTAL_HEIGHT, FLOOR_THICKNESS, GRID_PITCH, HEIGHT_PER_UNIT, MIN_FASTENER_GRID_PITCH,
+    MIN_GRID_PITCH, buildable_floor_fillet,
 };
 use gridfinity_cad::printers::{DEFAULT_PRINTER, PRINTER_PROFILES, PrinterProfile};
 use gridfinity_cad::project::pack::{PackEffort, PackObject};
 use gridfinity_cad::project::rects::{Rect, parts_connected};
 
+/// One of the units a measurement may name, as the millimetres it is worth. The
+/// empty unit is millimetres, so `"400"` and `400` are the same length.
+fn unit_in_mm(unit: &str) -> Option<f64> {
+    match unit {
+        "" | "mm" => Some(1.0),
+        "cm" => Some(10.0),
+        "m" => Some(1000.0),
+        "in" | "inch" | "inches" | "\"" => Some(25.4),
+        "ft" | "foot" | "feet" | "'" => Some(304.8),
+        _ => None,
+    }
+}
+
+/// A measurement written as text as the millimetres it is, or the reason it is
+/// not a measurement. The number is the leading run of decimal characters and
+/// the unit is the rest of the trimmed text, matched without case, so `"2.1 in"`
+/// and `"2.1IN"` are both 53.34.
+fn text_to_mm(text: &str) -> Result<f64, String> {
+    let trimmed = text.trim();
+    let end = trimmed
+        .find(|c: char| !matches!(c, '0'..='9' | '.' | '+' | '-'))
+        .unwrap_or(trimmed.len());
+    let (number, unit) = trimmed.split_at(end);
+    let value: f64 = number.parse().map_err(|_| {
+        format!("{text:?} does not begin with a number, so it is not a measurement")
+    })?;
+    let unit = unit.trim();
+    let scale = unit_in_mm(&unit.to_ascii_lowercase()).ok_or_else(|| {
+        format!("{text:?} is measured in {unit:?}, which is not one of mm, cm, m, in, ft")
+    })?;
+    Ok(value * scale)
+}
+
+/// A length as the file states it, held in millimetres: a bare number is already
+/// millimetres, and a string is its number scaled by the unit it names.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Length(f64);
+
+impl Length {
+    /// The length in millimetres, which is the only form it leaves this module
+    /// in.
+    fn mm(self) -> f64 {
+        self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Length {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Stated {
+            Millimetres(f64),
+            Measured(String),
+        }
+        match Stated::deserialize(deserializer)? {
+            Stated::Millimetres(mm) => Ok(Length(mm)),
+            Stated::Measured(text) => {
+                text_to_mm(&text).map(Length).map_err(serde::de::Error::custom)
+            }
+        }
+    }
+}
+
 /// The drawer's inside measurements, in millimetres.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DrawerSpec {
-    width: f64,
-    depth: f64,
+    width: Length,
+    depth: Length,
 }
 
 /// A printer bed stated directly rather than by profile name, in millimetres.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BedSpec {
-    width: i32,
-    depth: i32,
+    width: Length,
+    depth: Length,
 }
 
 /// Every setting the file may state, all optional.
 #[derive(Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettingsSpec {
-    divider_thickness: Option<f64>,
-    clearance: Option<f64>,
+    divider_thickness: Option<Length>,
+    clearance: Option<Length>,
+    grid_size: Option<Length>,
     effort: Option<String>,
     height_units: Option<u32>,
-    wall_thickness: Option<f64>,
-    fillet_radius: Option<f64>,
+    wall_thickness: Option<Length>,
+    fillet_radius: Option<Length>,
     magnets: Option<bool>,
     screws: Option<bool>,
     printer: Option<String>,
@@ -54,12 +123,12 @@ struct SettingsSpec {
 #[serde(deny_unknown_fields)]
 struct BoxSpec {
     #[serde(default)]
-    x: f64,
+    x: Length,
     #[serde(default)]
-    y: f64,
-    width: f64,
-    depth: f64,
-    height: Option<f64>,
+    y: Length,
+    width: Length,
+    depth: Length,
+    height: Option<Length>,
 }
 
 /// One thing to organise: a name, how many of it, and its footprint stated
@@ -69,7 +138,7 @@ struct BoxSpec {
 struct ObjectSpec {
     name: String,
     quantity: Option<u32>,
-    size: Option<Vec<f64>>,
+    size: Option<Vec<Length>>,
     boxes: Option<Vec<BoxSpec>>,
 }
 
@@ -98,6 +167,11 @@ pub struct Object {
 pub struct Spec {
     pub drawer_width: f64,
     pub drawer_depth: f64,
+    /// The millimetres one grid cell spans. `GRID_PITCH` unless the file says
+    /// otherwise, and every cell measurement of the run -- how many fit the
+    /// drawer, the packing area, the bin, the baseplate and what fits the bed --
+    /// is taken in it.
+    pub pitch: f64,
     pub divider_thickness: f64,
     pub clearance: f64,
     pub wall_thickness: f64,
@@ -162,10 +236,10 @@ fn positive(value: f64, what: &str, whose: &str) -> Result<f64, String> {
 
 /// The `size` array as one box plus the height it declares, accepting `[width,
 /// depth]` or `[width, depth, height]`.
-fn size_to_parts(size: &[f64], whose: &str) -> Result<(Vec<Rect>, Option<f64>), String> {
+fn size_to_parts(size: &[Length], whose: &str) -> Result<(Vec<Rect>, Option<f64>), String> {
     let (width, depth, height) = match size {
-        [w, d] => (*w, *d, None),
-        [w, d, h] => (*w, *d, Some(*h)),
+        [w, d] => (w.mm(), d.mm(), None),
+        [w, d, h] => (w.mm(), d.mm(), Some(h.mm())),
         other => {
             return Err(format!(
                 "{whose}: size is [width, depth] or [width, depth, height], but has {} entries",
@@ -189,13 +263,13 @@ fn boxes_to_parts(boxes: &[BoxSpec], whose: &str) -> Result<(Vec<Rect>, Option<f
     let mut parts = Vec::with_capacity(boxes.len());
     let mut height: Option<f64> = None;
     for b in boxes {
-        positive(b.width, "box width", whose)?;
-        positive(b.depth, "box depth", whose)?;
-        if let Some(h) = b.height {
+        positive(b.width.mm(), "box width", whose)?;
+        positive(b.depth.mm(), "box depth", whose)?;
+        if let Some(h) = b.height.map(Length::mm) {
             positive(h, "box height", whose)?;
             height = Some(height.map_or(h, |t: f64| t.max(h)));
         }
-        parts.push(Rect::new(b.x, b.y, b.width, b.depth));
+        parts.push(Rect::new(b.x.mm(), b.y.mm(), b.width.mm(), b.depth.mm()));
     }
     Ok((parts, height))
 }
@@ -215,16 +289,18 @@ fn resolve_printer(settings: &SettingsSpec) -> Result<PrinterProfile, String> {
             )
         }),
         (None, Some(bed)) => {
-            if bed.width <= 0 || bed.depth <= 0 {
+            let (width, depth) = (bed.width.mm().round(), bed.depth.mm().round());
+            if width <= 0.0 || depth <= 0.0 {
                 return Err(format!(
                     "settings.bed is {} x {} mm, which is not a bed",
-                    bed.width, bed.depth
+                    bed.width.mm(),
+                    bed.depth.mm()
                 ));
             }
             Ok(PrinterProfile {
                 name: "Custom",
-                bed_width: bed.width,
-                bed_depth: bed.depth,
+                bed_width: width as i32,
+                bed_depth: depth as i32,
             })
         }
         (None, None) => Ok(DEFAULT_PRINTER),
@@ -234,8 +310,8 @@ fn resolve_printer(settings: &SettingsSpec) -> Result<PrinterProfile, String> {
 /// The TOML text as a validated run, or the first reason it is not one.
 pub fn parse(text: &str) -> Result<Spec, String> {
     let file: InputFile = toml::from_str(text).map_err(|e| e.to_string())?;
-    positive(file.drawer.width, "drawer.width", "drawer")?;
-    positive(file.drawer.depth, "drawer.depth", "drawer")?;
+    positive(file.drawer.width.mm(), "drawer.width", "drawer")?;
+    positive(file.drawer.depth.mm(), "drawer.depth", "drawer")?;
 
     let settings = &file.settings;
     let effort_name = settings.effort.as_deref().unwrap_or("standard");
@@ -243,23 +319,36 @@ pub fn parse(text: &str) -> Result<Spec, String> {
         format!("settings.effort is {effort_name:?}, not one of quick, standard, thorough")
     })?;
     let divider_thickness = positive(
-        settings.divider_thickness.unwrap_or(1.2),
+        settings.divider_thickness.map_or(1.2, Length::mm),
         "settings.divider_thickness",
         "settings",
     )?;
     let wall_thickness = positive(
-        settings.wall_thickness.unwrap_or(1.2),
+        settings.wall_thickness.map_or(1.2, Length::mm),
         "settings.wall_thickness",
         "settings",
     )?;
-    let clearance = settings.clearance.unwrap_or(0.5);
+    let clearance = settings.clearance.map_or(0.5, Length::mm);
     if clearance < 0.0 {
         return Err(format!("settings.clearance is {clearance}, which is less than none"));
     }
-    let fillet_radius = settings.fillet_radius.unwrap_or(2.5);
+    let fillet_radius = settings.fillet_radius.map_or(2.5, Length::mm);
     if fillet_radius < 0.0 {
         return Err(format!(
             "settings.fillet_radius is {fillet_radius}, which is less than none"
+        ));
+    }
+    let pitch = settings.grid_size.map_or(GRID_PITCH, Length::mm);
+    if pitch < MIN_GRID_PITCH {
+        return Err(format!(
+            "settings.grid_size is {pitch} mm, and a Gridfinity cell cannot be built below              {MIN_GRID_PITCH} mm -- its peg profile does not close"
+        ));
+    }
+    let magnets = settings.magnets.unwrap_or(false);
+    let screws = settings.screws.unwrap_or(false);
+    if (magnets || screws) && pitch <= MIN_FASTENER_GRID_PITCH {
+        return Err(format!(
+            "settings.grid_size is {pitch} mm, and a cell carries magnets or screws only above              {MIN_FASTENER_GRID_PITCH} mm -- the four bores of a smaller cell run into one another"
         ));
     }
     let height_units = settings.height_units.unwrap_or(3);
@@ -306,15 +395,16 @@ pub fn parse(text: &str) -> Result<Spec, String> {
     }
 
     Ok(Spec {
-        drawer_width: file.drawer.width,
-        drawer_depth: file.drawer.depth,
+        drawer_width: file.drawer.width.mm(),
+        drawer_depth: file.drawer.depth.mm(),
+        pitch,
         divider_thickness,
         clearance,
         wall_thickness,
         fillet_radius,
         height_units,
-        magnets: settings.magnets.unwrap_or(false),
-        screws: settings.screws.unwrap_or(false),
+        magnets,
+        screws,
         baseplate: settings.baseplate.unwrap_or(true),
         effort,
         printer: resolve_printer(settings)?,
@@ -398,5 +488,95 @@ baseplate = false
         assert_eq!(spec.objects[0].height, None);
         assert_eq!(spec.objects[1].height, Some(55.0));
         assert_eq!(spec.objects[1].pack.quantity, 2);
+    }
+
+    #[test]
+    fn reads_a_measurement_in_every_unit_it_names() {
+        for (text, mm) in [
+            ("400", 400.0),
+            ("400 mm", 400.0),
+            ("40cm", 400.0),
+            ("0.4 m", 400.0),
+            ("2.1 in", 53.34),
+            ("2.1IN", 53.34),
+            ("1 ft", 304.8),
+        ] {
+            let got = text_to_mm(text).unwrap_or_else(|e| panic!("{text:?} is a measurement: {e}"));
+            assert!((got - mm).abs() < 1e-9, "{text:?} is {mm} mm, not {got}");
+        }
+    }
+
+    #[test]
+    fn takes_a_size_stated_in_inches() {
+        let text = format!(
+            "{MINIMAL}\n[[objects]]\nname = \"level\"\nsize = [\"2.1 in\", \"9.2 in\", \"1 in\"]\n"
+        );
+        let spec = parse(&text).expect("a size may be measured in inches");
+        let bounds = &spec.objects[0].pack.parts[0];
+        assert!(
+            (bounds.width - 53.34).abs() < 1e-9 && (bounds.depth - 233.68).abs() < 1e-9,
+            "2.1 in x 9.2 in is 53.34 x 233.68 mm, not {} x {}",
+            bounds.width,
+            bounds.depth
+        );
+        assert_eq!(spec.objects[0].height, Some(25.4));
+    }
+
+    #[test]
+    fn measures_the_drawer_and_the_settings_in_the_units_they_name() {
+        let spec = parse(
+            "[drawer]\nwidth = \"11.5 in\"\ndepth = \"20.6 in\"\n\
+             [settings]\nclearance = \"1 mm\"\nbed = { width = \"25 cm\", depth = 210 }\n",
+        )
+        .expect("every measurement takes a unit");
+        assert!((spec.drawer_width - 292.1).abs() < 1e-9, "{}", spec.drawer_width);
+        assert!((spec.drawer_depth - 523.24).abs() < 1e-9, "{}", spec.drawer_depth);
+        assert_eq!(spec.clearance, 1.0);
+        assert_eq!(spec.printer.bed_width, 250);
+        assert_eq!(spec.printer.bed_depth, 210);
+    }
+
+    #[test]
+    fn takes_the_grid_size_the_file_states_and_the_standard_otherwise() {
+        assert_eq!(parse(MINIMAL).expect("a drawer alone is a valid run").pitch, GRID_PITCH);
+        let spec = parse(&format!("{MINIMAL}
+[settings]
+grid_size = \"21 mm\"
+"))
+            .expect("a grid size is a setting, and it is a measurement");
+        assert_eq!(spec.pitch, 21.0);
+    }
+
+    #[test]
+    fn rejects_a_grid_size_no_cell_can_be_built_at() {
+        let err = parse(&format!("{MINIMAL}
+[settings]
+grid_size = 4
+"))
+            .expect_err("a 4 mm cell has no peg profile");
+        assert!(err.contains("grid_size"), "{err}");
+    }
+
+    #[test]
+    fn rejects_fasteners_a_cell_that_small_cannot_hold() {
+        let text = format!("{MINIMAL}
+[settings]
+grid_size = 21
+magnets = true
+");
+        let err = parse(&text).expect_err("a 21 mm cell cannot hold four magnet bores");
+        assert!(err.contains("magnets or screws"), "{err}");
+        parse(&format!("{MINIMAL}
+[settings]
+grid_size = 21
+"))
+            .expect("the same cell without fasteners is fine");
+    }
+
+    #[test]
+    fn rejects_a_measurement_in_a_unit_it_does_not_know() {
+        let err = parse(&format!("{MINIMAL}\n[[objects]]\nname = \"x\"\nsize = [\"3 furlongs\", 10]\n"))
+            .expect_err("a furlong is not a unit");
+        assert!(err.contains("furlong"), "{err}");
     }
 }

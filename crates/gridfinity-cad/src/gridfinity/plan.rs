@@ -46,6 +46,7 @@ use std::collections::HashMap;
 struct PieceOutline {
     loops: OuterLoops,
     shared: SharedWithPegs,
+    pitch: f64,
     spans: Vec<OpenSpan>,
     peg_splits: HashMap<GridEdge, Vec<f64>>,
     peg_arcs: Vec<Vec2>,
@@ -103,9 +104,9 @@ pub(super) fn plan_piece(
     let _perf = scope(Metric::PlanPiece);
     let mut outline = author_outline(p, cells, bin_cells, &walls, slope);
     let (planned, wall_loops) = plan_cavities(p, cells, &walls, pockets, &mut outline, tag);
-    let ramp = outline.slope.map(|sl| SlopedFloor::of(sl, bin_cells, &outline));
+    let ramp = outline.slope.map(|sl| SlopedFloor::of(sl, bin_cells, p.pitch, &outline));
     let cavity_ops = emit_cavity_ops(ramp.as_ref(), &outline, planned);
-    let pegs = peg_rings(cells, &outline);
+    let pegs = peg_rings(cells, p.pitch, &outline);
     emit_pegs(p, &pegs, tag, prog);
     emit_base_and_rim(
         &outline,
@@ -137,9 +138,9 @@ pub(super) struct SlopedFloor {
 }
 
 impl SlopedFloor {
-    fn of(sl: BinSlope, bin_cells: &[GridCell], outline: &PieceOutline) -> SlopedFloor {
+    fn of(sl: BinSlope, bin_cells: &[GridCell], pitch: f64, outline: &PieceOutline) -> SlopedFloor {
         let (ux, uy) = uphill_unit(sl.dir);
-        let (min_a, span) = slope_span(bin_cells, ux, uy);
+        let (min_a, span) = slope_span(bin_cells, pitch, ux, uy);
         let m = sl
             .angle_deg
             .to_radians()
@@ -213,7 +214,7 @@ fn author_outline(
     let mut shared = SharedWithPegs::default();
     let outer_loops: Vec<Vec<OuterPiece>> = boundary_steps(cells)
         .iter()
-        .map(|steps| author_outer_loop(steps, &inset, &walled, &mut shared))
+        .map(|steps| author_outer_loop(steps, p.pitch, &inset, &walled, &mut shared))
         .collect();
     shared.corners = shared
         .corners
@@ -224,7 +225,8 @@ fn author_outline(
     PieceOutline {
         loops: OuterLoops::new(outer_loops),
         shared,
-        spans: open_spans(cells, walls),
+        pitch: p.pitch,
+        spans: open_spans(cells, p.pitch, walls),
         peg_splits: HashMap::new(),
         peg_arcs: Vec::new(),
         wt: buildable_wall_thickness(p.wall_thickness, openish, slope.is_some()),
@@ -263,7 +265,7 @@ fn plan_cavities(
         outline.slope.is_some(),
     );
     let cavity = if pockets.is_empty() {
-        walked_cavity(cells, walls, outline.wt)
+        walked_cavity(cells, p.pitch, walls, outline.wt)
     } else {
         pocket_cavity(pockets)
     };
@@ -990,17 +992,18 @@ fn emit_sloped_cavity(
 /// One peg per cell, each of its three rings cut wherever the outline above was
 /// cut, so the peg tops weld to the wall's bottom ring rather than meeting it at
 /// an edge nothing pairs with.
-fn peg_rings(cells: &[GridCell], outline: &PieceOutline) -> Vec<PegRings> {
+fn peg_rings(cells: &[GridCell], pitch: f64, outline: &PieceOutline) -> Vec<PegRings> {
     let _g = scope(Metric::PlanOps);
     let (splits, arcs) = (&outline.peg_splits, &outline.peg_arcs);
+    let (w_bot, w_mid, w_top) = peg_widths(pitch);
     cells
         .iter()
         .map(|&c| {
             (
                 c,
-                split_peg_profile(peg_profile(c, PEG_W_BOTTOM, PEG_R_BOTTOM), c, splits, arcs),
-                split_peg_profile(peg_profile(c, PEG_W_MID, PEG_R_MID), c, splits, arcs),
-                split_peg_profile(peg_profile(c, PEG_W_TOP, OUTER_R), c, splits, arcs),
+                split_peg_profile(peg_profile(c, pitch, w_bot, PEG_R_BOTTOM), c, pitch, splits, arcs),
+                split_peg_profile(peg_profile(c, pitch, w_mid, PEG_R_MID), c, pitch, splits, arcs),
+                split_peg_profile(peg_profile(c, pitch, w_top, OUTER_R), c, pitch, splits, arcs),
             )
         })
         .collect()
@@ -1070,12 +1073,13 @@ fn emit_pegs(p: &Params, pegs: &[PegRings], tag: &str, prog: &mut Program) {
                 outward: true,
             },
         );
-        let ccx = (c.x as f64 + 0.5) * GRID_PITCH;
-        let ccy = (c.y as f64 + 0.5) * GRID_PITCH;
+        let ccx = (c.x as f64 + 0.5) * p.pitch;
+        let ccy = (c.y as f64 + 0.5) * p.pitch;
         if let Some(profile) = &fastener_profile {
+            let inset = fastener_inset(p.pitch);
             for (dx, dy) in FASTENER_QUADRANTS {
-                let hx = ccx + dx * FASTENER_INSET;
-                let hy = ccy + dy * FASTENER_INSET;
+                let hx = ccx + dx * inset;
+                let hy = ccy + dy * inset;
                 prog.push(
                     format!("{tag}: peg {ci} fastener ({hx:.0},{hy:.0})"),
                     POp::Hole {
@@ -1089,9 +1093,10 @@ fn emit_pegs(p: &Params, pegs: &[PegRings], tag: &str, prog: &mut Program) {
         let mut cap_holes: Vec<POpDirLoop> = Vec::new();
         if let Some(profile) = &fastener_profile {
             let mouth_r = profile.mouth_radius();
+            let inset = fastener_inset(p.pitch);
             for (dx, dy) in FASTENER_QUADRANTS {
-                let hx = ccx + dx * FASTENER_INSET;
-                let hy = ccy + dy * FASTENER_INSET;
+                let hx = ccx + dx * inset;
+                let hy = ccy + dy * inset;
                 let mouth = Sketch::circle(hx, hy, mouth_r).loops.remove(0);
                 cap_holes.push((mouth, false));
             }
@@ -1184,7 +1189,7 @@ fn emit_base_and_rim(
     let mut free: Vec<Seg> = Vec::new();
     for (c, _, _, s_top) in pegs {
         for seg in s_top {
-            if peg_seg_free(seg, *c, &outline.shared) {
+            if peg_seg_free(seg, *c, outline.pitch, &outline.shared) {
                 free.push(*seg);
             }
         }

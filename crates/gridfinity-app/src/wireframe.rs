@@ -1,5 +1,5 @@
-//! The line overlay the viewer draws on top of the shaded mesh: sketch profiles,
-//! B-rep edges, and plain axis-aligned boxes. A `Wireframe` accumulates one
+//! The line overlay the viewer draws on top of the shaded mesh: sketch profiles
+//! and B-rep edges. A `Wireframe` accumulates one
 //! `lines` buffer in `gridfinity-render`'s `LINE_STRIDE` layout -- each segment
 //! expanded here into the six vertices of a screen-space quad, since a line
 //! primitive has no width -- plus the `Label`s the app paints over them. Nothing
@@ -12,12 +12,8 @@ use gridfinity_cad::kernel::geom::Curve;
 use gridfinity_cad::kernel::sketch::Seg;
 use gridfinity_cad::kernel::topo::{Builder, Solid};
 
-
-
 pub const SKETCH_BLACK: [f32; 3] = [0.05, 0.05, 0.06];
 pub const EDGE_ORANGE: [f32; 3] = [1.0, 0.45, 0.05];
-pub const OBJECT_BLUE: [f32; 3] = [0.15, 0.55, 0.95];
-pub const OBJECT_RED: [f32; 3] = [0.95, 0.2, 0.2];
 
 pub struct Label {
     pub at: Vec3,
@@ -65,32 +61,6 @@ impl Wireframe {
                 text: curve_kind(&e.curve),
                 color,
             });
-        }
-    }
-
-    /// Adds the twelve edges of the axis-aligned box spanning `min` to `max`, in
-    /// the same millimetre coordinates as the solid beside it, as unlabelled
-    /// segments in `color`. A box with a zero extent on some axis degenerates to
-    /// the rectangle or segment it really is rather than being refused, since a
-    /// caller measuring a real object may legitimately have one.
-    pub fn add_box(&mut self, min: Vec3, max: Vec3, color: [f32; 3]) {
-        assert!(
-            min.x <= max.x && min.y <= max.y && min.z <= max.z,
-            "a box runs from its minimum corner to its maximum, but {min} is not under {max}"
-        );
-        let corner = |i: usize| {
-            Vec3::new(
-                if i & 1 == 0 { min.x } else { max.x },
-                if i & 2 == 0 { min.y } else { max.y },
-                if i & 4 == 0 { min.z } else { max.z },
-            )
-        };
-        for i in 0..8 {
-            for axis in [1usize, 2, 4] {
-                if i & axis == 0 {
-                    self.push_segment(corner(i), corner(i | axis), color);
-                }
-            }
         }
     }
 
@@ -205,49 +175,6 @@ mod tests {
         );
         for i in 0..verts(&wf) {
             assert!((vertex(&wf, i)[2] - 3.0).abs() < 1e-4, "vertex not lifted to plane");
-        }
-    }
-
-    #[test]
-    fn a_box_is_twelve_edges_over_its_eight_corners() {
-        let (min, max) = (Vec3::new(1.0, 2.0, 3.0), Vec3::new(11.0, 22.0, 33.0));
-        let mut wf = Wireframe::default();
-        wf.add_box(min, max, OBJECT_BLUE);
-
-        assert_eq!(verts(&wf), 12 * 6, "a box has twelve edges, each a quad");
-        assert!(wf.labels.is_empty(), "a box carries no curve to name");
-
-        let mut seen: Vec<(u32, u32)> = Vec::new();
-        for seg in 0..verts(&wf) / 6 {
-            let v = vertex(&wf, seg * 6);
-            let corner = |o: usize| {
-                let at = |k: usize, lo: f64, hi: f64| {
-                    let c = f64::from(v[o + k]);
-                    assert!(
-                        (c - lo).abs() < 1e-6 || (c - hi).abs() < 1e-6,
-                        "every endpoint is a corner of the box, but {c} is neither {lo} nor {hi}"
-                    );
-                    u32::from((c - hi).abs() < 1e-6)
-                };
-                at(0, min.x, max.x) | at(1, min.y, max.y) << 1 | at(2, min.z, max.z) << 2
-            };
-            let (a, b) = (corner(0), corner(3));
-            assert_eq!(
-                (a ^ b).count_ones(),
-                1,
-                "an edge of a box joins two corners differing on exactly one axis"
-            );
-            seen.push((a.min(b), a.max(b)));
-        }
-        seen.sort_unstable();
-        seen.dedup();
-        assert_eq!(seen.len(), 12, "the twelve edges must be distinct");
-        for c in 0..8u32 {
-            assert_eq!(
-                seen.iter().filter(|(a, b)| *a == c || *b == c).count(),
-                3,
-                "corner {c} must meet three edges"
-            );
         }
     }
 

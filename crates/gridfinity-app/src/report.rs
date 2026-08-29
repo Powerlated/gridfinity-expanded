@@ -3,7 +3,8 @@
 //! `print` writes the whole report to stdout in ten sections -- the drawer it
 //! resolved, the objects it was given, how the packing went, where each instance
 //! landed, the dividers that came out of it, what became of the rounding, how the
-//! bin had to be split for the printer, what each built piece is made of, the
+//! bin and its baseplate had to be split for the printer and how the two sets of
+//! seams interlock, what each built piece is made of, the
 //! files written, and the warnings. Nothing here decides
 //! anything: every number is read back off the finished `Run`, so the report
 //! cannot disagree with the geometry. The section helpers (`heading`, `field`,
@@ -12,8 +13,9 @@
 
 use crate::export::{Contents, Written};
 use crate::optimize::Run;
-use gridfinity_cad::layout::{Axis, GridFootprint, Piece};
+use gridfinity_cad::layout::{Axis, GridFootprint, Piece, SplitLine};
 use gridfinity_cad::printers::{BED_MARGIN, PrinterProfile, check_bed_fit};
+use gridfinity_cad::kernel::topo::Solid;
 use gridfinity_cad::project::rects::{Rect, inflate_parts, parts_bounds, union_area};
 use std::time::Duration;
 
@@ -106,7 +108,7 @@ pub fn print(run: &Run, written: &[Written]) {
 /// The drawer as it resolved: the grid it holds, the millimetres it does not,
 /// and the rectangle the packer was given.
 fn drawer(run: &Run) {
-    let pitch = 42.0;
+    let pitch = run.spec.pitch;
     let (cols, rows) = (run.grid.cols, run.grid.rows);
     heading("Drawer");
     field(
@@ -116,17 +118,23 @@ fn drawer(run: &Run) {
     field(
         "grid",
         &format!(
-            "{cols} x {rows} cells ({} x {} mm)",
+            "{cols} x {rows} cells of {} mm ({} x {} mm)",
+            mm(pitch),
             mm(cols as f64 * pitch),
             mm(rows as f64 * pitch)
         ),
     );
     field(
-        "unusable margin",
+        if run.spec.baseplate { "margin" } else { "unusable margin" },
         &format!(
-            "{} mm across, {} mm deep",
+            "{} mm across, {} mm deep{}",
             mm(run.grid.margin_x),
-            mm(run.grid.margin_y)
+            mm(run.grid.margin_y),
+            if run.spec.baseplate {
+                " -- the baseplate spans it, so the stack is a snug fit"
+            } else {
+                ""
+            }
         ),
     );
     field(
@@ -404,7 +412,7 @@ fn rounding(run: &Run) {
 /// fares.
 fn printing(run: &Run) {
     let printer = run.spec.printer;
-    let whole = check_bed_fit(&run.cells, printer);
+    let whole = check_bed_fit(&run.cells, printer, run.spec.pitch);
     heading("Printing");
     field(
         "printer",
@@ -425,24 +433,11 @@ fn printing(run: &Run) {
             if whole.fits { "fits the bed" } else { "too big for the bed" }
         ),
     );
-    let lines: Vec<String> = run
-        .split_lines
-        .iter()
-        .map(|l| {
-            let axis = match l.axis {
-                Axis::X => "x",
-                Axis::Y => "y",
-            };
-            format!("{axis}={}", l.index)
-        })
-        .collect();
     field(
         "splits",
         &format!(
-            "{} cut line{} ({}) -> {} piece{}",
-            run.split_lines.len(),
-            if run.split_lines.len() == 1 { "" } else { "s" },
-            if lines.is_empty() { "none".to_string() } else { lines.join(", ") },
+            "{} -> {} piece{}",
+            cut_lines(&run.split_lines),
             run.pieces.len(),
             if run.pieces.len() == 1 { "" } else { "s" }
         ),
@@ -454,24 +449,78 @@ fn printing(run: &Run) {
                 .to_string()
         } else {
             format!(
-                "{} piece{} on the same cut lines as the bin",
+                "{} -> {} piece{}",
+                cut_lines(&run.plate_split_lines),
                 run.baseplate.len(),
                 if run.baseplate.len() == 1 { "" } else { "s" }
             )
         },
     );
-    for pieces in [&run.pieces, &run.baseplate] {
-        for (piece, part) in pieces.iter().zip(&run.parts) {
-            piece_row(&piece.name, part, printer);
+    if !run.baseplate.is_empty() {
+        field("interlock", &interlock(run));
+    }
+    for (pieces, parts) in [(&run.pieces, &run.parts), (&run.baseplate, &run.plate_parts)] {
+        for (piece, part) in pieces.iter().zip(parts) {
+            piece_row(&piece.name, part, &piece.solid, printer);
         }
     }
 }
 
+/// A set of split lines as the Printing section spells it: how many there are
+/// and where each one falls, or that there are none.
+fn cut_lines(lines: &[SplitLine]) -> String {
+    let named: Vec<String> = lines
+        .iter()
+        .map(|l| {
+            let axis = match l.axis {
+                Axis::X => "x",
+                Axis::Y => "y",
+            };
+            format!("{axis}={}", l.index)
+        })
+        .collect();
+    format!(
+        "{} cut line{} ({})",
+        lines.len(),
+        if lines.len() == 1 { "" } else { "s" },
+        if named.is_empty() { "none".to_string() } else { named.join(", ") }
+    )
+}
+
+/// What the bin's seams and the plate's seams do to each other, in a phrase: the
+/// stack holds itself together when the two bodies share no cut line, because
+/// every seam of each is then spanned by a piece of the other.
+///
+/// Read off `Run::interlocked`, so the line and the geometry cannot disagree.
+/// The uncut cases are named separately because they are the strongest interlock
+/// and read as an accident otherwise.
+fn interlock(run: &Run) -> String {
+    if !run.interlocked() {
+        return "none -- no staggered plan for the plate prints, so it is cut on the bin's own \
+                lines and the stack parts along them"
+            .to_string();
+    }
+    if run.split_lines.is_empty() && run.plate_split_lines.is_empty() {
+        return "whole -- neither body is cut, so the stack is already one piece".to_string();
+    }
+    if run.split_lines.is_empty() || run.plate_split_lines.is_empty() {
+        return "every seam is spanned -- one body is uncut, so it laps all of the other's seams"
+            .to_string();
+    }
+    "staggered -- the two bodies share no cut line, so each spans the other's seams and the \
+     stack moves as one piece"
+        .to_string()
+}
+
 /// One row of the Printing table: what a piece is called, the cells it covers,
-/// and whether that footprint fits the bed. Bin pieces and baseplate pieces are
-/// cut on the same lines, so both read their cells off the same `Piece`.
-fn piece_row(name: &str, part: &Piece, printer: PrinterProfile) {
-    let fit = check_bed_fit(&part.cells, printer);
+/// and whether the body built over them fits the bed. Each body reads its cells
+/// off its own partition, because the plate is cut on lines staggered off the
+/// bin's and so covers different cells; the millimetres are measured off each
+/// piece's own solid, because neither body is its cells -- a bin is inset from
+/// them and a fitted baseplate spans past them by the drawer's margin.
+fn piece_row(name: &str, part: &Piece, solid: &Solid, printer: PrinterProfile) {
+    let (width, depth) = footprint_mm(solid);
+    let fit = printer.bed_fit_mm(width, depth);
     let footprint =
         GridFootprint::from_cells(&part.cells).map_or((0, 0), |f| (f.width_cells, f.depth_cells));
     row(&format!(
@@ -549,9 +598,33 @@ fn output(run: &Run, written: &[Written]) {
     );
 }
 
+/// A built body's footprint in millimetres, `(width, depth)`, read off the
+/// vertices of the solid itself.
+///
+/// The plate reaches past the cells it was cut on, so a footprint derived from a
+/// cell count is not this one; the solid is the only thing that knows how big
+/// the body really is.
+fn footprint_mm(solid: &Solid) -> (f64, f64) {
+    assert!(
+        !solid.verts.is_empty(),
+        "a built piece with no vertices has no footprint to measure"
+    );
+    let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
+    for v in &solid.verts {
+        min_x = min_x.min(v.point.x);
+        max_x = max_x.max(v.point.x);
+        min_y = min_y.min(v.point.y);
+        max_y = max_y.max(v.point.y);
+    }
+    (max_x - min_x, max_y - min_y)
+}
+
 /// Everything worth a second look: rounding that did not land, objects that do
-/// not fit the cavity's depth, instances left unplaced, and drawer margin big
-/// enough to have been another cell.
+/// not fit the cavity's depth, instances left unplaced, a baseplate piece the
+/// bed cannot take, the extra pieces staggering the plate's seams cost, a stack
+/// whose two bodies part on one plane after all, and drawer margin big enough to
+/// have been another cell.
 fn warnings(run: &Run) {
     let mut lines: Vec<String> = Vec::new();
     let depth = run.spec.cavity_depth();
@@ -582,6 +655,34 @@ fn warnings(run: &Run) {
             "{} of {wanted} instances did not fit; the bin was built without them",
             wanted - placed
         ));
+    }
+    for piece in &run.baseplate {
+        let (width, depth) = footprint_mm(&piece.solid);
+        if !run.spec.printer.bed_fit_mm(width, depth).fits {
+            lines.push(format!(
+                "{} measures {} x {} mm and does not fit the bed -- no plan for the plate both \
+                 prints and keeps off the bin's seams",
+                piece.name,
+                mm(width),
+                mm(depth)
+            ));
+        }
+    }
+    if run.plate_stagger_cost > 0 {
+        lines.push(format!(
+            "keeping the baseplate's seams off the bin's cost it {} extra piece{} -- the bin's \
+             own chunks are as wide as the bed takes, so the plate cannot match them and miss them",
+            run.plate_stagger_cost,
+            if run.plate_stagger_cost == 1 { "" } else { "s" }
+        ));
+    }
+    if !run.interlocked() {
+        lines.push(
+            "the baseplate is cut on the bin's own lines, so every seam in the drawer lies in \
+             one plane and the stack parts along it -- no piece of either body spans a seam of \
+             the other"
+                .to_string(),
+        );
     }
     for (axis, margin) in [("width", run.grid.margin_x), ("depth", run.grid.margin_y)] {
         if margin >= 42.0 {

@@ -73,11 +73,9 @@ impl GridFootprint {
         })
     }
 
-    pub fn mm(&self) -> (f64, f64) {
-        (
-            self.width_cells as f64 * PITCH as f64,
-            self.depth_cells as f64 * PITCH as f64,
-        )
+    /// The footprint in millimetres, on a grid of `pitch`.
+    pub fn mm(&self, pitch: f64) -> (f64, f64) {
+        (self.width_cells as f64 * pitch, self.depth_cells as f64 * pitch)
     }
 }
 
@@ -433,7 +431,7 @@ fn chunk_index(c: i32, lines: &[i32]) -> i32 {
     lines.iter().filter(|&&l| l <= c).count() as i32
 }
 
-fn axis_lines(split_lines: &[SplitLine], axis: Axis) -> Vec<i32> {
+pub(crate) fn axis_lines(split_lines: &[SplitLine], axis: Axis) -> Vec<i32> {
     let mut v: Vec<i32> = split_lines
         .iter()
         .filter(|l| l.axis == axis)
@@ -482,7 +480,7 @@ mod tests {
         let f = GridFootprint::from_cells(&cells(&[(0, 0), (1, 0), (0, 1), (1, 1)])).unwrap();
         assert_eq!(f.width_cells, 2);
         assert_eq!(f.depth_cells, 2);
-        assert_eq!(f.mm(), (84.0, 84.0));
+        assert_eq!(f.mm(crate::gridfinity::GRID_PITCH), (84.0, 84.0));
     }
 
     /// The two readings a divider can have. Cutting *every* internal adjacency

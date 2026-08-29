@@ -1,0 +1,29 @@
+# A worked input for `cargo run -- optimize`.
+#
+#   cargo run -- optimize examples/drawer.toml --format stl out
+#   cargo run -- optimize examples/drawer.toml --format parasolid_x_t drawer.x_t --view
+
+# A measurement is millimetres unless it is a string naming its unit, as the
+# level's is below: mm, cm, m, in and ft are the units.
+
+[drawer]
+width = 292.1          # the drawer's inside measurements, in mm
+depth = 523.24
+
+[settings]             # every key here is optional
+grid_size = 40         # the cell pitch; 42 mm is the Gridfinity standard
+divider_thickness = 1.2
+clearance = 0.5
+effort = "standard"    # quick | standard | thorough
+height_units = 4       # 7 mm each, above a 7 mm base
+wall_thickness = 1.2
+fillet_radius = 2.5
+magnets = false
+screws = false
+baseplate = true       # the grid the fitted bin drops into, cut on the bin's own lines
+printer = "Elegoo Centauri Carbon"
+# bed = { width = 250, depth = 210 }   # state a bed instead of a profile
+
+[[objects]]
+name = "level"
+size = ["2.1 in", "9.2 in"]

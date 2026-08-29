@@ -3,13 +3,19 @@
 //!
 //! The first half is the standard: pitch, heights, the outer corner radius, the
 //! three peg profiles and where their arcs are struck, the fastener bores. Those
-//! are facts about the format and change only if the format does. The second
+//! are facts about the format and change only if the format does. The pitch is
+//! the one of them a caller may restate -- `Params::pitch`, `GRID_PITCH` unless
+//! it says otherwise -- so everything the standard measures *from* the cell
+//! edge is a function of it here rather than a number: the three peg widths,
+//! the fastener inset and the baseplate's carving reach. The second
 //! half is this implementation's: the tolerances that decide when two points are
 //! one point, when a turn is a corner, when a radius is too small to be worth
 //! building -- each named for the quantity it bounds -- and the two functions
 //! that map a requested wall thickness or fillet radius onto one the geometry
 //! admits. Nothing here builds anything.
 
+/// The standard's cell pitch, and the pitch of every bin whose `Params` does
+/// not name another.
 pub const GRID_PITCH: f64 = 42.0;
 
 pub const HEIGHT_PER_UNIT: f64 = 7.0;
@@ -36,13 +42,20 @@ pub(super) const SCREW_RADIUS: f64 = 1.5;
 
 pub(super) const SCREW_DEPTH: f64 = 6.0;
 
-pub(super) const FASTENER_INSET: f64 = 13.0;
+/// How far each of the three peg profiles is inset from the cell's edge, per
+/// side. The standard states the widths -- 35.6, 37.2 and 41.5 across a 42 mm
+/// cell -- and these are the same three numbers read from the edge inwards,
+/// which is what makes them the profiles of a cell of any pitch.
+pub(super) const PEG_INSET_TOP: f64 = HALF_TOL;
 
-pub(super) const PEG_W_BOTTOM: f64 = 35.6;
+pub(super) const PEG_INSET_MID: f64 = 2.15;
 
-pub(super) const PEG_W_MID: f64 = 37.2;
+pub(super) const PEG_INSET_BOTTOM: f64 = 0.8;
 
-pub(super) const PEG_W_TOP: f64 = 41.5;
+/// How far a fastener bore's centre sits inside the cell's edge. The standard
+/// puts the four magnets of a 42 mm cell 26 mm apart, which is 8 mm in from
+/// every side.
+pub(super) const FASTENER_EDGE_INSET: f64 = 8.0;
 
 pub(super) const PEG_R_BOTTOM: f64 = 0.8;
 
@@ -52,11 +65,68 @@ pub(super) const PEG_TANGENT: f64 = HALF_TOL + OUTER_R;
 
 pub(super) const REENTRANT_FILLET_OVERHANG: f64 = 8.0;
 
+/// The smallest pitch a cell can be built at: below it the standard's own peg
+/// profile does not close.
+///
+/// The top profile is `pitch - 2 * PEG_INSET_TOP` across and turns two `OUTER_R`
+/// corners, so it needs `2 * (PEG_INSET_TOP + OUTER_R)` before it has any
+/// straight run at all, and `MIN_QUAD_ROUND` is the shortest run worth emitting.
+/// That is the binding constraint: the bottom profile, `2 * (PEG_INSET_TOP +
+/// PEG_INSET_MID + PEG_INSET_BOTTOM)` in from the edge and turning the smaller
+/// `PEG_R_BOTTOM`, still has material left at that pitch.
+pub const MIN_GRID_PITCH: f64 = 2.0 * (PEG_INSET_TOP + OUTER_R) + MIN_QUAD_ROUND;
+
+/// The three peg profile widths of a cell of `pitch`, bottom, middle and top,
+/// each the pitch less twice its inset from the edge. At `GRID_PITCH` they are
+/// the standard's 35.6, 37.2 and 41.5.
+pub(super) fn peg_widths(pitch: f64) -> (f64, f64, f64) {
+    assert_buildable_pitch(pitch);
+    let top = pitch - 2.0 * PEG_INSET_TOP;
+    let mid = top - 2.0 * PEG_INSET_MID;
+    let bottom = mid - 2.0 * PEG_INSET_BOTTOM;
+    assert!(
+        bottom > 2.0 * PEG_R_BOTTOM,
+        "a peg's bottom profile is {bottom} mm across at a pitch of {pitch} mm, which cannot \n         turn the two {PEG_R_BOTTOM} mm corners it is rounded by"
+    );
+    (bottom, mid, top)
+}
+
+/// The smallest pitch a cell can carry fasteners at: the four bores stand
+/// `FASTENER_EDGE_INSET` in from the edges, so at or below this their centres
+/// are nearer the cell's own centre than a bore's own radius and the four run
+/// into one another.
+pub const MIN_FASTENER_GRID_PITCH: f64 = 2.0 * (FASTENER_EDGE_INSET + MAGNET_RADIUS);
+
+/// How far a fastener bore's centre sits from the centre of a cell of `pitch`,
+/// along each axis: half the cell less the inset the standard puts it at. 13 mm
+/// at `GRID_PITCH`.
+pub(super) fn fastener_inset(pitch: f64) -> f64 {
+    assert_buildable_pitch(pitch);
+    assert!(
+        pitch > MIN_FASTENER_GRID_PITCH,
+        "a {pitch} mm cell puts its fastener bores {} mm from its centre, inside the \n         {MAGNET_RADIUS} mm bore itself -- a cell carries fasteners only above \n         {MIN_FASTENER_GRID_PITCH} mm",
+        pitch / 2.0 - FASTENER_EDGE_INSET
+    );
+    pitch / 2.0 - FASTENER_EDGE_INSET
+}
+
 /// How far a baseplate piece's carving prism reaches into a cell the plate does
 /// not occupy, so its planes there stand clear of the plate's own outer faces
 /// instead of lying in them. Half a pitch: the nearest material across an empty
 /// cell is a whole pitch away, so the reach is always in empty space.
-pub(super) const BASEPLATE_PRISM_REACH: f64 = GRID_PITCH / 2.0;
+pub(super) fn baseplate_prism_reach(pitch: f64) -> f64 {
+    assert_buildable_pitch(pitch);
+    pitch / 2.0
+}
+
+/// Refuses a pitch no cell can be built at, naming the bound it broke.
+pub(super) fn assert_buildable_pitch(pitch: f64) {
+    assert!(
+        pitch.is_finite() && pitch >= MIN_GRID_PITCH,
+        "a grid pitch is at least {MIN_GRID_PITCH} mm, the width the standard's peg profile \
+         closes at, but this one is {pitch}"
+    );
+}
 
 /// The thinnest wall a *square* cavity corner can carry inside the outer arc.
 /// A sharp corner of a cavity inset `wt` sits `sqrt(2) * (OUTER_R - wt)` from

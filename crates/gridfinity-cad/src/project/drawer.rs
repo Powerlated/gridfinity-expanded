@@ -2,7 +2,9 @@
 //! left over, and which rectangle inside the resulting bin the packer may use.
 //!
 //! Packing is millimetre-space and only the bin outline is cell-quantized:
-//! `drawer_grid` floors the drawer's measurements to whole 42 mm cells and
+//! `drawer_grid` floors the drawer's measurements to whole cells of the pitch it
+//! is given -- `GRID_PITCH` for a standard grid, whatever the run asked for
+//! otherwise -- and
 //! reports the leftover millimetres as unusable margin, `drawer_cells` spells
 //! that grid out as the bin's cell set, and `packing_area` is the cavity
 //! interior inset by `packing_inset` -- the perimeter clearance plus the
@@ -13,21 +15,24 @@
 //! own clamping.
 
 use super::rects::Rect;
-use crate::gridfinity::{GRID_PITCH, HALF_TOL};
+use crate::gridfinity::HALF_TOL;
 use crate::layout::GridCell;
 
 /// The most cells a drawer bin is allowed along one axis.
 pub const MAX_GRID: u32 = 40;
 
-/// The smallest drawer measurement worth stating, in mm: one grid cell, below
-/// which `drawer_grid` floors to zero cells and the drawer holds nothing.
-pub const MIN_DRAWER_MM: f64 = GRID_PITCH as f64;
+/// The smallest drawer measurement worth stating, in mm: one grid cell of
+/// `pitch`, below which `drawer_grid` floors to zero cells and the drawer holds
+/// nothing.
+pub fn min_drawer_mm(pitch: f64) -> f64 {
+    pitch
+}
 
 /// The largest drawer measurement worth stating, in mm: the point past which
 /// `drawer_grid` clamps to `max_grid` and every further millimetre becomes
 /// unusable margin rather than another cell.
-pub fn max_drawer_mm(max_grid: u32) -> f64 {
-    max_grid as f64 * GRID_PITCH as f64
+pub fn max_drawer_mm(max_grid: u32, pitch: f64) -> f64 {
+    max_grid as f64 * pitch
 }
 
 /// How a drawer's measurements resolve into a bin: whole cells along each axis,
@@ -44,8 +49,8 @@ pub struct DrawerGrid {
 /// axis, and the drawer millimetres it leaves unused. Every millimetre past the
 /// cap is margin, so the margin is below one pitch exactly when the axis is not
 /// capped.
-pub fn drawer_grid(width_mm: f64, depth_mm: f64, max_grid: u32) -> DrawerGrid {
-    let pitch = GRID_PITCH as f64;
+pub fn drawer_grid(width_mm: f64, depth_mm: f64, max_grid: u32, pitch: f64) -> DrawerGrid {
+    assert!(pitch > 0.0, "a grid pitch is a positive number of millimetres, not {pitch}");
     let cells = |mm: f64| -> u32 {
         if mm <= 0.0 {
             return 0;
@@ -91,9 +96,9 @@ pub fn packing_inset(perimeter_thickness: f64) -> f64 {
 /// The rectangle the packer may fill: the drawer bin's cavity interior, in the
 /// same millimetre coordinates as the bin's cells, zero-sized when the wall
 /// leaves nothing.
-pub fn packing_area(grid: DrawerGrid, perimeter_thickness: f64) -> Rect {
+pub fn packing_area(grid: DrawerGrid, perimeter_thickness: f64, pitch: f64) -> Rect {
     let inset = packing_inset(perimeter_thickness);
-    let pitch = GRID_PITCH as f64;
+    assert!(pitch > 0.0, "a grid pitch is a positive number of millimetres, not {pitch}");
     let area = Rect::new(
         inset,
         inset,
@@ -123,10 +128,26 @@ pub fn drawer_cells(grid: DrawerGrid) -> Vec<GridCell> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gridfinity::GRID_PITCH;
+
+    /// A drawer measured in cells of half the standard pitch: the same 400 mm
+    /// holds twice as many.
+    #[test]
+    fn a_finer_pitch_takes_more_cells_out_of_the_same_drawer() {
+        let half = GRID_PITCH / 2.0;
+        let grid = drawer_grid(400.0, 300.0, MAX_GRID, half);
+        assert_eq!((grid.cols, grid.rows), (19, 14));
+        assert!((grid.margin_x - (400.0 - 19.0 * half)).abs() < 1e-9);
+        let area = packing_area(grid, 1.2, half);
+        assert!(
+            (area.width - (19.0 * half - 2.0 * packing_inset(1.2))).abs() < 1e-9,
+            "the packing area follows the pitch the grid was measured in, not {area:?}"
+        );
+    }
 
     #[test]
     fn floors_a_drawer_to_whole_cells_and_reports_the_rest_as_margin() {
-        let grid = drawer_grid(400.0, 300.0, MAX_GRID);
+        let grid = drawer_grid(400.0, 300.0, MAX_GRID, GRID_PITCH);
         assert_eq!((grid.cols, grid.rows), (9, 7));
         assert!((grid.margin_x - (400.0 - 9.0 * 42.0)).abs() < 1e-9);
         assert!((grid.margin_y - (300.0 - 7.0 * 42.0)).abs() < 1e-9);
@@ -134,30 +155,30 @@ mod tests {
 
     #[test]
     fn holds_nothing_below_one_cell() {
-        let grid = drawer_grid(MIN_DRAWER_MM - 0.1, 300.0, MAX_GRID);
+        let grid = drawer_grid(min_drawer_mm(GRID_PITCH) - 0.1, 300.0, MAX_GRID, GRID_PITCH);
         assert_eq!(grid.cols, 0);
         assert!(drawer_cells(grid).is_empty());
     }
 
     #[test]
     fn turns_every_millimetre_past_the_cap_into_margin() {
-        let over = max_drawer_mm(MAX_GRID) + 100.0;
-        let grid = drawer_grid(over, over, MAX_GRID);
+        let over = max_drawer_mm(MAX_GRID, GRID_PITCH) + 100.0;
+        let grid = drawer_grid(over, over, MAX_GRID, GRID_PITCH);
         assert_eq!((grid.cols, grid.rows), (MAX_GRID, MAX_GRID));
         assert!((grid.margin_x - 100.0).abs() < 1e-9);
     }
 
     #[test]
     fn insets_the_packing_area_by_the_clearance_and_the_wall() {
-        let grid = drawer_grid(400.0, 300.0, MAX_GRID);
-        let area = packing_area(grid, 1.2);
+        let grid = drawer_grid(400.0, 300.0, MAX_GRID, GRID_PITCH);
+        let area = packing_area(grid, 1.2, GRID_PITCH);
         assert_eq!(area.x, packing_inset(1.2));
         assert_eq!(area.width, 9.0 * 42.0 - 2.0 * packing_inset(1.2));
     }
 
     #[test]
     fn lists_one_cell_per_grid_position() {
-        let grid = drawer_grid(400.0, 300.0, MAX_GRID);
+        let grid = drawer_grid(400.0, 300.0, MAX_GRID, GRID_PITCH);
         assert_eq!(drawer_cells(grid).len(), (grid.cols * grid.rows) as usize);
     }
 }

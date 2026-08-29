@@ -19,6 +19,7 @@ use crate::kernel::nesting::containment;
 use crate::kernel::rectregion::{LoopStyle, RectF, shape_loop, trace_rects};
 use crate::kernel::sketch::{Aabb, Seg, loop_area, point_in_segs, reverse_loop, segs_bbox};
 use crate::kernel::topo::{Builder, Loop, Solid};
+use crate::layout::{GridCell, GridFootprint};
 
 /// One connected plate: the outer loop's top and bottom rings, and the loops
 /// that are holes of *that* plate -- its traced interior holes and the socket
@@ -45,6 +46,66 @@ fn island_of(point: Vec2, outers: &[usize], loops: &[Vec<Seg>], containers: &[Ve
         .map(|(i, _)| i)
 }
 
+/// How far one cell's plate rectangle reaches past its own pitch square on each
+/// of its four sides, as `(west, east, south, north)` millimetres: half the
+/// plate margin wherever the cell sits on a side of `grid`'s bounding rectangle,
+/// and nothing anywhere else.
+///
+/// The margins are *totals* per axis, split evenly between the two sides, so the
+/// cell grid sits centred in the plate. A side facing into the grid's interior
+/// -- a notch, an enclosed hole -- never grows, which is what keeps two pieces
+/// of one plate from claiming the same empty cell. `grid` is the whole plate's
+/// cell set even when `cell` belongs to one carved piece of it, so every piece
+/// grows on the sides the finished plate grows on and on no others.
+pub(super) fn plate_cell_overhang(
+    cell: GridCell,
+    grid: GridFootprint,
+    margin_x: f64,
+    margin_y: f64,
+) -> (f64, f64, f64, f64) {
+    assert!(
+        margin_x >= 0.0 && margin_y >= 0.0,
+        "a plate margin is how much wider than its grid the plate is, so it is not \
+         {margin_x} x {margin_y} mm"
+    );
+    let (hx, hy) = (margin_x / 2.0, margin_y / 2.0);
+    let (max_x, max_y) = (
+        grid.min_x + grid.width_cells - 1,
+        grid.min_y + grid.depth_cells - 1,
+    );
+    (
+        if cell.x == grid.min_x { hx } else { 0.0 },
+        if cell.x == max_x { hx } else { 0.0 },
+        if cell.y == grid.min_y { hy } else { 0.0 },
+        if cell.y == max_y { hy } else { 0.0 },
+    )
+}
+
+/// One cell's plate rectangle: its pitch square grown by `plate_cell_overhang`.
+pub(super) fn plate_cell_rect(
+    cell: GridCell,
+    grid: GridFootprint,
+    pitch: f64,
+    margin_x: f64,
+    margin_y: f64,
+) -> RectF {
+    let (west, east, south, north) = plate_cell_overhang(cell, grid, margin_x, margin_y);
+    let rect = RectF::new(
+        cell.x as f64 * pitch - west,
+        cell.y as f64 * pitch - south,
+        pitch + west + east,
+        pitch + south + north,
+    );
+    assert!(
+        rect.x <= cell.x as f64 * pitch && rect.w >= pitch && rect.h >= pitch,
+        "a plate rectangle grows a cell's pitch square outward, but cell ({}, {}) came back as \
+         {rect:?}",
+        cell.x,
+        cell.y
+    );
+    rect
+}
+
 pub(super) fn build_baseplate(p: &Params) -> Solid {
     let cells = p.all_cells();
     if cells.is_empty() {
@@ -52,17 +113,12 @@ pub(super) fn build_baseplate(p: &Params) -> Solid {
     }
     let mut b = Builder::new();
 
+    let grid = GridFootprint::from_cells(&cells)
+        .expect("a plate of at least one cell has a bounding rectangle");
     let traced = trace_rects(
         &cells
             .iter()
-            .map(|c| {
-                RectF::new(
-                    c.x as f64 * GRID_PITCH,
-                    c.y as f64 * GRID_PITCH,
-                    GRID_PITCH,
-                    GRID_PITCH,
-                )
-            })
+            .map(|c| plate_cell_rect(*c, grid, p.pitch, p.plate_margin_x, p.plate_margin_y))
             .collect::<Vec<_>>(),
         &[],
     );
@@ -125,10 +181,11 @@ pub(super) fn build_baseplate(p: &Params) -> Solid {
         islands[owner].holes_bot.push(rings[h].1.clone());
     }
 
+    let (w_bot, w_mid, w_top) = peg_widths(p.pitch);
     for c in &cells {
-        let s_bot = peg_profile(*c, PEG_W_BOTTOM, PEG_R_BOTTOM);
-        let s_mid = peg_profile(*c, PEG_W_MID, PEG_R_MID);
-        let s_top = peg_profile(*c, PEG_W_TOP, OUTER_R);
+        let s_bot = peg_profile(*c, p.pitch, w_bot, PEG_R_BOTTOM);
+        let s_mid = peg_profile(*c, p.pitch, w_mid, PEG_R_MID);
+        let s_top = peg_profile(*c, p.pitch, w_top, OUTER_R);
         let r0 = ring(&mut b, &s_bot, 0.0);
         let r1 = ring(&mut b, &s_mid, PEG_Z1);
         let r2 = ring(&mut b, &s_mid, PEG_Z2);
@@ -137,8 +194,8 @@ pub(super) fn build_baseplate(p: &Params) -> Solid {
         wall_between(&mut b, &s_mid, &s_mid, &r1, &r2, PEG_Z1, PEG_Z2, false);
         wall_between(&mut b, &s_mid, &s_top, &r2, &r3, PEG_Z2, PEG_HEIGHT, false);
         let centre = Vec2::new(
-            (c.x as f64 + 0.5) * GRID_PITCH,
-            (c.y as f64 + 0.5) * GRID_PITCH,
+            (c.x as f64 + 0.5) * p.pitch,
+            (c.y as f64 + 0.5) * p.pitch,
         );
         let owner = island_of(centre, &outers, &outline, &containers).unwrap_or_else(|| {
             panic!(

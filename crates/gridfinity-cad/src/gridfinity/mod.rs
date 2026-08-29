@@ -127,7 +127,7 @@ pub fn build_piece(
     pockets: &[Pocket],
 ) -> Result<Solid, String> {
     let whole = build_bin_solid(p, bin_cells, slope, pockets)?;
-    carve_to_cells(&whole, bin_cells, piece_cells)
+    carve_to_cells(&whole, p.pitch, bin_cells, piece_cells)
 }
 
 pub fn build_bin_solid(

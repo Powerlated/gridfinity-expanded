@@ -111,7 +111,8 @@ pub(crate) fn split_l_solids() -> Vec<Solid> {
     crate::layout::partition_cells(&cells, &p.bins[0].split_lines)
         .iter()
         .map(|part| {
-            gridfinity::carve_to_cells(&whole, &cells, &part.cells).expect("each piece carves")
+            gridfinity::carve_to_cells(&whole, p.pitch, &cells, &part.cells)
+                .expect("each piece carves")
         })
         .collect()
 }

@@ -32,7 +32,7 @@ use gridfinity_cad::kernel::math::Vec3;
 use gridfinity_cad::kernel::program::BlendReport;
 use gridfinity_cad::kernel::topo::Solid;
 use gridfinity_cad::layout::{GridCell, Piece, SplitLine, partition_cells};
-use gridfinity_cad::printers::compute_auto_split_lines;
+use gridfinity_cad::printers::{compute_auto_split_lines, compute_staggered_split_lines};
 use gridfinity_cad::project::drawer::{DrawerGrid, MAX_GRID, drawer_cells, drawer_grid, packing_area};
 use gridfinity_cad::project::pack::{PackInput, PackResult, pack_layout};
 use gridfinity_cad::project::rects::{Rect, inflate_parts};
@@ -121,9 +121,13 @@ pub struct Run {
     pub wall_report: WallReport,
     pub pockets: Vec<Pocket>,
     pub params: Params,
+    pub plate_params: Option<Params>,
     pub split_lines: Vec<SplitLine>,
     pub parts: Vec<Piece>,
     pub pieces: Vec<BinPiece>,
+    pub plate_split_lines: Vec<SplitLine>,
+    pub plate_parts: Vec<Piece>,
+    pub plate_stagger_cost: usize,
     pub baseplate: Vec<BinPiece>,
     pub blends: BlendReport,
     pub soundness: Vec<PieceSoundness>,
@@ -140,6 +144,20 @@ impl Run {
     pub fn all_pieces(&self) -> Vec<&BinPiece> {
         self.pieces.iter().chain(self.baseplate.iter()).collect()
     }
+
+    /// Whether the stack holds itself together: every seam of the bin is spanned
+    /// by a piece of the baseplate and every seam of the plate by a piece of the
+    /// bin, which is exactly the two bodies sharing no cut line.
+    ///
+    /// True of a run with no baseplate to interlock with, and of one where
+    /// either body is a single piece -- a piece that is cut nowhere spans every
+    /// seam under it. False only where a staggered plan for the plate did not
+    /// print, so it fell back to the bin's own lines and the assembly parts
+    /// along one plane.
+    pub fn interlocked(&self) -> bool {
+        self.baseplate.is_empty()
+            || self.plate_split_lines.iter().all(|l| !self.split_lines.contains(l))
+    }
 }
 
 /// One placed object's box, in the bin's own millimetre coordinates: what the
@@ -155,10 +173,18 @@ pub struct ObjectBox {
     pub fits: bool,
 }
 
-/// Everything `--view` opens the window on: the bin to rebuild, and the boxes of
-/// the objects it was cut for.
+/// Everything `--view` opens the window on: the bin to rebuild, the boxes of the
+/// objects it was cut for, and the baseplate under it -- `None` when the file
+/// asked for none.
+///
+/// The plate travels as its own `Params` rather than as built geometry, like the
+/// bin does, so the window rebuilds both from the same declarations the export
+/// wrote from. It carries the plate's **own** split lines, which is what makes
+/// the two bodies explode along different bands and shows the interlock: a piece
+/// of each spans the other's seams.
 pub struct View {
     pub params: Params,
+    pub plate: Option<Params>,
     pub boxes: Vec<ObjectBox>,
 }
 
@@ -318,6 +344,7 @@ fn drawer_params(
             slope: None,
             pockets: pockets.to_vec(),
         }],
+        pitch: spec.pitch,
         height_units: spec.height_units,
         wall_thickness: spec.wall_thickness,
         cavity_corner_radius: spec.fillet_radius,
@@ -327,31 +354,102 @@ fn drawer_params(
         open_edges: Vec::new(),
         divider_edges: Vec::new(),
         inner_walls: Vec::new(),
+        plate_margin_x: 0.0,
+        plate_margin_y: 0.0,
         mode: Mode::Bin,
     }
 }
 
-/// The `Params` the fitted drawer's baseplate builds as: the same cells and the
-/// same split lines as the bin, so the plate is cut where the bin is and the two
-/// halves of a drawer line up, in `Mode::Baseplate`.
-fn baseplate_params(spec: &Spec, cells: &[GridCell], splits: &[SplitLine]) -> Params {
+/// Where the fitted drawer's baseplate is cut: its own plan, staggered off the
+/// bin's `bin_splits` so the two bodies part on different lines, or the bin's
+/// own lines when no staggered plan prints. Empty when the file asked for no
+/// baseplate, which is the one case with nothing to cut.
+///
+/// **The seams are deliberately not shared.** A bin piece that spans a plate
+/// seam pegs into both plate pieces at once and holds them together, and a plate
+/// piece that spans a bin seam holds the bin pieces the same way, so a stack cut
+/// on two staggered sets of lines constrains itself to move as one body: no
+/// piece can leave without lifting the pieces it laps. Cut on one set, every
+/// seam in the drawer lies in one plane and the whole stack parts along it.
+///
+/// The plate is planned in millimetres and against its own footprint rather than
+/// the bin's, because it is not its cells: it stands half of `grid.margin_x` /
+/// `_y` outside the grid at each end, and a plan measured in whole cells is the
+/// reason a fitted plate used to be able to outgrow the bed its seams were
+/// placed for. Falling back is a real outcome -- a drawer whose plate can only
+/// be divided where the bin already is -- and `Run::interlocked` is what reads
+/// it back, so the report can say the stack parts in one plane.
+fn plate_splits(
+    spec: &Spec,
+    grid: DrawerGrid,
+    cells: &[GridCell],
+    bin_splits: &[SplitLine],
+) -> Vec<SplitLine> {
+    if !spec.baseplate {
+        return Vec::new();
+    }
+    compute_staggered_split_lines(
+        cells,
+        spec.printer,
+        spec.pitch,
+        (grid.margin_x, grid.margin_y),
+        bin_splits,
+    )
+    .unwrap_or_else(|| bin_splits.to_vec())
+}
+
+/// The pieces the baseplate would come to if it were free to be cut wherever it
+/// liked: the bar its staggered plan is read against, so the report can say what
+/// keeping off the bin's seams cost. One where no plan prints at all, which is
+/// the bed refusing a single cell rather than anything staggering did.
+fn plate_pieces_unstaggered(spec: &Spec, grid: DrawerGrid, cells: &[GridCell]) -> usize {
+    compute_staggered_split_lines(
+        cells,
+        spec.printer,
+        spec.pitch,
+        (grid.margin_x, grid.margin_y),
+        &[],
+    )
+    .map_or(1, |lines| partition_cells(cells, &lines).len())
+}
+
+/// The `Params` the fitted drawer's baseplate builds as: the bin's cells in
+/// `Mode::Baseplate`, cut on `splits` -- the plate's *own* lines, staggered off
+/// the bin's -- and carrying the drawer millimetres no cell covers as its plate
+/// margin.
+///
+/// That margin is what makes the plate a snug fit. The bin is measured in whole
+/// cells and the drawer is not, so a bin built on the grid alone leaves
+/// `grid.margin_x` by `grid.margin_y` of slop for the whole stack to slide in;
+/// the plate is the body that touches the drawer walls, so it is the body that
+/// grows. It grows on the outside only, by half the margin on each side of the
+/// grid, which spans the drawer exactly and leaves the bin, the packing area and
+/// every compartment as they were.
+fn baseplate_params(
+    spec: &Spec,
+    grid: DrawerGrid,
+    cells: &[GridCell],
+    splits: &[SplitLine],
+) -> Params {
     Params {
         mode: Mode::Baseplate,
+        plate_margin_x: grid.margin_x,
+        plate_margin_y: grid.margin_y,
         ..drawer_params(spec, cells, &[], splits)
     }
 }
 
 /// The whole pipeline for one validated run: pack, divide, split, build.
 fn fit(spec: Spec) -> Result<Run, String> {
-    let grid = drawer_grid(spec.drawer_width, spec.drawer_depth, MAX_GRID);
+    let grid = drawer_grid(spec.drawer_width, spec.drawer_depth, MAX_GRID, spec.pitch);
     if grid.cols == 0 || grid.rows == 0 {
         return Err(format!(
-            "a drawer of {} x {} mm does not hold one 42 mm Gridfinity cell",
-            spec.drawer_width, spec.drawer_depth
+            "a drawer of {} x {} mm does not hold one {} mm Gridfinity cell",
+            spec.drawer_width, spec.drawer_depth, spec.pitch
         ));
     }
     let cells = drawer_cells(grid);
-    let area = packing_area(grid, spec.wall_thickness);
+    let area = packing_area(grid, spec.wall_thickness, spec.pitch);
     let floor_fillet = spec.built_floor_fillet();
 
     let input = PackInput {
@@ -371,16 +469,33 @@ fn fit(spec: Spec) -> Result<Run, String> {
     let (_, wall_report) =
         layout_walls_reporting(&result.placements, &area, spec.divider_thickness);
     let pockets = drawer_pockets(&result, spec.divider_thickness);
-    let split_lines = compute_auto_split_lines(&cells, spec.printer);
+    let split_lines = compute_auto_split_lines(&cells, spec.printer, spec.pitch);
     let params = drawer_params(&spec, &cells, &pockets, &split_lines);
     let parts = partition_cells(&cells, &split_lines);
+    let plate_split_lines = plate_splits(&spec, grid, &cells, &split_lines);
+    let plate_parts = if spec.baseplate {
+        partition_cells(&cells, &plate_split_lines)
+    } else {
+        Vec::new()
+    };
+    let free_plate = plate_pieces_unstaggered(&spec, grid, &cells);
+    assert!(
+        !spec.baseplate || plate_parts.len() >= free_plate,
+        "staggering the plate's seams off the bin's brought it to {} piece(s), fewer than the \
+         {free_plate} it comes to when free to be cut anywhere",
+        plate_parts.len()
+    );
+    let plate_stagger_cost = plate_parts.len().saturating_sub(free_plate);
+
+    let plate_params = spec
+        .baseplate
+        .then(|| baseplate_params(&spec, grid, &cells, &plate_split_lines));
 
     let started = Instant::now();
     let (pieces, blends) = gridfinity::try_build_pieces_reporting(&params)?;
-    let baseplate = if spec.baseplate {
-        gridfinity::try_build_pieces(&baseplate_params(&spec, &cells, &split_lines))?
-    } else {
-        Vec::new()
+    let baseplate = match &plate_params {
+        Some(plate) => gridfinity::try_build_pieces(plate)?,
+        None => Vec::new(),
     };
     let build_time = started.elapsed();
     assert_eq!(
@@ -390,10 +505,11 @@ fn fit(spec: Spec) -> Result<Run, String> {
         pieces.len(),
         parts.len()
     );
-    assert!(
-        baseplate.is_empty() || baseplate.len() == parts.len(),
-        "the baseplate is cut on the bin's own split lines, so it comes to {} piece(s), not {}",
-        parts.len(),
+    assert_eq!(
+        baseplate.len(),
+        plate_parts.len(),
+        "the baseplate is cut on its own staggered split lines, so it comes to {} piece(s), not {}",
+        plate_parts.len(),
         baseplate.len()
     );
 
@@ -408,9 +524,13 @@ fn fit(spec: Spec) -> Result<Run, String> {
         wall_report,
         pockets,
         params,
+        plate_params,
         split_lines,
         parts,
         pieces,
+        plate_split_lines,
+        plate_parts,
+        plate_stagger_cost,
         baseplate,
         blends,
         soundness: Vec::new(),
@@ -451,6 +571,7 @@ pub fn run(args: &Args) -> Result<Option<View>, String> {
     Ok(args.view.then(|| View {
         boxes: object_boxes(&run),
         params: run.params,
+        plate: run.plate_params,
     }))
 }
 
@@ -458,6 +579,7 @@ pub fn run(args: &Args) -> Result<Option<View>, String> {
 mod tests {
     use super::*;
     use gridfinity_cad::kernel::geom::Surface;
+    use gridfinity_cad::layout::Axis;
     use gridfinity_cad::kernel::math::Vec2;
     use gridfinity_cad::kernel::sketch::point_in_polygon;
 
@@ -576,6 +698,78 @@ name = \"block\"
 quantity = 4
 size = [30, 30]
 ";
+
+    /// The same drawer on a half-pitch grid: 21 mm cells, so the 84 mm drawer is
+    /// four cells square rather than two, and the objects are sized for what one
+    /// compartment of that grid holds.
+    const HALF_PITCH: &str = "[drawer]
+width = 84
+depth = 84
+
+[settings]
+grid_size = 21
+effort = \"quick\"
+
+[[objects]]
+name = \"block\"
+quantity = 4
+size = [15, 15]
+";
+
+    #[test]
+    fn measures_the_drawer_in_the_grid_size_the_file_states() {
+        let spec = input::parse(HALF_PITCH).expect("a stated grid size is a valid run");
+        assert_eq!(spec.pitch, 21.0);
+        let run = fit(spec).expect("a drawer on a 21 mm grid builds");
+
+        assert_eq!(
+            (run.grid.cols, run.grid.rows),
+            (4, 4),
+            "an 84 mm drawer is four 21 mm cells across, not two 42 mm ones"
+        );
+        assert_eq!(run.params.pitch, 21.0, "the bin is built on the grid it was fitted on");
+        assert!(
+            (run.area.width - (4.0 * 21.0 - 2.0 * run.area.x)).abs() < 1e-9,
+            "the packing area follows the pitch, not {:?}",
+            run.area
+        );
+        assert_eq!(run.result.placements.len(), 4, "four 15 mm blocks fit it");
+    }
+
+    /// A bin on a grid that is not the standard's is held to everything a
+    /// standard one is: `carve_to_cells` asserts soundness as it produces each
+    /// piece, so reaching the end of `fit` is most of the statement, and the
+    /// baseplate under it has to come off the same grid.
+    #[test]
+    fn a_bin_on_a_stated_grid_is_as_sound_as_one_on_the_standard() {
+        let spec = input::parse(HALF_PITCH).expect("a stated grid size is a valid run");
+        let run = fit(spec).expect("a drawer on a 21 mm grid builds");
+
+        for (piece, sound) in run.all_pieces().iter().zip(&run.soundness) {
+            assert_eq!(sound.shells, 1, "{} is one shell", piece.name);
+            assert!(
+                piece.solid.shells().iter().all(|sh| sh.encloses_material),
+                "{} bounds no sealed void",
+                piece.name
+            );
+        }
+        assert_eq!(
+            run.blends.made(),
+            run.blends.requested,
+            "a finer grid does not cost the compartments their floor fillets"
+        );
+        let (min, max) = run
+            .pieces
+            .iter()
+            .flat_map(|p| p.solid.verts.iter().map(|v| (v.point.x, v.point.x)))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (a, b)| {
+                (lo.min(a), hi.max(b))
+            });
+        assert!(
+            (min - 0.25).abs() < 1e-6 && (max - (4.0 * 21.0 - 0.25)).abs() < 1e-6,
+            "a four-cell bin of 21 mm cells spans 0.25..83.75 mm, not {min}..{max}"
+        );
+    }
 
     #[test]
     fn fits_a_drawer_end_to_end() {
@@ -742,13 +936,17 @@ size = [30, 30, 200]
     }
 
     /// The bin's pegs need a grid to sit in, so a run builds one by default, on
-    /// the bin's own cells and its own cut lines.
+    /// the bin's own cells. A two-cell drawer is cut nowhere, so both bodies are
+    /// one piece and the stack is trivially interlocked.
     #[test]
     fn builds_the_baseplate_the_bin_drops_into() {
         let spec = input::parse(SMALL).expect("the fixture is a valid run");
         let run = fit(spec).expect("a two-cell drawer of four blocks builds");
 
-        assert_eq!(run.baseplate.len(), run.parts.len());
+        assert_eq!(run.baseplate.len(), run.plate_parts.len());
+        assert!(run.split_lines.is_empty() && run.plate_split_lines.is_empty());
+        assert!(run.interlocked(), "an uncut stack is one piece already");
+        assert_eq!(run.plate_stagger_cost, 0);
         assert_eq!(run.all_pieces().len(), run.pieces.len() + run.baseplate.len());
         assert_eq!(
             run.soundness.len(),
@@ -763,6 +961,167 @@ size = [30, 30, 200]
         }
     }
 
+    /// A drawer too long for the bed on one axis: seven cells across, so both
+    /// the bin and the plate under it have to be cut.
+    const LONG: &str = "[drawer]
+width = 300
+depth = 100
+
+[settings]
+effort = \"quick\"
+
+[[objects]]
+name = \"block\"
+quantity = 6
+size = [30, 30]
+";
+
+    /// Whether some piece of `parts` holds the cells on both sides of `line`.
+    /// That is what it means for the piece to span the seam: it is pegged to
+    /// both of the pieces the line separates, so neither can leave without it.
+    fn spans(parts: &[Piece], line: SplitLine) -> bool {
+        let along = |c: &GridCell| match line.axis {
+            Axis::X => c.x,
+            Axis::Y => c.y,
+        };
+        parts.iter().any(|p| {
+            p.cells.iter().any(|c| along(c) == line.index - 1)
+                && p.cells.iter().any(|c| along(c) == line.index)
+        })
+    }
+
+    /// The whole point of staggering: the two bodies part on different lines, so
+    /// every seam of each is spanned by a piece of the other and no piece of the
+    /// stack can be lifted out on its own.
+    #[test]
+    fn the_baseplate_is_cut_beside_the_bins_seams_so_the_stack_holds_itself_together() {
+        let spec = input::parse(LONG).expect("the fixture is a valid run");
+        let run = fit(spec).expect("a seven-cell drawer builds");
+
+        assert!(!run.split_lines.is_empty(), "294 mm of cells does not print whole");
+        assert!(!run.plate_split_lines.is_empty(), "nor does the plate that spans them");
+        assert!(run.interlocked(), "the two bodies share a cut line");
+        assert_eq!(run.plate_stagger_cost, 0, "staggering this plate costs it no piece");
+        for line in &run.split_lines {
+            assert!(
+                spans(&run.plate_parts, *line),
+                "no baseplate piece spans the bin's seam at {line:?}, so the bin's pieces are \
+                 held together by nothing"
+            );
+        }
+        let plate = run.plate_params.as_ref().expect("a fitted drawer ships its grid");
+        assert_eq!(plate.mode, Mode::Baseplate);
+        assert_eq!(
+            plate.bins[0].split_lines, run.plate_split_lines,
+            "the window rebuilds the plate on the lines the export cut it on"
+        );
+        for line in &run.plate_split_lines {
+            assert!(
+                spans(&run.parts, *line),
+                "no bin piece spans the plate's seam at {line:?}, so the plate's pieces are held \
+                 together by nothing"
+            );
+        }
+    }
+
+    /// The plate is measured where it reaches to, not over the cells it covers,
+    /// so its own plan puts every piece on the bed -- the flange included.
+    #[test]
+    fn every_staggered_baseplate_piece_prints() {
+        let spec = input::parse(LONG).expect("the fixture is a valid run");
+        let run = fit(spec).expect("a seven-cell drawer builds");
+
+        assert_eq!(run.baseplate.len(), run.plate_parts.len());
+        for piece in &run.baseplate {
+            let (mut width, mut depth) = (0.0f64, 0.0f64);
+            let (mut lo_x, mut lo_y) = (f64::INFINITY, f64::INFINITY);
+            for v in &piece.solid.verts {
+                lo_x = lo_x.min(v.point.x);
+                lo_y = lo_y.min(v.point.y);
+                width = width.max(v.point.x);
+                depth = depth.max(v.point.y);
+            }
+            let fit = run.spec.printer.bed_fit_mm(width - lo_x, depth - lo_y);
+            assert!(
+                fit.fits,
+                "{} measures {} x {} mm, which the bed the seams were placed for does not take",
+                piece.name,
+                width - lo_x,
+                depth - lo_y
+            );
+        }
+    }
+
+    /// The same four blocks in a drawer the grid does *not* divide evenly: 100 mm
+    /// is two 42 mm cells and 16 mm of margin on each axis.
+    const OVERSIZE: &str = "[drawer]
+width = 100
+depth = 100
+
+[settings]
+effort = \"quick\"
+
+[[objects]]
+name = \"block\"
+quantity = 4
+size = [30, 30]
+";
+
+    /// The XY extent of a built piece, as `(min_x, max_x, min_y, max_y)`.
+    fn extent(piece: &BinPiece) -> (f64, f64, f64, f64) {
+        piece.solid.verts.iter().fold(
+            (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY),
+            |(lx, hx, ly, hy), v| {
+                (
+                    lx.min(v.point.x),
+                    hx.max(v.point.x),
+                    ly.min(v.point.y),
+                    hy.max(v.point.y),
+                )
+            },
+        )
+    }
+
+    /// The plate is the body that touches the drawer walls, so it is the body
+    /// that spans it: the drawer's leftover millimetres become a flange, half on
+    /// each side, and the bin inside it is untouched.
+    #[test]
+    fn the_baseplate_spans_the_drawer_the_bin_is_only_cells_of() {
+        let spec = input::parse(OVERSIZE).expect("the fixture is a valid run");
+        let run = fit(spec).expect("a two-cell drawer of four blocks builds");
+
+        assert_eq!((run.grid.cols, run.grid.rows), (2, 2));
+        assert!(
+            (run.grid.margin_x - 16.0).abs() < 1e-9 && (run.grid.margin_y - 16.0).abs() < 1e-9,
+            "a 100 mm drawer of 42 mm cells leaves 16 mm over, not {:?}",
+            run.grid
+        );
+        assert_eq!(run.baseplate.len(), 1, "a two-cell plate fits the bed whole");
+        let (lx, hx, ly, hy) = extent(&run.baseplate[0]);
+        assert!(
+            (hx - lx - run.spec.drawer_width).abs() < 1e-9
+                && (hy - ly - run.spec.drawer_depth).abs() < 1e-9,
+            "the plate measures {} x {} mm in a {} x {} mm drawer",
+            hx - lx,
+            hy - ly,
+            run.spec.drawer_width,
+            run.spec.drawer_depth
+        );
+        assert!(
+            (lx + 8.0).abs() < 1e-9 && (hx - (2.0 * gridfinity::GRID_PITCH + 8.0)).abs() < 1e-9,
+            "the flange is half the margin on each side, leaving the grid centred, not {lx}..{hx}"
+        );
+
+        assert_eq!(run.params.plate_margin_x, 0.0);
+        assert_eq!(run.params.plate_margin_y, 0.0);
+        let (blx, bhx, _, _) = extent(&run.pieces[0]);
+        assert!(
+            (blx - 0.25).abs() < 1e-9
+                && (bhx - (2.0 * gridfinity::GRID_PITCH - 0.25)).abs() < 1e-9,
+            "the bin is the cells it always was, {blx}..{bhx}"
+        );
+    }
+
     #[test]
     fn builds_no_baseplate_when_the_file_turns_it_off() {
         let text = SMALL.replace("effort = \"quick\"", "effort = \"quick\"
@@ -770,6 +1129,7 @@ baseplate = false");
         let spec = input::parse(&text).expect("baseplate is a setting");
         let run = fit(spec).expect("a two-cell drawer of four blocks builds");
         assert!(run.baseplate.is_empty());
+        assert!(run.plate_params.is_none(), "there is no plate for --view to show either");
         assert_eq!(run.all_pieces().len(), run.pieces.len());
     }
 

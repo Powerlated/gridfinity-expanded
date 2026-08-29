@@ -546,6 +546,7 @@ struct Post {
     near_far: vec2<f32>,
     params: vec4<f32>,
     flags: vec4<f32>,
+    source_texel: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> post: Post;
@@ -558,6 +559,10 @@ struct Post {
 
 fn post_texel() -> vec2<f32> {
     return 1.0 / max(post.target_size, vec2<f32>(1.0));
+}
+
+fn source_texel() -> vec2<f32> {
+    return post.source_texel.xy;
 }
 
 fn post_uv(frag: vec2<f32>) -> vec2<f32> {
@@ -845,7 +850,7 @@ fn luma(c: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_fxaa(v: FullscreenOut) -> @location(0) vec4<f32> {
-    let texel = post_texel();
+    let texel = source_texel();
     let uv = post_uv(v.clip.xy);
     let rgb_m = source_at(uv).rgb;
     let luma_m = luma(rgb_m);
@@ -1327,6 +1332,21 @@ mod tests {
             "the bounce reads the frame it just wrote, so one non-finite pixel would seed \
              itself forever and spread by the sample radius every frame; every comparison \
              against a NaN is false, which is what rejects it here",
+        );
+    }
+
+    #[test]
+    fn the_edge_filter_steps_by_a_texel_of_what_it_samples_not_of_where_it_lands() {
+        let source = post_module();
+        let fxaa = source
+            .split_once("fn fs_fxaa")
+            .expect("the post module defines the edge filter")
+            .1
+            .to_string();
+        assert!(
+            fxaa.contains("let texel = source_texel();"),
+            "fs_fxaa must step by the source's texel, so a scene rendered smaller than the \
+             rectangle it is blitted into is still filtered a texel at a time"
         );
     }
 

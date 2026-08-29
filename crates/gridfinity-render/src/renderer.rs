@@ -134,6 +134,8 @@ pub struct Renderer {
     hdr: bool,
     presented: Option<Viewport>,
     presented_is_resolved: bool,
+    render_scale: f32,
+    rendered: Option<(i32, i32)>,
 }
 
 impl Renderer {
@@ -175,6 +177,8 @@ impl Renderer {
             hdr,
             presented: None,
             presented_is_resolved: false,
+            render_scale: 1.0,
+            rendered: None,
         })
     }
 
@@ -212,6 +216,32 @@ impl Renderer {
         self.hdr
     }
 
+    /// The fraction of a viewport's pixels the scene is rasterised at.
+    pub fn render_scale(&self) -> f32 {
+        self.render_scale
+    }
+
+    /// Rasterises the scene at `scale` of the viewport it is blitted into, the
+    /// blit stretching it back over the whole rectangle. 1.0 renders every
+    /// pixel of the viewport; a caller drawing into a HiDPI viewport passes
+    /// less, and pays for the pixels it asks for rather than the ones the
+    /// display has.
+    pub fn set_render_scale(&mut self, scale: f32) {
+        assert!(
+            scale > 0.0 && scale <= 1.0,
+            "a render scale is a fraction of the viewport, in (0, 1], not {scale}"
+        );
+        self.render_scale = scale;
+    }
+
+    /// The offscreen rectangle the scene is rasterised into for `viewport`:
+    /// its size scaled by `render_scale` and never below one pixel, at the
+    /// origin, because only the blit knows where the viewport sits on screen.
+    fn scene_viewport(&self, viewport: Viewport) -> Viewport {
+        let scaled = |n: i32| (n as f32 * self.render_scale).round() as i32;
+        Viewport::new(0, 0, scaled(viewport.width), scaled(viewport.height))
+    }
+
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -226,11 +256,12 @@ impl Renderer {
 
         let level = self.quality;
         let bounds = self.bounds.filter(|_| self.vertex_count > 0);
+        let scene_viewport = self.scene_viewport(viewport);
         let steady = cam.view_proj(viewport.aspect());
         let posts = level.antialias() || level.bloom();
         let key = AccumulationKey {
             view_proj: steady.to_cols_array().map(f32::to_bits),
-            viewport: (viewport.x, viewport.y, viewport.width, viewport.height),
+            viewport: (viewport.x, viewport.y, scene_viewport.width, scene_viewport.height),
             quality: level.index(),
             generation: self.generation,
         };
@@ -242,8 +273,8 @@ impl Renderer {
         let view_proj = if posts && !converged {
             let (ox, oy) = jitter_offset(self.accumulated);
             Mat4::from_translation(Vec3::new(
-                2.0 * ox / viewport.width as f32,
-                2.0 * oy / viewport.height as f32,
+                2.0 * ox / scene_viewport.width as f32,
+                2.0 * oy / scene_viewport.height as f32,
                 0.0,
             )) * steady
         } else {
@@ -281,8 +312,8 @@ impl Renderer {
             scene_ldr: if posts && self.hdr { 0.0 } else { 1.0 },
         };
 
-        let (width, height) = (viewport.width, viewport.height);
-        let offscreen = Viewport::new(0, 0, width, height);
+        let (width, height) = (scene_viewport.width, scene_viewport.height);
+        let offscreen = scene_viewport;
 
         if bounds.is_some() && !converged {
             if level.shadow() {
@@ -304,6 +335,7 @@ impl Renderer {
 
         if !self.scene.ensure(device, width, height) {
             self.presented = None;
+            self.rendered = None;
             return encoder.finish();
         }
 
@@ -312,6 +344,7 @@ impl Renderer {
                 self.draw_scene(device, queue, &mut encoder, &frame, offscreen);
             }
             self.presented = Some(viewport);
+            self.rendered = Some((width, height));
             self.presented_is_resolved = false;
             return encoder.finish();
         }
@@ -320,6 +353,7 @@ impl Renderer {
             || !self.resolved.ensure(device, width, height)
         {
             self.presented = None;
+            self.rendered = None;
             return encoder.finish();
         }
 
@@ -344,6 +378,7 @@ impl Renderer {
             self.resolved_key = Some(resolved_key);
         }
         self.presented = Some(viewport);
+        self.rendered = Some((width, height));
         self.presented_is_resolved = true;
         encoder.finish()
     }
@@ -356,6 +391,11 @@ impl Renderer {
         format: wgpu::TextureFormat,
     ) {
         let Some(viewport) = self.presented else { return };
+        let Some((rendered_width, rendered_height)) = self.rendered else { return };
+        assert!(
+            rendered_width > 0 && rendered_height > 0,
+            "the scene was rendered into a {rendered_width} x {rendered_height} target, which has no pixels to blit"
+        );
         let source = if self.presented_is_resolved {
             self.resolved.colour_view()
         } else {
@@ -369,6 +409,7 @@ impl Renderer {
         let mut post = PostUniform {
             target_size: [viewport.width as f32, viewport.height as f32],
             origin: [viewport.x as f32, viewport.y as f32],
+            source_texel: [1.0 / rendered_width as f32, 1.0 / rendered_height as f32, 0.0, 0.0],
             ..Default::default()
         };
         post.flags[0] = if format.is_srgb() { 1.0 } else { 0.0 };
@@ -1062,6 +1103,7 @@ impl Renderer {
         self.vertex_count = 0;
         self.line_count = 0;
         self.presented = None;
+        self.rendered = None;
     }
 }
 

@@ -151,13 +151,13 @@ pub(super) fn plan_cavity_banded(
     (stack, opts, tops, rim, blends)
 }
 
-pub(super) fn slope_span(cells: &[GridCell], ux: f64, uy: f64) -> (f64, f64) {
+pub(super) fn slope_span(cells: &[GridCell], pitch: f64, ux: f64, uy: f64) -> (f64, f64) {
     let mut min_a = f64::INFINITY;
     let mut max_a = f64::NEG_INFINITY;
     for c in cells {
         for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-            let x = (c.x + dx) as f64 * GRID_PITCH;
-            let y = (c.y + dy) as f64 * GRID_PITCH;
+            let x = (c.x + dx) as f64 * pitch;
+            let y = (c.y + dy) as f64 * pitch;
             let a = ux * x + uy * y;
             min_a = min_a.min(a);
             max_a = max_a.max(a);

@@ -821,7 +821,7 @@ fn check(c: &Case) -> Result<(), String> {
         let mut meshes: Vec<Mesh> = Vec::new();
         let mut carved = 0.0;
         for (i, piece) in pieces.iter().enumerate() {
-            let solid = match gridfinity::carve_to_cells(&whole, &bin.cells, piece) {
+            let solid = match gridfinity::carve_to_cells(&whole, c.params.pitch, &bin.cells, piece) {
                 Ok(s) => s,
                 Err(e) if e.contains(ENCLOSED_PIECE) => return Ok(()),
                 Err(e) => return Err(format!("carve piece {i}: {e}")),

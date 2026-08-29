@@ -18,7 +18,7 @@ use crate::kernel::rectregion::{RectF, trace_rects};
 use crate::kernel::sketch::point_in_polygon;
 use crate::kernel::split::{Cut, Side, trim};
 use crate::kernel::topo::Solid;
-use crate::layout::{GridCell, SplitLine, compartments, partition_cells};
+use crate::layout::{GridCell, GridFootprint, SplitLine, compartments, partition_cells};
 
 /// Cut one printable piece out of the finished bin: keep the material inside the
 /// vertical prism over the piece's cells. A piece is any connected polyomino, not
@@ -27,6 +27,7 @@ use crate::layout::{GridCell, SplitLine, compartments, partition_cells};
 /// another piece's cells.
 pub fn carve_to_cells(
     whole: &Solid,
+    pitch: f64,
     bin_cells: &[GridCell],
     piece_cells: &[GridCell],
 ) -> Result<Solid, String> {
@@ -42,12 +43,7 @@ pub fn carve_to_cells(
         );
     }
     let cell_rect = |c: &GridCell| {
-        RectF::new(
-            c.x as f64 * GRID_PITCH,
-            c.y as f64 * GRID_PITCH,
-            GRID_PITCH,
-            GRID_PITCH,
-        )
+        RectF::new(c.x as f64 * pitch, c.y as f64 * pitch, pitch, pitch)
     };
     let mut rects: Vec<RectF> = piece_cells.iter().map(cell_rect).collect();
     for c in piece_cells {
@@ -60,16 +56,11 @@ pub fn carve_to_cells(
                 continue;
             }
             let y = if step > 0 {
-                (c.y + 1) as f64 * GRID_PITCH
+                (c.y + 1) as f64 * pitch
             } else {
-                c.y as f64 * GRID_PITCH - REENTRANT_FILLET_OVERHANG
+                c.y as f64 * pitch - REENTRANT_FILLET_OVERHANG
             };
-            rects.push(RectF::new(
-                c.x as f64 * GRID_PITCH,
-                y,
-                GRID_PITCH,
-                REENTRANT_FILLET_OVERHANG,
-            ));
+            rects.push(RectF::new(c.x as f64 * pitch, y, pitch, REENTRANT_FILLET_OVERHANG));
         }
     }
     let loops: Vec<Vec<Vec2>> = trace_rects(&rects, &[])
@@ -102,18 +93,32 @@ pub fn carve_to_cells(
 /// planes clear while leaving every interior seam plane exactly on its split
 /// line, and it claims nothing: a baseplate's material lies wholly inside the
 /// union of the bin's cell rectangles, so the ground the reach covers is empty.
+///
+/// `plate_margin_x`/`_y` are the plate's own, and each piece's rectangles are
+/// grown by `plate_cell_rect` -- the same function `build_baseplate` traced the
+/// outline from -- before the reach is applied, so the prism cannot disagree
+/// with the material it is cutting. A flange side is a side with no neighbour in
+/// `bin_cells`, so it is always a side the reach grows too, and the two asserts
+/// below still hold.
 pub fn carve_baseplate_to_cells(
     whole: &Solid,
+    pitch: f64,
     bin_cells: &[GridCell],
     piece_cells: &[GridCell],
+    plate_margin_x: f64,
+    plate_margin_y: f64,
 ) -> Result<Solid, String> {
     if piece_cells.is_empty() {
         return Ok(whole.clone());
     }
+    let grid = GridFootprint::from_cells(bin_cells)
+        .expect("a plate with a piece to carve out of it has at least one cell");
     let mut rects: Vec<RectF> = Vec::with_capacity(piece_cells.len());
     for c in piece_cells {
-        let (mut x, mut y) = (c.x as f64 * GRID_PITCH, c.y as f64 * GRID_PITCH);
-        let (mut w, mut h) = (GRID_PITCH, GRID_PITCH);
+        let flange = plate_cell_rect(*c, grid, pitch, plate_margin_x, plate_margin_y);
+        let (mut x, mut y) = (flange.x, flange.y);
+        let (mut w, mut h) = (flange.w, flange.h);
+        let reach = baseplate_prism_reach(pitch);
         for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
             let neighbour = GridCell {
                 x: c.x + dx,
@@ -124,15 +129,15 @@ pub fn carve_baseplate_to_cells(
             }
             match (dx, dy) {
                 (-1, 0) => {
-                    x -= BASEPLATE_PRISM_REACH;
-                    w += BASEPLATE_PRISM_REACH;
+                    x -= reach;
+                    w += reach;
                 }
-                (1, 0) => w += BASEPLATE_PRISM_REACH,
+                (1, 0) => w += reach,
                 (0, -1) => {
-                    y -= BASEPLATE_PRISM_REACH;
-                    h += BASEPLATE_PRISM_REACH;
+                    y -= reach;
+                    h += reach;
                 }
-                _ => h += BASEPLATE_PRISM_REACH,
+                _ => h += reach,
             }
         }
         rects.push(RectF::new(x, y, w, h));
@@ -145,10 +150,7 @@ pub fn carve_baseplate_to_cells(
         return Err("a baseplate piece traced no boundary".into());
     }
     let covers = |c: &GridCell| {
-        let centre = Vec2::new(
-            (c.x as f64 + 0.5) * GRID_PITCH,
-            (c.y as f64 + 0.5) * GRID_PITCH,
-        );
+        let centre = Vec2::new((c.x as f64 + 0.5) * pitch, (c.y as f64 + 0.5) * pitch);
         loops.iter().filter(|lp| point_in_polygon(lp, centre)).count() % 2 == 1
     };
     for c in piece_cells {
@@ -304,7 +306,14 @@ fn baseplate_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
             piece_count: parts.len(),
             col: part.col,
             row: part.row,
-            solid: carve_baseplate_to_cells(&whole, &cells, &part.cells)?,
+            solid: carve_baseplate_to_cells(
+                &whole,
+                p.pitch,
+                &cells,
+                &part.cells,
+                p.plate_margin_x,
+                p.plate_margin_y,
+            )?,
         });
     }
     assert_eq!(
@@ -352,7 +361,7 @@ pub fn try_build_pieces_reporting(p: &Params) -> Result<(Vec<BinPiece>, BlendRep
         blends.dropped.extend(report.dropped);
         blends.refusal = blends.refusal.take().or(report.refusal);
         for (i, part) in parts.iter().enumerate() {
-            let solid = carve_to_cells(&whole, &bin.cells, &part.cells)?;
+            let solid = carve_to_cells(&whole, p.pitch, &bin.cells, &part.cells)?;
             let name = if parts.len() == 1 {
                 format!("{stem}.stl")
             } else {

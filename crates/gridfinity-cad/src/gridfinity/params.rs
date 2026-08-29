@@ -109,6 +109,13 @@ pub struct InnerWall {
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase", default))]
 pub struct Params {
     pub bins: Vec<LogicalBin>,
+    /// The millimetres one grid cell spans, on both axes. `GRID_PITCH` is the
+    /// standard and the default; anything else builds a bin of the same shape
+    /// on a grid of that size, with every dimension the standard measures from
+    /// a cell edge -- the peg profiles, the fastener bores, the baseplate's
+    /// reach -- moving with it, and every absolute dimension -- heights, the
+    /// outer corner radius, wall thickness -- staying as it is.
+    pub pitch: f64,
     pub height_units: u32,
     pub wall_thickness: f64,
     pub cavity_corner_radius: f64,
@@ -119,6 +126,15 @@ pub struct Params {
     pub open_edges: Vec<GridEdge>,
     pub divider_edges: Vec<GridEdge>,
     pub inner_walls: Vec<InnerWall>,
+    /// Extra plate millimetres along x, in total: the plate's outline stands
+    /// `plate_margin_x / 2` outside the cell grid on the -x and +x sides of the
+    /// cell set's bounding rectangle, so the grid stays centred in the plate.
+    /// Read only in `Mode::Baseplate`, where it is what makes a plate span the
+    /// drawer it is fitted to rather than the whole cells the drawer floors to;
+    /// an interior notch of the cell set never grows.
+    pub plate_margin_x: f64,
+    /// Extra plate millimetres along y, in total, exactly as `plate_margin_x`.
+    pub plate_margin_y: f64,
     pub mode: Mode,
 }
 
@@ -126,6 +142,7 @@ impl Default for Params {
     fn default() -> Params {
         Params {
             bins: vec![LogicalBin::rect(2, 2)],
+            pitch: GRID_PITCH,
             height_units: 3,
             wall_thickness: 1.2,
             cavity_corner_radius: 2.5,
@@ -135,6 +152,8 @@ impl Default for Params {
             open_edges: Vec::new(),
             divider_edges: Vec::new(),
             inner_walls: Vec::new(),
+            plate_margin_x: 0.0,
+            plate_margin_y: 0.0,
             mode: Mode::Bin,
         }
     }
@@ -215,6 +234,9 @@ impl Params {
             .collect();
         f.push(format!("bins: vec![{}]", bins.join(", ")));
 
+        if self.pitch != d.pitch {
+            f.push(format!("pitch: {:?}", self.pitch));
+        }
         if self.height_units != d.height_units {
             f.push(format!("height_units: {}", self.height_units));
         }
@@ -226,6 +248,8 @@ impl Params {
                 d.cavity_corner_radius,
             ),
             ("floor_fillet", self.floor_fillet, d.floor_fillet),
+            ("plate_margin_x", self.plate_margin_x, d.plate_margin_x),
+            ("plate_margin_y", self.plate_margin_y, d.plate_margin_y),
         ] {
             if v != dv {
                 f.push(format!("{name}: {v:?}"));

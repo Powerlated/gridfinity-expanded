@@ -1,6 +1,6 @@
 
 use gridfinity_cad::gridfinity::{
-    self, BASE_TOTAL_HEIGHT, HEIGHT_PER_UNIT, InnerWall, LogicalBin, Params,
+    self, BASE_TOTAL_HEIGHT, GRID_PITCH, HEIGHT_PER_UNIT, InnerWall, LogicalBin, Params,
 };
 use gridfinity_cad::layout::{GridCell, GridEdge};
 use gridfinity_cad::tessellate;
@@ -50,6 +50,7 @@ impl BinParams {
             ((self.height - BASE_TOTAL_HEIGHT) / HEIGHT_PER_UNIT).round().max(1.0) as u32;
         Params {
             bins: vec![LogicalBin { cells: self.cells.clone(), ..Default::default() }],
+            pitch: GRID_PITCH,
             height_units: units_above_base,
             wall_thickness: self.perimeter_thickness,
             cavity_corner_radius: self.fillet_radius,
@@ -66,6 +67,8 @@ impl BinParams {
                 width: w.width,
                 height: None,
             }).collect(),
+            plate_margin_x: 0.0,
+            plate_margin_y: 0.0,
             mode: gridfinity::Mode::Bin,
         }
     }
@@ -90,7 +93,7 @@ pub fn generate_geometry(bins: JsValue) -> Result<JsValue, JsValue> {
             .map_err(|e| JsValue::from_str(&format!("bin {}: {e}", bin.bin_id)))?;
 
         for piece_cells in &bin.pieces {
-            let solid = gridfinity::carve_to_cells(&whole, &bin.cells, piece_cells)
+            let solid = gridfinity::carve_to_cells(&whole, params.pitch, &bin.cells, piece_cells)
                 .map_err(|e| JsValue::from_str(&format!("bin {}: {e}", bin.bin_id)))?;
             pieces.push(&piece_obj(&render_vertices(&solid, ARC_SEGMENTS_PER_QUARTER), piece_cells)?);
         }
@@ -114,7 +117,7 @@ pub fn export_parasolid(bins: JsValue) -> Result<String, JsValue> {
         let whole = gridfinity::build_bin_solid(&params, &bin.cells, None, &[])
             .map_err(|e| JsValue::from_str(&format!("bin {}: {e}", bin.bin_id)))?;
         for piece_cells in &bin.pieces {
-            let solid = gridfinity::carve_to_cells(&whole, &bin.cells, piece_cells)
+            let solid = gridfinity::carve_to_cells(&whole, params.pitch, &bin.cells, piece_cells)
                 .map_err(|e| JsValue::from_str(&format!("bin {}: {e}", bin.bin_id)))?;
             solids.push(solid);
         }

@@ -77,7 +77,11 @@ pub(super) fn cavity_inset(walls: &EffectiveWalls, wt: f64, e: &GridEdge) -> f64
 /// case is one the walk has to reproduce; see
 /// `the_walk_reproduces_the_tracer_except_where_a_divider_meets_a_notch` for the
 /// enumeration and `CLAUDE.md` for what each is.
-pub(super) fn compartment_corners(steps: &[Step], inset: &dyn Fn(&GridEdge) -> f64) -> Vec<Vec2> {
+pub(super) fn compartment_corners(
+    steps: &[Step],
+    pitch: f64,
+    inset: &dyn Fn(&GridEdge) -> f64,
+) -> Vec<Vec2> {
     let n = steps.len();
     assert!(
         n >= 4,
@@ -93,7 +97,7 @@ pub(super) fn compartment_corners(steps: &[Step], inset: &dyn Fn(&GridEdge) -> f
         let n1 = left_of(s_next.dir());
         let ins = inset(&s.edge);
         let ins_next = inset(&s_next.edge);
-        let c = mm(s.to);
+        let c = mm(s.to, pitch);
         // A cell region's boundary turns by a right angle or not at all; a
         // reversal would need a spike of zero width, which no set of cells has.
         assert!(
@@ -130,7 +134,12 @@ pub(super) fn compartment_corners(steps: &[Step], inset: &dyn Fn(&GridEdge) -> f
 /// loop reproduces that planner's answer exactly, which is what
 /// `the_walk_reproduces_the_tracer_except_where_a_divider_meets_a_notch` checks
 /// on every finger configuration it sweeps.
-pub(super) fn finger_strips(comp: &[GridCell], walls: &EffectiveWalls, wt: f64) -> Vec<RectF> {
+pub(super) fn finger_strips(
+    comp: &[GridCell],
+    pitch: f64,
+    walls: &EffectiveWalls,
+    wt: f64,
+) -> Vec<RectF> {
     let set: HashSet<GridCell> = comp.iter().copied().collect();
     let mut out = Vec::new();
     for e in &walls.dividers {
@@ -141,15 +150,15 @@ pub(super) fn finger_strips(comp: &[GridCell], walls: &EffectiveWalls, wt: f64) 
         if !set.contains(&a) || !set.contains(&b) {
             continue;
         }
-        out.push(divider_strip(e, wt));
+        out.push(divider_strip(e, pitch, wt));
     }
     out
 }
 
 /// The material a divider stands as: `plan_cavity`'s own rectangle, the full
 /// pitch length of the edge by `wall_thickness`, centred on the divider line.
-pub(super) fn divider_strip(e: &GridEdge, wt: f64) -> RectF {
-    let p = GRID_PITCH;
+pub(super) fn divider_strip(e: &GridEdge, pitch: f64, wt: f64) -> RectF {
+    let p = pitch;
     match e.orientation {
         Orientation::H => RectF::new(e.x as f64 * p, e.y as f64 * p - wt / 2.0, p, wt),
         Orientation::V => RectF::new(e.x as f64 * p - wt / 2.0, e.y as f64 * p, wt, p),
@@ -171,15 +180,16 @@ pub(super) fn divider_strip(e: &GridEdge, wt: f64) -> RectF {
 /// loop in two returns two outers.
 pub(super) fn compartment_cavity_corners(
     comp: &[GridCell],
+    pitch: f64,
     walls: &EffectiveWalls,
     wt: f64,
 ) -> Vec<Vec<Vec2>> {
     let inset = |e: &GridEdge| cavity_inset(walls, wt, e);
     let walked: Vec<Vec<Vec2>> = boundary_steps(comp)
         .iter()
-        .map(|steps| compartment_corners(steps, &inset))
+        .map(|steps| compartment_corners(steps, pitch, &inset))
         .collect();
-    let fingers = finger_strips(comp, walls, wt);
+    let fingers = finger_strips(comp, pitch, walls, wt);
     if fingers.is_empty() {
         return walked;
     }
@@ -239,12 +249,13 @@ pub(super) fn contained_holes(all: &[TracedLoop], outer: &TracedLoop) -> Vec<Tra
 /// the holes inside it.
 pub(super) fn walked_cavity(
     cells: &[GridCell],
+    pitch: f64,
     walls: &EffectiveWalls,
     wt: f64,
 ) -> Vec<(TracedLoop, Vec<TracedLoop>)> {
     let loops: Vec<TracedLoop> = crate::layout::compartments(cells, &walls.dividers)
         .iter()
-        .flat_map(|comp| compartment_cavity_corners(comp, walls, wt))
+        .flat_map(|comp| compartment_cavity_corners(comp, pitch, walls, wt))
         .map(|pts| TracedLoop { pts })
         .collect();
     let outers: Vec<&TracedLoop> = loops.iter().filter(|l| !l.is_hole()).collect();
@@ -418,7 +429,7 @@ mod tests {
             let comps = crate::layout::compartments(piece, &walls.dividers);
             let steps = boundary_steps(&comps[comp]);
             assert_eq!(steps.len(), 1, "the compartment has one boundary loop");
-            compartment_corners(&steps[0], &|e| cavity_inset(&walls, wt, e))
+            compartment_corners(&steps[0], GRID_PITCH, &|e| cavity_inset(&walls, wt, e))
         };
         let close = |a: &[Vec2], b: &[(f64, f64)]| {
             assert!(

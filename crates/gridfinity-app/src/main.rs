@@ -17,6 +17,7 @@
 
 mod debugger;
 mod editor;
+mod explode;
 mod export;
 mod input;
 mod optimize;
@@ -31,9 +32,10 @@ use eframe::egui;
 static ALLOC: gridfinity_cad::kernel::perf::CountingAlloc<mimalloc::MiMalloc> =
     gridfinity_cad::kernel::perf::CountingAlloc::new(mimalloc::MiMalloc);
 use debugger::Debugger;
+use explode::Explosion;
 use editor::{BIN_COLORS, Editor, Tool};
 use gridfinity_cad::gridfinity::{self, BinSlope, LogicalBin, Mode, Params, SlopeDir};
-use gridfinity_cad::layout::GridFootprint;
+use gridfinity_cad::layout::{GridFootprint, SplitLine};
 use gridfinity_cad::printers::{DEFAULT_PRINTER, PRINTER_PROFILES, PrinterProfile, check_bed_fit, compute_auto_split_lines};
 use gridfinity_cad::kernel::build::extrude;
 use glam::Vec3;
@@ -51,21 +53,34 @@ pub const BAD_FLAG_OFFSET: usize = MESH_STRIDE - 1;
 
 pub const DEBUG_BASE_COLOR: u32 = 0x4c8cd9;
 
+/// The colour of a packed object's box: white, so an object reads as a thing
+/// placed in the bin rather than as part of it.
+pub const OBJECT_WHITE: u32 = 0xffffff;
+
+/// The colour of the baseplate under a fitted bin: a neutral grey, so the two
+/// bodies read apart where they interleave and a plate piece lapping a bin seam
+/// is visible for what it is.
+pub const PLATE_GREY: u32 = 0x8c8f94;
+
 struct BinError {
     bin: usize,
     msg: String,
 }
 
-fn flagged(tess: &gridfinity_cad::Tessellation, bad: bool) -> Vec<f32> {
+fn shaded(tess: &gridfinity_cad::Tessellation, rgb: u32, bad: bool) -> Vec<f32> {
     let mut out = Vec::new();
     gridfinity_render::append_smooth_shaded(
         &mut out,
         &tess.render_buffer(),
         Vec3::ZERO,
-        gridfinity_render::color_of(DEBUG_BASE_COLOR),
+        gridfinity_render::color_of(rgb),
         bad,
     );
     out
+}
+
+fn flagged(tess: &gridfinity_cad::Tessellation, bad: bool) -> Vec<f32> {
+    shaded(tess, DEBUG_BASE_COLOR, bad)
 }
 
 fn vert_bounds(verts: &[f32]) -> (Vec3, Vec3) {
@@ -77,6 +92,117 @@ fn vert_bounds(verts: &[f32]) -> (Vec3, Vec3) {
         max = max.max(p);
     }
     if min.x > max.x { (Vec3::ZERO, Vec3::ZERO) } else { (min, max) }
+}
+
+/// The same vertices, every position moved by `shift` and every normal, colour
+/// and flag left as it was.
+fn displace(verts: &mut [f32], shift: Vec3) {
+    for v in verts.chunks_exact_mut(MESH_STRIDE) {
+        v[0] += shift.x;
+        v[1] += shift.y;
+        v[2] += shift.z;
+    }
+}
+
+/// One bin's preview vertices, given the whole solid the kernel built for it:
+/// that solid tessellated when the bin is not split, and otherwise its carved
+/// pieces, each displaced by its band's `Explosion::shift` so every cut the
+/// printer will make opens by one gap.
+///
+/// The pieces are the same ones the export writes -- the bin's own split lines,
+/// carved out of the one solid -- so what the window shows apart is what the
+/// files hold separately, and a carve the kernel refuses here is the error it
+/// would be there.
+fn bin_vertices(bin: &LogicalBin, pitch: f64, solid: &Solid) -> Result<Vec<f32>, String> {
+    let explosion = Explosion::of(bin, pitch);
+    if !explosion.is_split() {
+        return Ok(flagged(&tessellate(solid, PREVIEW_RES), false));
+    }
+    let mut out = Vec::new();
+    for part in explosion.pieces() {
+        let piece = catch(|| gridfinity::carve_to_cells(solid, pitch, &bin.cells, &part.cells))?;
+        let mut verts = flagged(&tessellate(&piece, PREVIEW_RES), false);
+        displace(&mut verts, explosion.shift(part.col, part.row));
+        out.extend(verts);
+    }
+    Ok(out)
+}
+
+/// The whole baseplate's preview vertices, given the one solid the kernel built
+/// for it: that solid tessellated when the plate is not split, and otherwise its
+/// carved pieces, each displaced by its band's `Explosion::shift`.
+///
+/// The plate is cut on **its own** lines -- the union of every bin's
+/// `split_lines`, which `optimize` staggers off the bin's -- so it explodes
+/// along bands of its own and a plate piece visibly laps a seam of the bin
+/// above it. That is the interlock made visible: neither body can be lifted out
+/// without the pieces of the other that span its seams. Carving is
+/// `carve_baseplate_to_cells`, the same call the export makes, so what the
+/// window shows apart is what the files hold separately.
+fn plate_vertices(p: &Params, solid: &Solid) -> Result<Vec<f32>, String> {
+    let cells = p.all_cells();
+    let mut splits: Vec<SplitLine> = Vec::new();
+    for bin in &p.bins {
+        for line in &bin.split_lines {
+            if !splits.contains(line) {
+                splits.push(*line);
+            }
+        }
+    }
+    let explosion = Explosion::new(&cells, &splits, p.pitch);
+    if !explosion.is_split() {
+        return Ok(shaded(&tessellate(solid, PREVIEW_RES), PLATE_GREY, false));
+    }
+    let mut out = Vec::new();
+    for part in explosion.pieces() {
+        let piece = catch(|| {
+            gridfinity::carve_baseplate_to_cells(
+                solid,
+                p.pitch,
+                &cells,
+                &part.cells,
+                p.plate_margin_x,
+                p.plate_margin_y,
+            )
+        })?;
+        let mut verts = shaded(&tessellate(&piece, PREVIEW_RES), PLATE_GREY, false);
+        displace(&mut verts, explosion.shift(part.col, part.row));
+        out.extend(verts);
+    }
+    Ok(out)
+}
+
+/// The packed objects as solid boxes in the bin's own millimetre coordinates,
+/// each cut on the bin's split lines and each part displaced with the piece it
+/// lies in, so an object crosses a cut exactly the way the drawer does.
+///
+/// White, and flagged bad -- the renderer's pulsing red rim -- for an object
+/// that does not clear the cavity, which is the report's `is N mm tall, but a
+/// compartment is only M mm deep` warning made visible. The box stands its full
+/// height either way: clipping it to the cavity would hide the thing worth
+/// seeing.
+fn object_box_vertices(boxes: &[optimize::ObjectBox], bin: &LogicalBin, pitch: f64) -> Vec<f32> {
+    let explosion = Explosion::of(bin, pitch);
+    let mut out = Vec::new();
+    for b in boxes {
+        assert!(b.max.z > b.min.z, "an object box stands some height, but {} is not under {}", b.min, b.max);
+        for part in explosion.pieces() {
+            let Some((min, max)) = explosion.clip(part.col, part.row, b.min, b.max) else {
+                continue;
+            };
+            let sketch = Sketch::rectangle(
+                (min.x + max.x) / 2.0,
+                (min.y + max.y) / 2.0,
+                max.x - min.x,
+                max.y - min.y,
+            );
+            let solid = extrude(&sketch, min.z, max.z);
+            let mut verts = shaded(&tessellate(&solid, PREVIEW_RES), OBJECT_WHITE, !b.fits);
+            displace(&mut verts, explosion.shift(part.col, part.row));
+            out.extend(verts);
+        }
+    }
+    out
 }
 
 fn build_bin(p: &Params, bin: &LogicalBin) -> Result<Solid, String> {
@@ -137,8 +263,8 @@ fn build_scene_with(
     let mut verts = Vec::new();
     let mut errors = Vec::new();
     if p.mode != Mode::Bin {
-        match try_whole(p) {
-            Ok(s) => verts = flagged(&tessellate(&s, PREVIEW_RES), false),
+        match try_whole(p).and_then(|s| plate_vertices(p, &s)) {
+            Ok(v) => verts = v,
             Err(msg) => errors.push(BinError { bin: 0, msg }),
         }
         if !errors.is_empty() {
@@ -152,8 +278,8 @@ fn build_scene_with(
         if bin.cells.is_empty() {
             continue;
         }
-        match build(p, bin) {
-            Ok(solid) => verts.extend(flagged(&tessellate(&solid, PREVIEW_RES), false)),
+        match build(p, bin).and_then(|solid| bin_vertices(bin, p.pitch, &solid)) {
+            Ok(piece_verts) => verts.extend(piece_verts),
             Err(msg) => {
                 errors.push(BinError { bin: i, msg });
                 verts.extend(placeholder(p, bin));
@@ -248,6 +374,8 @@ struct App {
     labels: Vec<wireframe::Label>,
     object_boxes: Vec<optimize::ObjectBox>,
     show_object_boxes: bool,
+    plate: Option<Params>,
+    show_plate: bool,
     dirty: bool,
     program_dirty: bool,
     tri_count: usize,
@@ -269,13 +397,15 @@ impl App {
             Renderer::new(&gpu.device, &state.adapter)
                 .expect("the wgpu backend must build the viewport pipelines"),
         ));
-        let (params, object_boxes) = match initial {
-            Some(view) => (view.params, view.boxes),
-            None => (Params::default(), Vec::new()),
+        let (params, object_boxes, plate) = match initial {
+            Some(view) => (view.params, view.boxes, view.plate),
+            None => (Params::default(), Vec::new(), None),
         };
         let mut app = App {
             show_object_boxes: !object_boxes.is_empty(),
             object_boxes,
+            show_plate: plate.is_some(),
+            plate,
             params,
             editor: Editor::default(),
             debugger: Debugger::default(),
@@ -302,7 +432,7 @@ impl App {
         }
         let dbg_solid = self.debugger.build_solid();
         let mut wf = wireframe::Wireframe::default();
-        let (verts, errors) = match &dbg_solid {
+        let (mut verts, errors) = match &dbg_solid {
             Some(s) => match catch(|| Ok(debug_view(&self.debugger, s))) {
                 Ok((v, w)) => {
                     wf = w;
@@ -313,11 +443,6 @@ impl App {
             None => build_scene(&self.params),
         };
         self.errors = errors;
-        let (min, max) = vert_bounds(&verts);
-        self.camera.target = (min + max) * 0.5;
-        if reframe {
-            self.camera.frame(min, max);
-        }
         self.tri_count = verts.len() / (3 * MESH_STRIDE);
 
         if dbg_solid.is_none() && self.debugger.is_shown() {
@@ -326,10 +451,21 @@ impl App {
             }
         }
         if self.show_object_boxes {
-            for b in &self.object_boxes {
-                let color = if b.fits { wireframe::OBJECT_BLUE } else { wireframe::OBJECT_RED };
-                wf.add_box(b.min, b.max, color);
+            if let Some(bin) = self.params.bins.iter().find(|b| !b.cells.is_empty()) {
+                verts.extend(object_box_vertices(&self.object_boxes, bin, self.params.pitch));
             }
+        }
+        if dbg_solid.is_none() && self.show_plate {
+            if let Some(plate) = &self.plate {
+                let (plate_verts, plate_errors) = build_scene(plate);
+                verts.extend(plate_verts);
+                self.errors.extend(plate_errors);
+            }
+        }
+        let (min, max) = vert_bounds(&verts);
+        self.camera.target = (min + max) * 0.5;
+        if reframe {
+            self.camera.frame(min, max);
         }
         self.labels = wf.labels;
 
@@ -626,11 +762,12 @@ impl App {
                     ui.selectable_value(&mut self.printer, *prof, prof.name);
                 }
             });
+        let pitch = p.pitch;
         if let Some(bin) = p.bins.get_mut(self.editor.active_bin) {
             if !bin.cells.is_empty() {
-                let fit = check_bed_fit(&bin.cells, self.printer);
+                let fit = check_bed_fit(&bin.cells, self.printer, pitch);
                 let (w, d) = GridFootprint::from_cells(&bin.cells)
-                    .map(|f| f.mm())
+                    .map(|f| f.mm(pitch))
                     .unwrap_or((0.0, 0.0));
                 if fit.fits {
                     ui.label(format!("Bin {} fits: {w:.0} × {d:.0} mm{}",
@@ -642,7 +779,7 @@ impl App {
                         format!("Bin {} exceeds bed ({w:.0} × {d:.0} mm)", self.editor.active_bin + 1),
                     );
                     if ui.button("Auto-split to fit").clicked() {
-                        bin.split_lines = compute_auto_split_lines(&bin.cells, self.printer);
+                        bin.split_lines = compute_auto_split_lines(&bin.cells, self.printer, pitch);
                         changed = true;
                     }
                 }
@@ -692,6 +829,21 @@ impl App {
                 .changed()
             {
                 self.show_object_boxes = show;
+                self.dirty = true;
+            }
+        }
+        if self.plate.is_some() {
+            let mut show = self.show_plate;
+            if ui
+                .checkbox(&mut show, "Baseplate")
+                .on_hover_text(
+                    "The grid the fitted bin drops into, cut on its own seams rather than \
+                     the bin's and exploded along them. A plate piece spanning a bin seam \
+                     is what holds the bin's pieces together, and the other way round.",
+                )
+                .changed()
+            {
+                self.show_plate = show;
                 self.dirty = true;
             }
         }
@@ -799,7 +951,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gridfinity_cad::layout::GridCell;
+    use crate::explode::SPLIT_APART_MM;
+    use gridfinity_cad::kernel::math::Vec3 as KernelVec3;
+    use gridfinity_cad::layout::{Axis, GridCell, SplitLine};
 
     /// A builder that refuses everything, so the failure path is exercised
     /// without asking the kernel for a bin it cannot make.
@@ -858,6 +1012,148 @@ mod tests {
         let (ok_verts, ok_errors) = build_scene(&p);
         assert!(ok_errors.is_empty());
         assert!(ok_verts.len() > verts.len(), "real geometry beats placeholders");
+    }
+
+    /// A bin of `cells` in one piece, and the same bin cut on `splits`.
+    fn split_bin(cells: &[GridCell], splits: &[SplitLine]) -> Params {
+        Params {
+            bins: vec![LogicalBin {
+                cells: cells.to_vec(),
+                split_lines: splits.to_vec(),
+                ..Default::default()
+            }],
+            height_units: 1,
+            ..Params::default()
+        }
+    }
+
+    #[test]
+    fn a_split_bin_previews_as_pieces_a_gap_apart() {
+        let cells = [GridCell { x: 0, y: 0 }, GridCell { x: 1, y: 0 }];
+        let (whole, errors) = build_scene(&split_bin(&cells, &[]));
+        assert!(errors.is_empty(), "the uncut bin must build");
+        let (cut, errors) = build_scene(&split_bin(
+            &cells,
+            &[SplitLine { axis: Axis::X, index: 1 }],
+        ));
+        assert!(errors.is_empty(), "the cut bin must build");
+
+        let (whole_min, whole_max) = vert_bounds(&whole);
+        let (cut_min, cut_max) = vert_bounds(&cut);
+        assert!(
+            ((cut_max.x - cut_min.x) - (whole_max.x - whole_min.x) - SPLIT_APART_MM).abs() < 1e-3,
+            "one cut opens by one {SPLIT_APART_MM} mm gap, so the bin does not go from {} to {}",
+            whole_max.x - whole_min.x,
+            cut_max.x - cut_min.x
+        );
+        assert!(
+            (cut_min.y - whole_min.y).abs() < 1e-3 && (cut_max.y - whole_max.y).abs() < 1e-3,
+            "a bin cut across x moves nothing in y"
+        );
+    }
+
+    /// The plate the bin drops into is cut and exploded exactly as the bin is,
+    /// on its own lines. Without it a split baseplate previewed as one solid,
+    /// which is the picture of an assembly that does not come apart.
+    #[test]
+    fn a_split_baseplate_previews_as_pieces_a_gap_apart() {
+        let cells = [GridCell { x: 0, y: 0 }, GridCell { x: 1, y: 0 }];
+        let plate = |splits: &[SplitLine]| Params {
+            mode: Mode::Baseplate,
+            ..split_bin(&cells, splits)
+        };
+        let (whole, errors) = build_scene(&plate(&[]));
+        assert!(errors.is_empty(), "the uncut plate must build");
+        let (cut, errors) = build_scene(&plate(&[SplitLine { axis: Axis::X, index: 1 }]));
+        assert!(errors.is_empty(), "the cut plate must build");
+
+        let (whole_min, whole_max) = vert_bounds(&whole);
+        let (cut_min, cut_max) = vert_bounds(&cut);
+        assert!(
+            ((cut_max.x - cut_min.x) - (whole_max.x - whole_min.x) - SPLIT_APART_MM).abs() < 1e-3,
+            "one cut opens the plate by one {SPLIT_APART_MM} mm gap, not from {} to {}",
+            whole_max.x - whole_min.x,
+            cut_max.x - cut_min.x
+        );
+        assert!(
+            (cut_min.y - whole_min.y).abs() < 1e-3 && (cut_max.y - whole_max.y).abs() < 1e-3,
+            "a plate cut across x moves nothing in y"
+        );
+    }
+
+    /// The two bodies explode along their **own** bands, which is the whole
+    /// point of staggering the seams: a plate cut where the bin is not opens its
+    /// gap somewhere else, so a piece of each spans a seam of the other.
+    #[test]
+    fn the_plate_and_the_bin_open_their_gaps_in_different_places() {
+        let cells: Vec<GridCell> = (0..4).map(|x| GridCell { x, y: 0 }).collect();
+        let bin_line = SplitLine { axis: Axis::X, index: 2 };
+        let plate_line = SplitLine { axis: Axis::X, index: 1 };
+        let bin = Explosion::new(&cells, &[bin_line], gridfinity::GRID_PITCH);
+        let plate = Explosion::new(&cells, &[plate_line], gridfinity::GRID_PITCH);
+        for (body, line) in [(&bin, bin_line), (&plate, plate_line)] {
+            let moved: Vec<f32> = body.pieces().iter().map(|p| body.shift(p.col, p.row).x).collect();
+            assert_eq!(
+                moved,
+                vec![-SPLIT_APART_MM / 2.0, SPLIT_APART_MM / 2.0],
+                "a body cut at {line:?} opens into two bands"
+            );
+        }
+        let cell_two = |body: &Explosion| {
+            let piece = body
+                .pieces()
+                .iter()
+                .find(|p| p.cells.iter().any(|c| c.x == 2))
+                .expect("cell 2 lies in some piece");
+            (piece.cells.len(), body.shift(piece.col, piece.row).x)
+        };
+        assert_eq!(cell_two(&bin), (2, SPLIT_APART_MM / 2.0));
+        assert_eq!(
+            cell_two(&plate),
+            (3, SPLIT_APART_MM / 2.0),
+            "the plate piece holding cell 2 also holds cells 1 and 3, so it spans the bin's seam"
+        );
+    }
+
+    #[test]
+    fn an_object_box_is_cut_and_moved_with_the_piece_it_lies_in() {
+        let cells = [GridCell { x: 0, y: 0 }, GridCell { x: 1, y: 0 }];
+        let bin = &split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }]).bins[0];
+        let pitch = gridfinity::GRID_PITCH;
+        let across = optimize::ObjectBox {
+            min: KernelVec3::new(0.25 * pitch, 0.25 * pitch, 0.0),
+            max: KernelVec3::new(1.75 * pitch, 0.75 * pitch, 5.0),
+            fits: true,
+        };
+        let verts = object_box_vertices(std::slice::from_ref(&across), bin, gridfinity::GRID_PITCH);
+        let (min, max) = vert_bounds(&verts);
+        assert!(
+            ((max.x - min.x) - (across.max.x - across.min.x) as f32 - SPLIT_APART_MM).abs() < 1e-3,
+            "the two halves of the box open by the same gap the bin does, not {} from {}",
+            max.x - min.x,
+            across.max.x - across.min.x
+        );
+        assert!(
+            (max.z - across.max.z as f32).abs() < 1e-3 && (min.z - across.min.z as f32).abs() < 1e-3,
+            "a cut is vertical, so it takes nothing off the box's height"
+        );
+        let (good, bad) = flags(&verts);
+        assert!(good > 0 && bad == 0, "an object that fits is drawn plain");
+    }
+
+    #[test]
+    fn an_object_that_does_not_fit_is_flagged_rather_than_hidden() {
+        let bin = &split_bin(&[GridCell { x: 0, y: 0 }], &[]).bins[0];
+        let tall = optimize::ObjectBox {
+            min: KernelVec3::new(5.0, 5.0, 0.0),
+            max: KernelVec3::new(30.0, 30.0, 400.0),
+            fits: false,
+        };
+        let verts = object_box_vertices(std::slice::from_ref(&tall), bin, gridfinity::GRID_PITCH);
+        let (_, max) = vert_bounds(&verts);
+        assert!((max.z - 400.0).abs() < 1e-3, "the box stands its full height, not {}", max.z);
+        let (good, bad) = flags(&verts);
+        assert!(bad > 0 && good == 0, "every vertex of a box that does not fit is flagged");
     }
 
     #[test]

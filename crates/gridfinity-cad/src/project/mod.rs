@@ -16,7 +16,7 @@ pub mod pack;
 pub mod rects;
 pub mod walls;
 
-pub use drawer::{DrawerGrid, MAX_GRID, MIN_DRAWER_MM, drawer_cells, drawer_grid, max_drawer_mm, packing_area, packing_inset};
+pub use drawer::{DrawerGrid, MAX_GRID, drawer_cells, drawer_grid, max_drawer_mm, min_drawer_mm, packing_area, packing_inset};
 pub use pack::{PackEffort, PackInput, PackObject, PackResult, PackSearch, Placement, pack_layout};
 pub use rects::{Rect, Rotation, parts_bounds, parts_connected, union_area};
 pub use walls::{MIN_GENERATED_WALL_LENGTH, Point2, Wall, WallReport, layout_walls, layout_walls_reporting};
