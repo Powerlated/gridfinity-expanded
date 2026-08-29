@@ -118,7 +118,15 @@ Every `npm` command below runs from `web/`; every `cargo` command from the repos
 - `cargo test --release --workspace -- --ignored --nocapture` — the fuzzers, benchmarks and perf reports, all `#[ignore]`d so no ordinary run pays for them
 - `npm run test:e2e` — Chromium Playwright smoke
 - `npm run classify:changes -- <base> <head>` — CI gate classification
-- `cargo run -- optimize <in.toml> --format <stl|parasolid_x_t> <out> [--view]` — headless drawer fitting; `examples/drawer.toml` is a worked input. It writes the **baseplate** beside the bin unless `settings.baseplate = false` — a bin carries a connector peg under every cell and has nothing to sit in without one. Its report's **Soundness** section names what was checked and on what; a failure is a named error and exit 1, and never a partial file — `fit` runs under the app's `catch` and the STL writer tessellates every piece before writing any. `--view` opens the fit in the egui debugger with a wireframe box around every packed object, red where the object stands taller than the compartment it was packed into; see `crates/CLAUDE.md`.
+- `cargo run -- optimize <in.toml> -o <out> [--format <stl|parasolid_x_t>] [--view]` — headless drawer
+  fitting. The command line is a **`clap`** declaration (`optimize::Args`), so the spellings, the help
+  text and every refusal come from it. `-o` names the output and **at least one of `-o` and `--view`
+  must be given** — an invocation that neither writes nor shows asks for nothing, and `clap` refuses
+  it. `--format` is inferred when `-o` ends in `.x_t` and required otherwise, because an STL run
+  writes a *directory* of one file per piece and a directory's name declares nothing; a `--format`
+  that is given is checked against the path rather than overridden by it, so `parasolid_x_t` demands
+  a `.x_t` output and `stl` refuses one ending in `.stl` or `.x_t`. `--view` with no `-o` fits, opens
+  the window, and writes nothing. `examples/drawer.toml` is a worked input. It writes the **baseplate** beside the bin unless `settings.baseplate = false` — a bin carries a connector peg under every cell and has nothing to sit in without one. Its report's **Soundness** section names what was checked and on what; a failure is a named error and exit 1, and never a partial file — `fit` runs under the app's `catch` and the STL writer tessellates every piece before writing any. `--view` opens the fit in the egui debugger with a wireframe box around every packed object, red where the object stands taller than the compartment it was packed into; see `crates/CLAUDE.md`.
 
 Lint + build on every non-trivial code change. Don't add Vitest coverage by default during rapid feature development; run existing Vitest when changing printer, cut-to-part, or export behavior it covers.
 

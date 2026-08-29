@@ -28,11 +28,19 @@ many pieces the bed forced.
 
 ```sh
 # one binary STL per printable piece, into out/
-cargo run -- optimize examples/drawer.toml --format stl out
+cargo run -- optimize examples/drawer.toml --format stl -o out
 
 # every piece as a body of one Parasolid transmit file, then open it in the debugger
-cargo run -- optimize examples/drawer.toml --format parasolid_x_t drawer.x_t --view
+# (.x_t names the format, so --format may be left off)
+cargo run -- optimize examples/drawer.toml -o drawer.x_t --view
+
+# fit it and just look at it, writing nothing
+cargo run -- optimize examples/drawer.toml --view
 ```
+
+`-o` names the output and at least one of `-o` and `--view` must be given. `--format` is inferred
+from a `.x_t` output and required otherwise, since an STL run writes a directory of one file per
+piece.
 
 [`examples/drawer.toml`](./examples/drawer.toml) is a worked input with every setting spelled out.
 

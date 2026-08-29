@@ -9,7 +9,13 @@
 //! Either returns one `Written` per file, carrying what the report prints about
 //! it. A kernel refusal is returned as an error and leaves no partial file
 //! behind.
+//!
+//! `Format` also owns the relationship between a format and the path that can
+//! hold it -- `EXTENSION`, `inferred_from`, `check_extension` -- because that is
+//! one fact and the command line asks it in both directions: which format an
+//! output names, and whether an output can hold the format that was named.
 
+use clap::ValueEnum;
 use gridfinity_cad::gridfinity::BinPiece;
 use gridfinity_cad::kernel::topo::Solid;
 use gridfinity_cad::{tessellate, to_xt_text};
@@ -21,20 +27,54 @@ use std::path::{Path, PathBuf};
 const EXPORT_RES: usize = 48;
 
 /// The two wired export formats.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Format {
+    #[value(name = "stl")]
     Stl,
+    #[value(name = "parasolid_x_t")]
     ParasolidXt,
 }
 
+/// The file extension a Parasolid transmit file carries, lowercase and without
+/// its dot. STL has no counterpart here on purpose: its output is a *directory*
+/// of one file per piece, so a path that names it carries no extension at all.
+const XT_EXTENSION: &str = "x_t";
+
 impl Format {
-    /// The format named by its command-line spelling, or `None` for anything
-    /// else.
-    pub fn from_name(name: &str) -> Option<Format> {
-        match name {
-            "stl" => Some(Format::Stl),
-            "parasolid_x_t" => Some(Format::ParasolidXt),
-            _ => None,
+    /// The format an output path names by its extension, or `None` when it names
+    /// none.
+    ///
+    /// Only `.x_t` names one. An STL run writes a directory, and a directory's
+    /// name says nothing about what goes in it, so an output that is not `.x_t`
+    /// leaves the format to be stated.
+    pub fn inferred_from(path: &Path) -> Option<Format> {
+        let ext = path.extension()?.to_str()?;
+        ext.eq_ignore_ascii_case(XT_EXTENSION).then_some(Format::ParasolidXt)
+    }
+
+    /// `Ok` when `path`'s extension is one this format can be written to, and a
+    /// message naming the mismatch otherwise.
+    ///
+    /// X_T is one file and must be spelled `.x_t`. STL is a directory of pieces,
+    /// each already named `.stl` by the model, so its path must carry neither
+    /// extension -- `out/drawer.stl` would be a *directory* full of `.stl`
+    /// files, which reads as the file it is not.
+    pub fn check_extension(self, path: &Path) -> Result<(), String> {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        match self {
+            Format::ParasolidXt if !ext.eq_ignore_ascii_case(XT_EXTENSION) => Err(format!(
+                "--format parasolid_x_t writes one file, whose name must end in .{XT_EXTENSION}, but {} does not",
+                path.display()
+            )),
+            Format::Stl
+                if ext.eq_ignore_ascii_case("stl") || ext.eq_ignore_ascii_case(XT_EXTENSION) =>
+            {
+                Err(format!(
+                    "--format stl writes one .stl file per piece into a directory, so its output names that directory and carries no extension, but {} ends in .{ext}",
+                    path.display()
+                ))
+            }
+            _ => Ok(()),
         }
     }
 

@@ -2,10 +2,14 @@
 //! organise in it, in; printable geometry and an account of how it was reached,
 //! out.
 //!
-//! `Args` is what the command line says, `Run` is everything one invocation
-//! produced, and `fit` is the pipeline between them. The output path is checked
-//! before any of it runs, because discovering it cannot be written after minutes
-//! of packing and building is the same mistake reported far too late. `fit`: resolve the drawer to a
+//! `Args` is what the command line says -- a `clap` struct, so the parsing,
+//! the spellings and the help text are the declaration -- `Run` is everything
+//! one invocation produced, and `fit` is the pipeline between them.
+//! `Args::destination` is the one place the command line's two output questions
+//! are answered: which format `-o` names, and whether `-o` can hold the format
+//! that was named. The path is then checked before any geometry runs, because
+//! discovering it cannot be written after minutes of packing and building is the
+//! same mistake reported far too late. `fit`: resolve the drawer to a
 //! cell grid and a packing rectangle, pack the objects into it, turn the
 //! boundaries between them into dividers, split the bin for the printer's bed,
 //! build every piece, and read back what each piece is made of. Each stage's
@@ -22,6 +26,7 @@
 use crate::export::{self, Format};
 use crate::input::{self, Spec};
 use crate::report;
+use clap::Parser;
 use gridfinity_cad::gridfinity::{self, BinPiece, LogicalBin, Mode, Params, Pocket};
 use gridfinity_cad::kernel::math::Vec3;
 use gridfinity_cad::kernel::program::BlendReport;
@@ -36,12 +41,67 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// What one `optimize` invocation was asked to do.
-#[derive(Debug, PartialEq, Eq)]
+///
+/// An invocation must ask for at least one of the two things this command can
+/// do -- write geometry (`-o`) or show it (`--view`) -- so `clap` requires `-o`
+/// unless `--view` is present. Both together fit, write, and then open the
+/// window on what was written.
+#[derive(Parser, Debug, PartialEq, Eq)]
+#[command(
+    about = "Fit a drawer full of objects and write the geometry",
+    long_about = "Packs the objects a TOML describes into the drawer it describes, states each compartment as a pocket, splits the bin and its baseplate for the printer's bed, writes the \ngeometry, and prints what it did."
+)]
 pub struct Args {
+    /// The drawer's dimensions and the objects to organise in it
     pub input: PathBuf,
-    pub format: Format,
-    pub output: PathBuf,
+
+    /// Where to write the geometry: a directory for `stl`, a `.x_t` file for
+    /// `parasolid_x_t`. Required unless `--view` is given
+    #[arg(short, long, value_name = "PATH", required_unless_present = "view")]
+    pub output: Option<PathBuf>,
+
+    /// The export format. Inferred from `--output` when that ends in `.x_t`,
+    /// and required otherwise
+    #[arg(long, value_name = "FORMAT")]
+    pub format: Option<Format>,
+
+    /// Open the fit in the construction debugger, with a wireframe box around
+    /// every packed object -- red where the object stands taller than the
+    /// compartment it was packed into
+    #[arg(long)]
     pub view: bool,
+}
+
+impl Args {
+    /// The format and path this invocation writes, or `None` when it asked only
+    /// to look (`--view` with no `-o`).
+    ///
+    /// This is where `--format` and `-o` are reconciled, in both directions.
+    /// An `-o` ending in `.x_t` names its own format, so `--format` may be left
+    /// off; anything else names none and `--format` is required. A `--format`
+    /// that is given is never overridden by the path -- it is checked against
+    /// it, and a path that cannot hold it is an error rather than a silent
+    /// reinterpretation of what the user asked for.
+    pub fn destination(&self) -> Result<Option<(Format, PathBuf)>, String> {
+        let Some(path) = self.output.clone() else {
+            assert!(
+                self.view,
+                "an invocation with neither an output nor --view asks for nothing, which is what clap's required_unless_present rejects"
+            );
+            return Ok(None);
+        };
+        let format = self
+            .format
+            .or_else(|| Format::inferred_from(&path))
+            .ok_or_else(|| {
+                format!(
+                    "--format is required: {} does not end in .x_t, so it names no format (it is stl or parasolid_x_t)",
+                    path.display()
+                )
+            })?;
+        format.check_extension(&path)?;
+        Ok(Some((format, path)))
+    }
 }
 
 /// Everything one invocation produced, in the order the pipeline produced it.
@@ -195,44 +255,6 @@ fn soundness_of(pieces: &[&BinPiece]) -> Vec<PieceSoundness> {
             }
         })
         .collect()
-}
-
-/// The command line as `Args`, or a message saying what is wrong with it. The
-/// leading `optimize` has already been recognised by the caller.
-pub fn parse_args(rest: &[String]) -> Result<Args, String> {
-    let mut positional: Vec<String> = Vec::new();
-    let mut format: Option<Format> = None;
-    let mut view = false;
-    let mut it = rest.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--view" => view = true,
-            "--format" => {
-                let name = it
-                    .next()
-                    .ok_or_else(|| "--format needs a value: stl or parasolid_x_t".to_string())?;
-                format = Some(Format::from_name(name).ok_or_else(|| {
-                    format!("--format {name:?} is not a format; it is stl or parasolid_x_t")
-                })?);
-            }
-            other if other.starts_with("--") => {
-                return Err(format!("{other:?} is not an option of `optimize`"));
-            }
-            other => positional.push(other.to_string()),
-        }
-    }
-    let [input, output] = positional.as_slice() else {
-        return Err(format!(
-            "`optimize` takes an input file and an output path, but was given {} of them",
-            positional.len()
-        ));
-    };
-    Ok(Args {
-        input: PathBuf::from(input),
-        format: format.ok_or_else(|| "--format is required: stl or parasolid_x_t".to_string())?,
-        output: PathBuf::from(output),
-        view,
-    })
 }
 
 /// Every placed instance's compartment, as the pockets the bin is hollowed to:
@@ -403,9 +425,14 @@ fn fit(spec: Spec) -> Result<Run, String> {
 /// One `optimize` invocation, end to end: read, fit, write, report. Returns the
 /// bin to open a window on, and the object boxes to draw in it, when `--view`
 /// was given, and `None` otherwise.
-pub fn run(rest: &[String]) -> Result<Option<View>, String> {
-    let args = parse_args(rest)?;
-    args.format.check_output(&args.output)?;
+///
+/// An invocation with no `-o` writes nothing and reports an empty Output
+/// section -- it fits, shows, and leaves the disk alone.
+pub fn run(args: &Args) -> Result<Option<View>, String> {
+    let destination = args.destination()?;
+    if let Some((format, path)) = &destination {
+        format.check_output(path)?;
+    }
     let text = std::fs::read_to_string(&args.input)
         .map_err(|e| format!("could not read {}: {e}", args.input.display()))?;
     let spec = input::parse(&text).map_err(|e| format!("{}: {e}", args.input.display()))?;
@@ -413,9 +440,10 @@ pub fn run(rest: &[String]) -> Result<Option<View>, String> {
 
     let started = Instant::now();
     let all = run.all_pieces();
-    let written = match args.format {
-        Format::Stl => export::write_stl_dir(&args.output, &all)?,
-        Format::ParasolidXt => vec![export::write_xt(&args.output, &all)?],
+    let written = match &destination {
+        Some((Format::Stl, path)) => export::write_stl_dir(path, &all)?,
+        Some((Format::ParasolidXt, path)) => vec![export::write_xt(path, &all)?],
+        None => Vec::new(),
     };
     run.export_time = started.elapsed();
 
@@ -433,44 +461,98 @@ mod tests {
     use gridfinity_cad::kernel::math::Vec2;
     use gridfinity_cad::kernel::sketch::point_in_polygon;
 
+    /// The command line `clap` would see, parsed as `Args`, or the message it
+    /// refuses with. The leading `optimize` is the subcommand's own name, which
+    /// `clap` expects as argv[0] of a subcommand's argument list.
     fn args(argv: &[&str]) -> Result<Args, String> {
-        parse_args(&argv.iter().map(|s| s.to_string()).collect::<Vec<String>>())
+        let mut all = vec!["optimize"];
+        all.extend_from_slice(argv);
+        Args::try_parse_from(all).map_err(|e| e.to_string())
+    }
+
+    /// What one invocation writes, as `(format, path)`, or the message saying
+    /// why it can write nothing.
+    fn destination(argv: &[&str]) -> Result<Option<(Format, PathBuf)>, String> {
+        args(argv)?.destination()
     }
 
     #[test]
     fn reads_the_documented_invocation() {
-        let a = args(&["in.toml", "--format", "stl", "out"]).expect("valid invocation");
+        let a = args(&["in.toml", "--format", "stl", "-o", "out"]).expect("valid invocation");
         assert_eq!(a.input, PathBuf::from("in.toml"));
-        assert_eq!(a.output, PathBuf::from("out"));
-        assert_eq!(a.format, Format::Stl);
+        assert_eq!(a.output, Some(PathBuf::from("out")));
+        assert_eq!(a.format, Some(Format::Stl));
         assert!(!a.view);
+        assert_eq!(
+            a.destination().expect("stl into a directory"),
+            Some((Format::Stl, PathBuf::from("out")))
+        );
     }
 
     #[test]
     fn takes_view_anywhere_among_the_arguments() {
-        let a = args(&["--view", "in.toml", "--format", "parasolid_x_t", "out.x_t"])
-            .expect("valid invocation");
+        let a = args(&["--view", "in.toml", "-o", "out.x_t"]).expect("valid invocation");
         assert!(a.view);
-        assert_eq!(a.format, Format::ParasolidXt);
+        assert_eq!(
+            a.destination().expect("x_t names its own format"),
+            Some((Format::ParasolidXt, PathBuf::from("out.x_t")))
+        );
+    }
+
+    /// The one abbreviation the documented invocation leans on: a `.x_t` output
+    /// says which format it is, so `--format` may be left off entirely.
+    #[test]
+    fn infers_parasolid_from_the_outputs_extension() {
+        assert_eq!(
+            destination(&["in.toml", "-o", "drawer.X_T"]).expect("the extension names the format"),
+            Some((Format::ParasolidXt, PathBuf::from("drawer.X_T")))
+        );
+    }
+
+    /// An STL run writes a *directory*, so its output carries no extension and
+    /// there is nothing to infer from.
+    #[test]
+    fn refuses_an_output_that_names_no_format() {
+        let err = destination(&["in.toml", "-o", "out"])
+            .expect_err("a bare directory names no format");
+        assert!(err.contains("--format is required"), "{err}");
     }
 
     #[test]
-    fn refuses_an_invocation_missing_its_format() {
-        let err = args(&["in.toml", "out"]).expect_err("--format is required");
-        assert!(err.contains("--format"), "{err}");
+    fn refuses_an_output_whose_extension_contradicts_the_format() {
+        let err = destination(&["in.toml", "--format", "parasolid_x_t", "-o", "out"])
+            .expect_err("x_t must be written to a .x_t file");
+        assert!(err.contains(".x_t"), "{err}");
+        let err = destination(&["in.toml", "--format", "stl", "-o", "out/drawer.stl"])
+            .expect_err("stl names a directory, not a file");
+        assert!(err.contains("directory"), "{err}");
+    }
+
+    /// `--view` alone is a complete invocation: fit it, show it, write nothing.
+    #[test]
+    fn takes_a_view_only_invocation_and_writes_nothing() {
+        let a = args(&["in.toml", "--view"]).expect("--view alone asks for something");
+        assert_eq!(a.output, None);
+        assert_eq!(a.destination().expect("nothing to write"), None);
+    }
+
+    #[test]
+    fn refuses_an_invocation_that_neither_writes_nor_shows() {
+        let err = args(&["in.toml"]).expect_err("-o is required without --view");
+        assert!(err.contains("--output"), "{err}");
     }
 
     #[test]
     fn refuses_a_format_that_is_not_wired() {
-        let err = args(&["in.toml", "--format", "step", "out"])
+        let err = args(&["in.toml", "--format", "step", "-o", "out"])
             .expect_err("STEP is not an export format here");
         assert!(err.contains("step"), "{err}");
     }
 
     #[test]
-    fn refuses_an_invocation_missing_a_path() {
-        let err = args(&["in.toml", "--format", "stl"]).expect_err("both paths are required");
-        assert!(err.contains("input file and an output path"), "{err}");
+    fn refuses_an_invocation_missing_its_input() {
+        let err = args(&["--format", "stl", "-o", "out"]).expect_err("the input is required");
+        assert!(err.contains("INPUT"), "{err}");
     }
 
     /// A drawer small enough to build quickly and busy enough to need dividers:

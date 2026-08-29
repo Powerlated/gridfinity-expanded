@@ -8,7 +8,8 @@
 //! `export`/`report`, which packs a TOML of objects into a drawer, writes the
 //! geometry, and prints what it did. `--view` runs the fitter and then hands the
 //! `Params` it produced straight to the same window -- one process, one build,
-//! nothing written between them.
+//! nothing written between them, and with no `-o` beside it, nothing written at
+//! all. `Cli` is the whole command line, declared for `clap`.
 //!
 //! Deliberately **not** `windows_subsystem = "windows"`: the same binary writes
 //! the fitting report to stdout, and a windows-subsystem process inherits no
@@ -24,6 +25,7 @@ mod report;
 mod viewport;
 mod wireframe;
 
+use clap::{Parser, Subcommand};
 use eframe::egui;
 
 #[global_allocator]
@@ -186,50 +188,41 @@ fn debug_view(debugger: &Debugger, solid: &Solid) -> (Vec<f32>, wireframe::Wiref
     (verts, wf)
 }
 
-/// How to invoke the program, for a command line that did not.
-const USAGE: &str = "gridfinity-app -- the Gridfinity parametric CAD app
+/// The command line: no subcommand opens the construction debugger, `optimize`
+/// runs the headless drawer fitter.
+///
+/// `clap` owns the parsing, the spellings and the help text, so `--help` and
+/// every "that is not an option" message come from the declaration rather than
+/// from a hand-written usage string that had to be kept in step with it.
+#[derive(Parser, Debug)]
+#[command(
+    name = "gridfinity-app",
+    about = "The Gridfinity parametric CAD app",
+    long_about = "With no arguments, opens the construction debugger on a default bin. With `optimize`, fits a drawer full of objects headlessly and writes the geometry.",
+    disable_help_subcommand = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
 
-usage:
-  gridfinity-app
-      opens the construction debugger on a default bin
-
-  gridfinity-app optimize <input.toml> --format <stl|parasolid_x_t> <output> [--view]
-      fits a drawer with compartments and writes the geometry
-
-  <input.toml>  the drawer's dimensions and the objects to organise in it
-  --format stl            writes one binary STL per printable piece into <output>,
-                          which is a directory and is created if it does not exist
-  --format parasolid_x_t  writes every piece as a body of one Parasolid transmit
-                          file at <output>
-  --view        opens the fitted bin in the debugger once it is written, with a
-                wireframe box around every packed object -- red where the object
-                stands taller than the compartment it was packed into
-";
+#[derive(Subcommand, Debug)]
+enum Command {
+    Optimize(optimize::Args),
+}
 
 /// Dispatches the command line: `optimize` runs the fitter and opens a window
-/// only if it asked to, anything else opens the debugger on a default bin.
+/// only if it asked to, no subcommand opens the debugger on a default bin.
 fn main() -> eframe::Result<()> {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    if argv.iter().any(|a| a == "--help" || a == "-h") {
-        print!("{USAGE}");
-        return Ok(());
-    }
-    let initial = match argv.split_first() {
-        Some((first, rest)) if first == "optimize" => match optimize::run(rest) {
-            Ok(view) => match view {
-                Some(view) => Some(view),
-                None => return Ok(()),
-            },
+    let initial = match Cli::parse().command {
+        Some(Command::Optimize(args)) => match optimize::run(&args) {
+            Ok(Some(view)) => Some(view),
+            Ok(None) => return Ok(()),
             Err(message) => {
                 eprintln!("error: {message}");
                 std::process::exit(1);
             }
         },
-        Some((first, _)) => {
-            eprintln!("error: {first:?} is not a command; the command is `optimize`");
-            eprint!("{USAGE}");
-            std::process::exit(1);
-        }
         None => None,
     };
     window(initial)
