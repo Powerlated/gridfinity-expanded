@@ -35,7 +35,7 @@ const BIG_FN_STATEMENTS: usize = 20;
 /// drift away from the code it describes.
 const BUDGET: &[(&str, usize)] = &[
     ("badapple.rs", 1),
-    ("gridfinity/baseplate.rs", 1),
+    ("gridfinity/baseplate.rs", 0),
     ("gridfinity/outline.rs", 2),
     ("gridfinity/peg.rs", 2),
     ("gridfinity/pieces.rs", 1),

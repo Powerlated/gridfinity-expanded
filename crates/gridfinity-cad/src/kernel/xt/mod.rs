@@ -107,7 +107,7 @@ pub(crate) fn split_l_solids() -> Vec<Solid> {
         ..gridfinity::Params::default()
     };
     p.bins[0].split_lines = vec![SplitLine { axis: Axis::X, index: 1 }];
-    let whole = gridfinity::build_bin_solid(&p, &cells, None).expect("the L-shaped bin builds");
+    let whole = gridfinity::build_bin_solid(&p, &cells, None, &[]).expect("the L-shaped bin builds");
     crate::layout::partition_cells(&cells, &p.bins[0].split_lines)
         .iter()
         .map(|part| {

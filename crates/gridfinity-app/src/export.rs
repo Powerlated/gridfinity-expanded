@@ -87,7 +87,7 @@ pub struct Written {
 /// Every piece is tessellated before any file is written, so a piece the
 /// tessellator refuses -- `tessellate` asserts its own mesh is watertight --
 /// leaves the directory as it found it rather than half a set of parts.
-pub fn write_stl_dir(dir: &Path, pieces: &[BinPiece]) -> Result<Vec<Written>, String> {
+pub fn write_stl_dir(dir: &Path, pieces: &[&BinPiece]) -> Result<Vec<Written>, String> {
     assert!(
         !pieces.is_empty(),
         "an export with no pieces reached the writer, which has nothing to write"
@@ -116,7 +116,7 @@ pub fn write_stl_dir(dir: &Path, pieces: &[BinPiece]) -> Result<Vec<Written>, St
 
 /// Every piece written into one Parasolid transmit file as its own body, in the
 /// order the model built them.
-pub fn write_xt(path: &Path, pieces: &[BinPiece]) -> Result<Written, String> {
+pub fn write_xt(path: &Path, pieces: &[&BinPiece]) -> Result<Written, String> {
     assert!(
         !pieces.is_empty(),
         "an export with no pieces reached the writer, which has nothing to write"

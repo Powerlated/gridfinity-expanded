@@ -96,12 +96,13 @@ pub(super) fn plan_piece(
     bin_cells: &[GridCell],
     walls: EffectiveWalls,
     slope: Option<BinSlope>,
+    pockets: &[Pocket],
     tag: &str,
     prog: &mut Program,
 ) {
     let _perf = scope(Metric::PlanPiece);
     let mut outline = author_outline(p, cells, bin_cells, &walls, slope);
-    let (planned, wall_loops) = plan_cavities(p, cells, &walls, &mut outline, tag);
+    let (planned, wall_loops) = plan_cavities(p, cells, &walls, pockets, &mut outline, tag);
     let ramp = outline.slope.map(|sl| SlopedFloor::of(sl, bin_cells, &outline));
     let cavity_ops = emit_cavity_ops(ramp.as_ref(), &outline, planned);
     let pegs = peg_rings(cells, &outline);
@@ -249,6 +250,7 @@ fn plan_cavities(
     p: &Params,
     cells: &[GridCell],
     walls: &EffectiveWalls,
+    pockets: &[Pocket],
     outline: &mut PieceOutline,
     tag: &str,
 ) -> (Vec<PlannedCavity>, Vec<Vec<Seg>>) {
@@ -260,7 +262,11 @@ fn plan_cavities(
         rc,
         outline.slope.is_some(),
     );
-    let cavity = walked_cavity(cells, walls, outline.wt);
+    let cavity = if pockets.is_empty() {
+        walked_cavity(cells, walls, outline.wt)
+    } else {
+        pocket_cavity(pockets)
+    };
 
     let corner_r = (OUTER_R - outline.wt).max(0.0);
     let (convex_r, concave_r) = if outline.slope.is_some() {

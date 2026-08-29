@@ -25,7 +25,8 @@ static TEST_ALLOC: kernel::perf::CountingAlloc<mimalloc::MiMalloc> =
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gridfinity::{BinSlope, LogicalBin, Mode, SlopeDir};
+    use crate::gridfinity::{BinSlope, LogicalBin, Mode, Pocket, SlopeDir};
+    use crate::kernel::geom::Surface;
     use crate::kernel::build::{Ring, extrude, loft};
     use crate::kernel::geom;
     use crate::kernel::sketch::Sketch;
@@ -108,7 +109,7 @@ mod tests {
             ..gridfinity::Params::default()
         };
         let bin = &p.bins[0];
-        let _solid = gridfinity::build_piece(&p, &bin.cells, &bin.cells, None).expect("builds");
+        let _solid = gridfinity::build_piece(&p, &bin.cells, &bin.cells, None, &[]).expect("builds");
     }
 
     #[test]
@@ -471,6 +472,208 @@ mod tests {
             };
             let solid = gridfinity::build(&p);
             let _mesh = tessellate(&solid, 8).to_mesh();
+        }
+    }
+
+    /// A drawer-sized baseplate is far bigger than any bed, so it must come back
+    /// as several pieces that between them are the whole plate: one shell each
+    /// with material inside it, and volumes summing to the intact plate's.
+    /// Conservation is the sharp statement -- per-piece manifoldness passes
+    /// straight over a carve that lost or duplicated material.
+    #[test]
+    fn a_drawer_sized_baseplate_carves_into_printable_pieces() {
+        let printer = crate::printers::DEFAULT_PRINTER;
+        let cells = crate::project::drawer::drawer_cells(crate::project::drawer::drawer_grid(
+            400.0,
+            300.0,
+            crate::project::drawer::MAX_GRID,
+        ));
+        let lines = crate::printers::compute_auto_split_lines(&cells, printer);
+        assert!(
+            !lines.is_empty(),
+            "a 9 x 7 baseplate is 378 x 294 mm and fits no {} bed, so it must be split",
+            printer.name
+        );
+        let p = gridfinity::Params {
+            mode: Mode::Baseplate,
+            bins: vec![LogicalBin {
+                cells: cells.clone(),
+                split_lines: lines.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let pieces = gridfinity::try_build_pieces(&p).expect("a drawer baseplate builds");
+        assert_eq!(pieces.len(), crate::layout::partition_cells(&cells, &lines).len());
+        for piece in &pieces {
+            let shells = piece.solid.shells();
+            assert_eq!(shells.len(), 1, "{} is one plate", piece.name);
+            assert!(shells[0].encloses_material, "{} bounds no material", piece.name);
+            assert!(
+                crate::printers::check_bed_fit(
+                    &crate::layout::partition_cells(&cells, &lines)[piece.piece].cells,
+                    printer
+                )
+                .fits,
+                "{} still does not fit the bed it was split for",
+                piece.name
+            );
+        }
+        let vol = |s: &Solid| signed_volume(&tessellate(s, 6).to_mesh());
+        let whole = vol(&gridfinity::build(&p));
+        let summed: f64 = pieces.iter().map(|pc| vol(&pc.solid)).sum();
+        assert!(
+            (summed - whole).abs() < whole * 1e-3,
+            "the {} pieces hold {summed} mm3 of the intact plate's {whole} mm3",
+            pieces.len()
+        );
+    }
+
+    /// Two disjoint cell sets are two plates, and each needs its own top and
+    /// bottom cap carrying only its own sockets.
+    #[test]
+    fn a_baseplate_of_two_islands_caps_each_of_them() {
+        let p = gridfinity::Params {
+            mode: Mode::Baseplate,
+            bins: vec![
+                LogicalBin {
+                    cells: cells(&[(0, 0), (1, 0)]),
+                    ..Default::default()
+                },
+                LogicalBin {
+                    cells: cells(&[(4, 0), (4, 1)]),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let solid = gridfinity::build(&p);
+        let shells = solid.shells();
+        assert_eq!(shells.len(), 2, "two separated plates are two shells");
+        assert!(shells.iter().all(|sh| sh.encloses_material));
+    }
+
+    /// A bin whose cavity is *stated* is solid everywhere the pockets are not.
+    /// The walk would have made the whole interior one compartment; two pockets
+    /// make two, and the material between them and around them is the bin.
+    ///
+    /// Volume is the statement: the pocketed bin holds more material than the
+    /// walked one, by the space the walk would have hollowed and this does not.
+    #[test]
+    fn a_bin_with_stated_pockets_is_solid_where_no_pocket_is() {
+        let walked = gridfinity::Params::rect(2, 2);
+        let pocketed = gridfinity::Params {
+            bins: vec![LogicalBin {
+                pockets: vec![
+                    Pocket { x: 6.0, y: 6.0, width: 28.0, depth: 28.0 },
+                    Pocket { x: 48.0, y: 6.0, width: 28.0, depth: 28.0 },
+                ],
+                ..gridfinity::Params::rect(2, 2).bins[0].clone()
+            }],
+            ..walked.clone()
+        };
+        let vol = |p: &gridfinity::Params| signed_volume(&tessellate(&gridfinity::build(p), 8).to_mesh());
+        let (open, filled) = (vol(&walked), vol(&pocketed));
+        assert!(
+            filled > open,
+            "stating two small pockets leaves more material than hollowing the whole bin: {filled} against {open}"
+        );
+        let floors = gridfinity::build(&pocketed);
+        assert!(
+            floors.validate().is_ok() && crate::audit(&floors).is_ok(),
+            "a pocketed bin is a sound solid"
+        );
+    }
+    /// The z-extent a face occupies, from its own edges' samples.
+    fn face_z_range(solid: &Solid, fid: usize) -> (f64, f64) {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for &(e, fwd) in solid.outer_edges(fid) {
+            let edge = solid.edges[e];
+            for p in edge.sample(fwd, edge.seg_count(12)) {
+                lo = lo.min(p.z);
+                hi = hi.max(p.z);
+            }
+        }
+        assert!(
+            lo.is_finite() && hi.is_finite(),
+            "face {fid} bounds no sampled point, so it has no z-extent"
+        );
+        (lo, hi)
+    }
+
+    /// Whether a face is swept vertically, so its cross-section does not vary
+    /// with z, or is horizontal, so it is an interface between two bands. Those
+    /// are exactly the faces a boolean can resolve in 2D.
+    fn is_prismatic(surface: &Surface) -> bool {
+        match surface {
+            Surface::Plane { normal, .. } => {
+                let nz = normal.vec().z.abs();
+                nz < 1e-9 || nz > 1.0 - 1e-9
+            }
+            Surface::Cylinder { axis, .. } => axis.vec().z.abs() > 1.0 - 1e-9,
+            _ => false,
+        }
+    }
+
+    /// The precondition a CAD-style feature timeline for this model rests on:
+    /// that its features can be joined by a boolean confined to horizontal
+    /// planes and vertical prisms, needing no surface-surface intersection.
+    ///
+    /// Two claims, checked on the finished bin because that is where they have
+    /// to hold. **No face straddles `PEG_HEIGHT`**, so the base and the body
+    /// meet in that one plane and their union is the 2D boolean of the two
+    /// cross-sections there -- which is what the `bridge underside` face
+    /// already is, hand-stitched. And **every face above the cavity floor is
+    /// prismatic**, so the body and the cavity are both z-prisms where they
+    /// overlap and their difference is 2D as well. The peg's chamfer cones are
+    /// the one non-prismatic thing in the model and they live wholly below
+    /// `PEG_HEIGHT`, sharing a band with nothing they must be cut against.
+    ///
+    /// `floor_fillet` is off because the blend is applied *after* the cut and
+    /// its tori are the deliberate exception: `fillet_edges` is already a
+    /// valid-solid-in, valid-solid-out operator and needs no boolean at all.
+    #[test]
+    fn the_model_joins_at_planes_and_prisms_never_at_a_curved_intersection() {
+        let peg_height = 4.75;
+        let floor_z =
+            f64::from(gridfinity::BASE_TOTAL_HEIGHT) + f64::from(gridfinity::FLOOR_THICKNESS);
+        for (gx, gy) in [(1u32, 1u32), (2, 1), (2, 2), (3, 2)] {
+            let p = gridfinity::Params {
+                floor_fillet: 0.0,
+                ..gridfinity::Params::rect(gx, gy)
+            };
+            let solid = gridfinity::build(&p);
+            let mut curved_below = 0;
+            for fid in 0..solid.faces.len() {
+                let (lo, hi) = face_z_range(&solid, fid);
+                assert!(
+                    hi <= peg_height + 1e-6 || lo >= peg_height - 1e-6,
+                    "face {fid} of a {gx}x{gy} bin spans z {lo}..{hi} and straddles the \
+                     {peg_height} interface, so base and body would not join in one plane"
+                );
+                if !is_prismatic(&solid.faces[fid].surface) {
+                    curved_below += 1;
+                    assert!(
+                        hi <= peg_height + 1e-6,
+                        "the only non-prismatic faces are the peg chamfers below {peg_height}, \
+                         but face {fid} reaches z {hi}: {:?}",
+                        solid.faces[fid].surface
+                    );
+                }
+                if lo >= floor_z - 1e-6 {
+                    assert!(
+                        is_prismatic(&solid.faces[fid].surface),
+                        "face {fid} sits above the cavity floor at z {lo}..{hi} and is not a \
+                         prism face: {:?}",
+                        solid.faces[fid].surface
+                    );
+                }
+            }
+            assert!(
+                curved_below > 0,
+                "a {gx}x{gy} bin has chamfered pegs, so it must carry curved faces below the \
+                 interface -- finding none means this proves nothing"
+            );
         }
     }
 
@@ -998,7 +1201,7 @@ mod tests {
             floor_fillet: 4.0,
             ..gridfinity::Params::default()
         };
-        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).expect("the bin builds");
+        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None, &[]).expect("the bin builds");
         let parts = layout::partition_cells(&p.bins[0].cells, &p.bins[0].split_lines);
         assert_eq!(parts.len(), 2, "one split line cuts the L in two");
         let vol = |s: &Solid| signed_volume(&tessellate(s, 6).to_mesh());
@@ -1026,7 +1229,7 @@ mod tests {
             }],
             ..gridfinity::Params::default()
         };
-        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap();
+        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None, &[]).unwrap();
         let corner =
             gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(1, 0)])).unwrap();
         let ell =
@@ -1053,7 +1256,7 @@ mod tests {
             height_units,
             ..gridfinity::Params::default()
         };
-        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap();
+        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None, &[]).unwrap();
         let vol = |s: &Solid| signed_volume(&tessellate(s, 12).to_mesh());
         let whole_v = vol(&whole);
         let mut sum = 0.0;
@@ -1220,7 +1423,7 @@ mod tests {
             height_units: 4,
             ..gridfinity::Params::default()
         };
-        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap();
+        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None, &[]).unwrap();
         let middle =
             gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(1, 0)])).unwrap();
         let rim_faces = |s: &crate::Solid| -> (usize, usize) {
@@ -1263,7 +1466,7 @@ mod tests {
                     ..gridfinity::Params::default()
                 };
                 let solid =
-                    gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap_or_else(|e| {
+                    gridfinity::build_bin_solid(&p, &p.bins[0].cells, None, &[]).unwrap_or_else(|e| {
                         panic!("wt {wall_thickness} rc {cavity_corner_radius}: {e}")
                     });
                 solid.validate().unwrap_or_else(|e| {
@@ -1297,7 +1500,7 @@ mod tests {
                 }],
                 ..gridfinity::Params::default()
             };
-            let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap();
+            let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None, &[]).unwrap();
             let err = gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[(1, 1)]))
                 .expect_err("an enclosed piece must be refused");
             assert!(
@@ -1316,7 +1519,7 @@ mod tests {
             }],
             ..gridfinity::Params::default()
         };
-        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None).unwrap();
+        let whole = gridfinity::build_bin_solid(&p, &p.bins[0].cells, None, &[]).unwrap();
         let whole_vol = signed_volume(&tessellate(&whole, 6).to_mesh());
         for arm in [(1, 0), (0, 1), (2, 1), (1, 2)] {
             let piece = gridfinity::carve_to_cells(&whole, &p.bins[0].cells, &cells(&[arm]))
@@ -1357,7 +1560,7 @@ mod tests {
             ..gridfinity::Params::default()
         };
         let b = &p.bins[0];
-        let _solid = gridfinity::build_piece(&p, &b.cells, &b.cells, b.slope).expect("builds");
+        let _solid = gridfinity::build_piece(&p, &b.cells, &b.cells, b.slope, &[]).expect("builds");
     }
 
     /// The exported literal has to name every field that is not at its default,
@@ -1376,6 +1579,12 @@ mod tests {
                     split_lines: vec![SplitLine {
                         axis: Axis::Y,
                         index: 1,
+                    }],
+                    pockets: vec![Pocket {
+                        x: 3.0,
+                        y: 4.0,
+                        width: 20.0,
+                        depth: 10.0,
                     }],
                     slope: Some(BinSlope {
                         angle_deg: 9.0,
@@ -1425,6 +1634,7 @@ mod tests {
             "orientation: Orientation::H",
             "orientation: Orientation::V",
             "InnerWall { x1: 4.5",
+            "Pocket { x: 3.0, y: 4.0, width: 20.0, depth: 10.0 }",
             "height: Some(6.5)",
             "..Params::default()",
         ] {
@@ -1486,7 +1696,7 @@ mod tests {
             };
             let b = &p.bins[0];
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                gridfinity::build_piece(&p, &b.cells, &b.cells, b.slope)
+                gridfinity::build_piece(&p, &b.cells, &b.cells, b.slope, &[])
             }));
             match r {
                 Ok(Ok(s)) => match s.validate() {
@@ -1587,7 +1797,7 @@ mod tests {
             ..gridfinity::Params::default()
         };
         let b = &p.bins[0];
-        let _solid = gridfinity::build_piece(&p, &b.cells, &b.cells, b.slope).expect("builds");
+        let _solid = gridfinity::build_piece(&p, &b.cells, &b.cells, b.slope, &[]).expect("builds");
     }
 
     #[test]
@@ -2555,7 +2765,7 @@ mod audit_tests {
             ),
         ];
         for (name, cells) in shapes {
-            let solid = gridfinity::build_piece(&p, &cells, &cells, None)
+            let solid = gridfinity::build_piece(&p, &cells, &cells, None, &[])
                 .unwrap_or_else(|e| panic!("{name} failed to build: {e:?}"));
             assert!(solid.validate().is_ok(), "{name} is not a manifold solid");
             let tess = tessellate(&solid, 1);
@@ -2563,3 +2773,4 @@ mod audit_tests {
         }
     }
 }
+

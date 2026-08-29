@@ -31,12 +31,12 @@ pub fn build_frame(frame: usize) -> (Vec<f32>, usize) {
     let mut tris = 0usize;
 
     for cells in components(f) {
-        match gridfinity::build_piece(&p, &cells, &cells, None) {
+        match gridfinity::build_piece(&p, &cells, &cells, None, &[]) {
             Ok(solid) => tris += emit(&solid, &mut verts),
             Err(_) => {
                 for c in &cells {
                     let one = [*c];
-                    if let Ok(s) = gridfinity::build_piece(&p, &one, &one, None) {
+                    if let Ok(s) = gridfinity::build_piece(&p, &one, &one, None, &[]) {
                         tris += emit(&s, &mut verts);
                     }
                 }
@@ -139,7 +139,7 @@ fn build_loop(req: &Receiver<usize>, out: &SyncSender<Piece>) {
         let f = frame_bits(frame);
         let p = cell_params();
         for cells in components(f) {
-            match gridfinity::build_piece(&p, &cells, &cells, None) {
+            match gridfinity::build_piece(&p, &cells, &cells, None, &[]) {
                 Ok(solid) => {
                     if out.send(Piece::Solid(Box::new(solid))).is_err() {
                         return;
@@ -148,7 +148,7 @@ fn build_loop(req: &Receiver<usize>, out: &SyncSender<Piece>) {
                 Err(_) => {
                     for c in &cells {
                         let one = [*c];
-                        if let Ok(s) = gridfinity::build_piece(&p, &one, &one, None) {
+                        if let Ok(s) = gridfinity::build_piece(&p, &one, &one, None, &[]) {
                             if out.send(Piece::Solid(Box::new(s))).is_err() {
                                 return;
                             }
@@ -213,12 +213,12 @@ mod tests {
         use gridfinity_cad::tessellate;
         let p = Params { height_units: 2, floor_fillet: 0.0, ..Params::default() };
         let cells = vec![GridCell { x: 0, y: 0 }];
-        let _ = gridfinity::build_piece(&p, &cells, &cells, None).unwrap();
+        let _ = gridfinity::build_piece(&p, &cells, &cells, None, &[]).unwrap();
         let t = Instant::now();
         let iters = 200;
         let mut tris = 0;
         for _ in 0..iters {
-            let s = gridfinity::build_piece(&p, &cells, &cells, None).unwrap();
+            let s = gridfinity::build_piece(&p, &cells, &cells, None, &[]).unwrap();
             tris = tessellate(&s, 1).render_buffer().len() / 18;
         }
         let per = t.elapsed().as_secs_f64() / iters as f64;
@@ -251,7 +251,7 @@ mod tests {
             seen.len() == cs.len()
         };
         let leaks = |cs: &[GridCell]| -> usize {
-            match gridfinity::build_piece(&p, cs, cs, None) {
+            match gridfinity::build_piece(&p, cs, cs, None, &[]) {
                 Ok(s) => gridfinity_cad::tessellation_leaks(&tessellate(&s, 1)).len(),
                 Err(_) => 0,
             }
@@ -308,7 +308,7 @@ mod tests {
             println!("  {row}");
         }
 
-        let s = gridfinity::build_piece(&p, &cur, &cur, None).unwrap();
+        let s = gridfinity::build_piece(&p, &cur, &cur, None, &[]).unwrap();
         println!("validate: {:?}", s.validate());
         let report = gridfinity_cad::audit(&s);
         println!("{report}");
@@ -376,7 +376,7 @@ mod tests {
                 best = c.clone();
             }
         }
-        let solid = gridfinity::build_piece(&p, &best, &best, None).unwrap();
+        let solid = gridfinity::build_piece(&p, &best, &best, None, &[]).unwrap();
         {
             let mut pp = p.clone();
             pp.bins = vec![gridfinity_cad::gridfinity::LogicalBin {
@@ -451,7 +451,7 @@ mod tests {
         let (leaky, total) = sweep
             .par_iter()
             .map(|c| {
-                let s = gridfinity::build_piece(&p, c, c, None).unwrap();
+                let s = gridfinity::build_piece(&p, c, c, None, &[]).unwrap();
                 let n = gridfinity_cad::tessellation_leaks(&tessellate(&s, 1)).len();
                 ((n > 0) as usize, n)
             })
@@ -600,7 +600,7 @@ mod tests {
         for frame in (0..n).step_by(step * 5) {
             let f = frame_bits(frame);
             for cells in components(f) {
-                let _ = gridfinity::build_piece(&p, &cells, &cells, None);
+                let _ = gridfinity::build_piece(&p, &cells, &cells, None, &[]);
             }
         }
 
@@ -610,7 +610,7 @@ mod tests {
         for frame in (0..n).step_by(step) {
             let f = frame_bits(frame);
             for cells in components(f) {
-                let _ = gridfinity::build_piece(&p, &cells, &cells, None);
+                let _ = gridfinity::build_piece(&p, &cells, &cells, None, &[]);
             }
         }
         let wall = t.elapsed();
@@ -645,7 +645,7 @@ build only: {:?} total, {:.2} ms/frame
             let f = frame_bits(frame);
             for cells in components(f) {
                 let t0 = Instant::now();
-                let Ok(solid) = gridfinity::build_piece(&p, &cells, &cells, None) else { continue };
+                let Ok(solid) = gridfinity::build_piece(&p, &cells, &cells, None, &[]) else { continue };
                 bs += t0.elapsed().as_secs_f64();
                 let t1 = Instant::now();
                 let mut v = Vec::new();

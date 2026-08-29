@@ -16,6 +16,7 @@ wall_thickness = 1.2
 fillet_radius = 2.5
 magnets = false
 screws = false
+baseplate = true       # the grid the fitted bin drops into, cut on the bin's own lines
 printer = "Prusa MK4 / MK3S+"
 # bed = { width = 250, depth = 210 }   # state a bed instead of a profile
 

@@ -22,7 +22,7 @@
 use crate::export::{self, Format};
 use crate::input::{self, Spec};
 use crate::report;
-use gridfinity_cad::gridfinity::{self, BinPiece, InnerWall, LogicalBin, Mode, Params};
+use gridfinity_cad::gridfinity::{self, BinPiece, LogicalBin, Mode, Params, Pocket};
 use gridfinity_cad::kernel::math::Vec3;
 use gridfinity_cad::kernel::program::BlendReport;
 use gridfinity_cad::kernel::topo::Solid;
@@ -59,15 +59,27 @@ pub struct Run {
     pub floor_fillet: f64,
     pub claim_margin: f64,
     pub wall_report: WallReport,
+    pub pockets: Vec<Pocket>,
     pub params: Params,
     pub split_lines: Vec<SplitLine>,
     pub parts: Vec<Piece>,
     pub pieces: Vec<BinPiece>,
+    pub baseplate: Vec<BinPiece>,
     pub blends: BlendReport,
     pub soundness: Vec<PieceSoundness>,
     pub pack_time: Duration,
     pub build_time: Duration,
     pub export_time: Duration,
+}
+
+impl Run {
+    /// Everything this run built, in the order it is written: the bin's pieces,
+    /// then the baseplate's, which are empty when the file asked for none. The
+    /// export and the report both read this rather than either list alone, so a
+    /// file that is written is a file the soundness section accounts for.
+    pub fn all_pieces(&self) -> Vec<&BinPiece> {
+        self.pieces.iter().chain(self.baseplate.iter()).collect()
+    }
 }
 
 /// One placed object's box, in the bin's own millimetre coordinates: what the
@@ -163,7 +175,7 @@ pub struct PieceSoundness {
 }
 
 /// What each built piece is made of, in the order the model built them.
-fn soundness_of(pieces: &[BinPiece]) -> Vec<PieceSoundness> {
+fn soundness_of(pieces: &[&BinPiece]) -> Vec<PieceSoundness> {
     pieces
         .iter()
         .map(|piece| {
@@ -223,12 +235,58 @@ pub fn parse_args(rest: &[String]) -> Result<Args, String> {
     })
 }
 
+/// Every placed instance's compartment, as the pockets the bin is hollowed to:
+/// each part rectangle of each claim, inset by half a divider on every side.
+///
+/// A `Placement` carries the **claim**, which reaches the divider centrelines
+/// and the packing-area edge by construction, so insetting it by `t / 2` lands
+/// the pocket wall exactly where a generated divider's face would have stood --
+/// the compartment is the size it always was, and the object keeps the whole
+/// `clearance + floor_fillet` the claim reserved beyond it. What changes is
+/// everything *outside* a pocket: with the cavity stated rather than walked, the
+/// drawer is solid there instead of being an open pocket of air no object was
+/// packed into.
+///
+/// One pocket per part rather than one per placement, and they are allowed to
+/// overlap: an object's parts touch along an edge, so their inset claims
+/// overlap, and `pocket_cavity` unions them back into the one L-shaped
+/// compartment the object wants.
+fn drawer_pockets(result: &PackResult, divider_thickness: f64) -> Vec<Pocket> {
+    let inset = divider_thickness / 2.0;
+    let mut out = Vec::new();
+    for placement in &result.placements {
+        for part in &placement.parts {
+            let (width, depth) = (part.width - inset * 2.0, part.depth - inset * 2.0);
+            assert!(
+                width > 0.0 && depth > 0.0,
+                "a claim of {} x {} mm inset by half a {divider_thickness} mm divider leaves no compartment",
+                part.width,
+                part.depth
+            );
+            out.push(Pocket {
+                x: part.x + inset,
+                y: part.y + inset,
+                width,
+                depth,
+            });
+        }
+    }
+    out
+}
+
 /// The `Params` a fitted drawer builds as: one bin covering the drawer's cells,
-/// carrying the generated dividers and cut for the printer's bed.
+/// hollowed to one pocket per placed object and cut for the printer's bed.
+///
+/// The bin carries **no `inner_walls`**. A divider is what is left between two
+/// compartments when the cavity is walked, and a stated cavity needs none: the
+/// material between two pockets is simply material, and so is the space no
+/// object was packed into. That also keeps a fitted drawer off the free-form
+/// inner wall path, which is the kernel's weakest surface and which a packed
+/// drawer used to enter dozens of times per bin.
 fn drawer_params(
     spec: &Spec,
     cells: &[GridCell],
-    walls: &[InnerWall],
+    pockets: &[Pocket],
     splits: &[SplitLine],
 ) -> Params {
     Params {
@@ -236,6 +294,7 @@ fn drawer_params(
             cells: cells.to_vec(),
             split_lines: splits.to_vec(),
             slope: None,
+            pockets: pockets.to_vec(),
         }],
         height_units: spec.height_units,
         wall_thickness: spec.wall_thickness,
@@ -245,8 +304,18 @@ fn drawer_params(
         screw_holes: spec.screws,
         open_edges: Vec::new(),
         divider_edges: Vec::new(),
-        inner_walls: walls.to_vec(),
+        inner_walls: Vec::new(),
         mode: Mode::Bin,
+    }
+}
+
+/// The `Params` the fitted drawer's baseplate builds as: the same cells and the
+/// same split lines as the bin, so the plate is cut where the bin is and the two
+/// halves of a drawer line up, in `Mode::Baseplate`.
+fn baseplate_params(spec: &Spec, cells: &[GridCell], splits: &[SplitLine]) -> Params {
+    Params {
+        mode: Mode::Baseplate,
+        ..drawer_params(spec, cells, &[], splits)
     }
 }
 
@@ -277,15 +346,20 @@ fn fit(spec: Spec) -> Result<Run, String> {
     let result = pack_layout(input);
     let pack_time = started.elapsed();
 
-    let (walls, wall_report) =
+    let (_, wall_report) =
         layout_walls_reporting(&result.placements, &area, spec.divider_thickness);
-    let inner_walls: Vec<InnerWall> = walls.iter().map(|w| w.to_inner_wall()).collect();
+    let pockets = drawer_pockets(&result, spec.divider_thickness);
     let split_lines = compute_auto_split_lines(&cells, spec.printer);
-    let params = drawer_params(&spec, &cells, &inner_walls, &split_lines);
+    let params = drawer_params(&spec, &cells, &pockets, &split_lines);
     let parts = partition_cells(&cells, &split_lines);
 
     let started = Instant::now();
     let (pieces, blends) = gridfinity::try_build_pieces_reporting(&params)?;
+    let baseplate = if spec.baseplate {
+        gridfinity::try_build_pieces(&baseplate_params(&spec, &cells, &split_lines))?
+    } else {
+        Vec::new()
+    };
     let build_time = started.elapsed();
     assert_eq!(
         pieces.len(),
@@ -294,10 +368,14 @@ fn fit(spec: Spec) -> Result<Run, String> {
         pieces.len(),
         parts.len()
     );
+    assert!(
+        baseplate.is_empty() || baseplate.len() == parts.len(),
+        "the baseplate is cut on the bin's own split lines, so it comes to {} piece(s), not {}",
+        parts.len(),
+        baseplate.len()
+    );
 
-    let soundness = soundness_of(&pieces);
-
-    Ok(Run {
+    let mut run = Run {
         spec,
         grid,
         area,
@@ -306,16 +384,20 @@ fn fit(spec: Spec) -> Result<Run, String> {
         floor_fillet,
         claim_margin,
         wall_report,
+        pockets,
         params,
         split_lines,
         parts,
         pieces,
+        baseplate,
         blends,
-        soundness,
+        soundness: Vec::new(),
         pack_time,
         build_time,
         export_time: Duration::ZERO,
-    })
+    };
+    run.soundness = soundness_of(&run.all_pieces());
+    Ok(run)
 }
 
 /// One `optimize` invocation, end to end: read, fit, write, report. Returns the
@@ -330,9 +412,10 @@ pub fn run(rest: &[String]) -> Result<Option<View>, String> {
     let mut run = crate::catch(|| fit(spec))?;
 
     let started = Instant::now();
+    let all = run.all_pieces();
     let written = match args.format {
-        Format::Stl => export::write_stl_dir(&args.output, &run.pieces)?,
-        Format::ParasolidXt => vec![export::write_xt(&args.output, &run.pieces)?],
+        Format::Stl => export::write_stl_dir(&args.output, &all)?,
+        Format::ParasolidXt => vec![export::write_xt(&args.output, &all)?],
     };
     run.export_time = started.elapsed();
 
@@ -554,12 +637,10 @@ size = [30, 30, 200]
         );
 
         let floors = compartment_floors(&run.pieces[0].solid);
-        assert!(
-            floors.len() >= run.result.placements.len(),
-            "every placed object gets a compartment, so there are at least {} floors, not {} \
-             -- leftover packing area becomes compartments of its own on top of those",
+        assert_eq!(
+            floors.len(),
             run.result.placements.len(),
-            floors.len()
+            "a compartment floor is a packed object's pocket and nothing else; leftover area is material"
         );
         for b in object_boxes(&run) {
             for corner in [
@@ -578,6 +659,83 @@ size = [30, 30, 200]
         }
     }
 
+    /// The bin's pegs need a grid to sit in, so a run builds one by default, on
+    /// the bin's own cells and its own cut lines.
+    #[test]
+    fn builds_the_baseplate_the_bin_drops_into() {
+        let spec = input::parse(SMALL).expect("the fixture is a valid run");
+        let run = fit(spec).expect("a two-cell drawer of four blocks builds");
+
+        assert_eq!(run.baseplate.len(), run.parts.len());
+        assert_eq!(run.all_pieces().len(), run.pieces.len() + run.baseplate.len());
+        assert_eq!(
+            run.soundness.len(),
+            run.all_pieces().len(),
+            "every piece written is a piece the soundness section accounts for"
+        );
+        for piece in &run.baseplate {
+            assert!(piece.name.contains("baseplate"), "{}", piece.name);
+            let shells = piece.solid.shells();
+            assert_eq!(shells.len(), 1, "{} is one plate", piece.name);
+            assert!(shells[0].encloses_material, "{} bounds no material", piece.name);
+        }
+    }
+
+    #[test]
+    fn builds_no_baseplate_when_the_file_turns_it_off() {
+        let text = SMALL.replace("effort = \"quick\"", "effort = \"quick\"
+baseplate = false");
+        let spec = input::parse(&text).expect("baseplate is a setting");
+        let run = fit(spec).expect("a two-cell drawer of four blocks builds");
+        assert!(run.baseplate.is_empty());
+        assert_eq!(run.all_pieces().len(), run.pieces.len());
+    }
+
+    /// The point of stating the cavity: space no object was packed into is
+    /// material, not an open pocket of air nothing can reach. Read off the
+    /// finished B-rep, so it is the solid that says so and not the packer's
+    /// own bookkeeping.
+    ///
+    /// The fixture has leftover to find -- four 30 mm blocks claiming 7.16 mm
+    /// of margin each in an 81.1 mm packing area leave the middle and the
+    /// corners over -- and the sweep asserts it found some before asserting it
+    /// is solid, since on a drawer packed full the check would pass vacuously.
+    #[test]
+    fn the_space_no_object_was_packed_into_is_solid() {
+        let spec = input::parse(SMALL).expect("the fixture is a valid run");
+        let run = fit(spec).expect("a two-cell drawer of four blocks builds");
+        let floors = compartment_floors(&run.pieces[0].solid);
+
+        let claimed = |p: Vec2| {
+            run.result.placements.iter().any(|pl| {
+                pl.parts.iter().any(|r| {
+                    p.x >= r.x && p.x <= r.right() && p.y >= r.y && p.y <= r.bottom()
+                })
+            })
+        };
+        let steps = 60;
+        let mut unclaimed = 0;
+        for i in 0..=steps {
+            for j in 0..=steps {
+                let p = Vec2::new(
+                    run.area.x + run.area.width * f64::from(i) / f64::from(steps),
+                    run.area.y + run.area.depth * f64::from(j) / f64::from(steps),
+                );
+                if claimed(p) {
+                    continue;
+                }
+                unclaimed += 1;
+                assert!(
+                    !floors.iter().any(|f| point_in_polygon(f, p)),
+                    "{p:?} is in the packing area, in no claim, and yet stands on a compartment floor"
+                );
+            }
+        }
+        assert!(
+            unclaimed > 0,
+            "the fixture packs the drawer full, so it cannot tell filled leftover from hollow"
+        );
+    }
     #[test]
     fn builds_one_piece_per_partition_cell_set() {
         let spec = input::parse(SMALL).expect("the fixture is a valid run");
@@ -608,8 +766,9 @@ size = [30, 30, 200]
         let spec = input::parse(SMALL).expect("the fixture is a valid run");
         let run = fit(spec).expect("a two-cell drawer of four blocks builds");
 
-        assert_eq!(run.soundness.len(), run.pieces.len());
-        for (piece, sound) in run.pieces.iter().zip(&run.soundness) {
+        let pieces = run.all_pieces();
+        assert_eq!(run.soundness.len(), pieces.len());
+        for (piece, sound) in pieces.iter().zip(&run.soundness) {
             assert_eq!(sound.name, piece.name);
             assert_eq!(
                 sound.shells, 1,
@@ -633,19 +792,35 @@ size = [30, 30, 200]
         }
     }
 
+    /// The bin is hollowed to the pockets and carries no divider at all: a
+    /// divider is what a *walked* cavity leaves between two compartments, and a
+    /// stated cavity needs none.
     #[test]
-    fn carries_the_generated_dividers_into_the_params_it_builds() {
+    fn carries_the_packed_compartments_into_the_params_it_builds() {
         let spec = input::parse(SMALL).expect("the fixture is a valid run");
         let run = fit(spec).expect("a two-cell drawer of four blocks builds");
 
-        assert_eq!(run.params.inner_walls.len(), run.result.walls.len());
+        assert!(
+            run.params.inner_walls.is_empty(),
+            "a stated cavity needs no divider, but the bin carries {}",
+            run.params.inner_walls.len()
+        );
         assert_eq!(run.params.bins.len(), 1);
         assert_eq!(run.params.bins[0].cells, run.cells);
-        for (wall, inner) in run.result.walls.iter().zip(&run.params.inner_walls) {
-            assert_eq!(inner.x1, wall.start.x);
-            assert_eq!(inner.y1, wall.start.y);
-            assert_eq!(inner.width, wall.width);
-            assert_eq!(inner.height, None, "a generated divider is full height");
+        assert_eq!(run.params.bins[0].pockets.len(), run.pockets.len());
+        assert_eq!(
+            run.pockets.len(),
+            run.result.placements.len(),
+            "every block of this fixture is a single box, so it is a single pocket"
+        );
+        let inset = run.spec.divider_thickness / 2.0;
+        for (pocket, placement) in run.pockets.iter().zip(&run.result.placements) {
+            let claim = placement.parts[0];
+            assert!(
+                (pocket.x - (claim.x + inset)).abs() < 1e-9
+                    && (pocket.width - (claim.width - 2.0 * inset)).abs() < 1e-9,
+                "a pocket is its claim inset by half a divider, but {pocket:?} came from {claim:?}"
+            );
         }
     }
 

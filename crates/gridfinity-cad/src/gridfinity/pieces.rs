@@ -15,9 +15,10 @@
 use super::*;
 use crate::kernel::math::{Vec2, Vec3};
 use crate::kernel::rectregion::{RectF, trace_rects};
+use crate::kernel::sketch::point_in_polygon;
 use crate::kernel::split::{Cut, Side, trim};
 use crate::kernel::topo::Solid;
-use crate::layout::{GridCell, compartments, partition_cells};
+use crate::layout::{GridCell, SplitLine, compartments, partition_cells};
 
 /// Cut one printable piece out of the finished bin: keep the material inside the
 /// vertical prism over the piece's cells. A piece is any connected polyomino, not
@@ -77,6 +78,95 @@ pub fn carve_to_cells(
         .collect();
     if loops.is_empty() {
         return Err("a piece traced no boundary".into());
+    }
+    let cut = Cut::prism(&loops, Vec3::Z)?;
+    let piece = if straddles(whole, &cut) {
+        trim(whole, &cut)?
+    } else {
+        whole.clone()
+    };
+    assert_piece_is_sound(&piece, piece_cells);
+    Ok(piece)
+}
+
+/// Cut one printable piece out of the finished baseplate: keep the material
+/// inside the vertical prism over the piece's cells, each cell reaching
+/// `BASEPLATE_PRISM_REACH` into every neighbour the *bin* does not occupy.
+///
+/// That reach is the one difference from `carve_to_cells`, and it is what a
+/// baseplate's outline forces. A plate is the full `GRID_PITCH` cell rectangle
+/// where a bin is inset by `HALF_TOL`, so a prism traced from bare cell
+/// rectangles puts its outer planes exactly in the plate's own outer faces --
+/// a coincident-plane cut, which `trim` is never asked for on the bin path.
+/// Growing outward only where the neighbour is outside the bin moves those
+/// planes clear while leaving every interior seam plane exactly on its split
+/// line, and it claims nothing: a baseplate's material lies wholly inside the
+/// union of the bin's cell rectangles, so the ground the reach covers is empty.
+pub fn carve_baseplate_to_cells(
+    whole: &Solid,
+    bin_cells: &[GridCell],
+    piece_cells: &[GridCell],
+) -> Result<Solid, String> {
+    if piece_cells.is_empty() {
+        return Ok(whole.clone());
+    }
+    let mut rects: Vec<RectF> = Vec::with_capacity(piece_cells.len());
+    for c in piece_cells {
+        let (mut x, mut y) = (c.x as f64 * GRID_PITCH, c.y as f64 * GRID_PITCH);
+        let (mut w, mut h) = (GRID_PITCH, GRID_PITCH);
+        for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+            let neighbour = GridCell {
+                x: c.x + dx,
+                y: c.y + dy,
+            };
+            if bin_cells.contains(&neighbour) {
+                continue;
+            }
+            match (dx, dy) {
+                (-1, 0) => {
+                    x -= BASEPLATE_PRISM_REACH;
+                    w += BASEPLATE_PRISM_REACH;
+                }
+                (1, 0) => w += BASEPLATE_PRISM_REACH,
+                (0, -1) => {
+                    y -= BASEPLATE_PRISM_REACH;
+                    h += BASEPLATE_PRISM_REACH;
+                }
+                _ => h += BASEPLATE_PRISM_REACH,
+            }
+        }
+        rects.push(RectF::new(x, y, w, h));
+    }
+    let loops: Vec<Vec<Vec2>> = trace_rects(&rects, &[])
+        .into_iter()
+        .map(|lp| lp.pts)
+        .collect();
+    if loops.is_empty() {
+        return Err("a baseplate piece traced no boundary".into());
+    }
+    let covers = |c: &GridCell| {
+        let centre = Vec2::new(
+            (c.x as f64 + 0.5) * GRID_PITCH,
+            (c.y as f64 + 0.5) * GRID_PITCH,
+        );
+        loops.iter().filter(|lp| point_in_polygon(lp, centre)).count() % 2 == 1
+    };
+    for c in piece_cells {
+        assert!(
+            covers(c),
+            "the prism of a {}-cell baseplate piece does not cover its own cell ({}, {})",
+            piece_cells.len(),
+            c.x,
+            c.y
+        );
+    }
+    for c in bin_cells {
+        assert!(
+            piece_cells.contains(c) || !covers(c),
+            "the prism of a baseplate piece reaches over cell ({}, {}), which belongs to another piece",
+            c.x,
+            c.y
+        );
     }
     let cut = Cut::prism(&loops, Vec3::Z)?;
     let piece = if straddles(whole, &cut) {
@@ -174,6 +264,59 @@ pub(super) fn straddles(solid: &Solid, cut: &Cut) -> bool {
         .any(|v| cut.side_of_point(v.point) == Side::Negative)
 }
 
+
+/// The baseplate over every bin's cells, cut into the pieces its bins' split
+/// lines call for: built once and carved, exactly as a bin is, so a seam is a
+/// boolean applied last rather than two plates authored side by side -- which
+/// would round the convex corners the cut is supposed to leave square.
+///
+/// The lines are the union of every `LogicalBin::split_lines`, because a
+/// baseplate is one body over `Params::all_cells` while the lines are stated
+/// per bin; a `Params` carrying one bin, which is what `optimize` builds, is
+/// simply that bin's lines. Every returned piece has passed
+/// `assert_piece_is_sound`.
+fn baseplate_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
+    let cells = p.all_cells();
+    if cells.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut lines: Vec<SplitLine> = Vec::new();
+    for bin in &p.bins {
+        for line in &bin.split_lines {
+            if !lines.contains(line) {
+                lines.push(*line);
+            }
+        }
+    }
+    let parts = partition_cells(&cells, &lines);
+    let whole = build_baseplate(p);
+    let mut out = Vec::with_capacity(parts.len());
+    for (i, part) in parts.iter().enumerate() {
+        let name = if parts.len() == 1 {
+            "gridfinity-baseplate.stl".to_string()
+        } else {
+            format!("gridfinity-baseplate-piece-{}-of-{}.stl", i + 1, parts.len())
+        };
+        out.push(BinPiece {
+            name,
+            bin: 0,
+            piece: i,
+            piece_count: parts.len(),
+            col: part.col,
+            row: part.row,
+            solid: carve_baseplate_to_cells(&whole, &cells, &part.cells)?,
+        });
+    }
+    assert_eq!(
+        out.len(),
+        parts.len(),
+        "a baseplate of {} cell(s) partitions into {} piece(s), so it must carve into as many",
+        cells.len(),
+        parts.len()
+    );
+    Ok(out)
+}
+
 pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
     try_build_pieces_reporting(p).map(|(pieces, _)| pieces)
 }
@@ -186,15 +329,7 @@ pub fn try_build_pieces(p: &Params) -> Result<Vec<BinPiece>, String> {
 /// between a printable part and a printable part with sharp inside corners.
 pub fn try_build_pieces_reporting(p: &Params) -> Result<(Vec<BinPiece>, BlendReport), String> {
     if p.mode == Mode::Baseplate {
-        return Ok((vec![BinPiece {
-            name: "gridfinity-baseplate.stl".into(),
-            bin: 0,
-            piece: 0,
-            piece_count: 1,
-            col: 0,
-            row: 0,
-            solid: build_baseplate(p),
-        }], BlendReport::default()));
+        return Ok((baseplate_pieces(p)?, BlendReport::default()));
     }
     let bins: Vec<(usize, &LogicalBin)> = p
         .bins
@@ -211,7 +346,7 @@ pub fn try_build_pieces_reporting(p: &Params) -> Result<(Vec<BinPiece>, BlendRep
         } else {
             format!("gridfinity-bin-{}", ord + 1)
         };
-        let (whole, report) = build_bin_solid_reporting(p, &bin.cells, bin.slope)?;
+        let (whole, report) = build_bin_solid_reporting(p, &bin.cells, bin.slope, &bin.pockets)?;
         blends.requested += report.requested;
         blends.unresolved += report.unresolved;
         blends.dropped.extend(report.dropped);

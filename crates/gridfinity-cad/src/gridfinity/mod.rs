@@ -100,7 +100,7 @@ pub fn program(p: &Params) -> Program {
         } else {
             format!("bin {}", bi + 1)
         };
-        plan_piece(p, &bin.cells, &bin.cells, walls, bin.slope, &tag, &mut prog);
+        plan_piece(p, &bin.cells, &bin.cells, walls, bin.slope, &bin.pockets, &tag, &mut prog);
     }
     prog
 }
@@ -124,8 +124,9 @@ pub fn build_piece(
     bin_cells: &[GridCell],
     piece_cells: &[GridCell],
     slope: Option<BinSlope>,
+    pockets: &[Pocket],
 ) -> Result<Solid, String> {
-    let whole = build_bin_solid(p, bin_cells, slope)?;
+    let whole = build_bin_solid(p, bin_cells, slope, pockets)?;
     carve_to_cells(&whole, bin_cells, piece_cells)
 }
 
@@ -133,8 +134,9 @@ pub fn build_bin_solid(
     p: &Params,
     bin_cells: &[GridCell],
     slope: Option<BinSlope>,
+    pockets: &[Pocket],
 ) -> Result<Solid, String> {
-    build_bin_solid_reporting(p, bin_cells, slope).map(|(s, _)| s)
+    build_bin_solid_reporting(p, bin_cells, slope, pockets).map(|(s, _)| s)
 }
 
 /// `build_bin_solid` plus what became of the bin's blends.
@@ -142,10 +144,11 @@ pub fn build_bin_solid_reporting(
     p: &Params,
     bin_cells: &[GridCell],
     slope: Option<BinSlope>,
+    pockets: &[Pocket],
 ) -> Result<(Solid, BlendReport), String> {
     let walls = effective_walls(bin_cells, bin_cells, &p.open_edges, &p.divider_edges);
     let mut prog = Program::default();
-    plan_piece(p, bin_cells, bin_cells, walls, slope, "piece", &mut prog);
+    plan_piece(p, bin_cells, bin_cells, walls, slope, pockets, "piece", &mut prog);
     let (solid, report) = program::run_reporting(&prog, |_| true)?;
     if let Err(e) = solid.validate() {
         panic!("a bin solid is not a closed manifold: {e}");

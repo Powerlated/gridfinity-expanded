@@ -787,7 +787,7 @@ fn check(c: &Case) -> Result<(), String> {
         let (whole, blends) = if pieces.is_empty() {
             gridfinity::try_build_reporting(&c.params).map_err(|e| format!("build error: {e}"))?
         } else {
-            gridfinity::build_bin_solid_reporting(&c.params, &bin.cells, bin.slope)
+            gridfinity::build_bin_solid_reporting(&c.params, &bin.cells, bin.slope, &bin.pockets)
                 .map_err(|e| format!("build error: {e}"))?
         };
         // On a split profile the whole solid's failures are prefixed `whole `,

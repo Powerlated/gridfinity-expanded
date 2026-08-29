@@ -88,7 +88,7 @@ pub fn generate_geometry(bins: JsValue) -> Result<JsValue, JsValue> {
         let params = bin.to_params();
         let pieces = js_sys::Array::new();
 
-        let whole = gridfinity::build_bin_solid(&params, &bin.cells, None)
+        let whole = gridfinity::build_bin_solid(&params, &bin.cells, None, &[])
             .map_err(|e| JsValue::from_str(&format!("bin {}: {e}", bin.bin_id)))?;
 
         for piece_cells in &bin.pieces {
@@ -113,7 +113,7 @@ pub fn export_parasolid(bins: JsValue) -> Result<String, JsValue> {
     let mut solids: Vec<gridfinity_cad::Solid> = Vec::new();
     for bin in &bins {
         let params = bin.to_params();
-        let whole = gridfinity::build_bin_solid(&params, &bin.cells, None)
+        let whole = gridfinity::build_bin_solid(&params, &bin.cells, None, &[])
             .map_err(|e| JsValue::from_str(&format!("bin {}: {e}", bin.bin_id)))?;
         for piece_cells in &bin.pieces {
             let solid = gridfinity::carve_to_cells(&whole, &bin.cells, piece_cells)
@@ -217,12 +217,12 @@ pub fn badapple_frame_vertices(index: usize, rgb: u32) -> js_sys::Float32Array {
         append_smooth_shaded(&mut verts, kernel, Vec3::ZERO, color, false);
     };
     for cells in gridfinity_cad::badapple::components(gridfinity_cad::badapple::frame(index)) {
-        match gridfinity::build_piece(&params, &cells, &cells, None) {
+        match gridfinity::build_piece(&params, &cells, &cells, None, &[]) {
             Ok(solid) => stage(&render_vertices(&solid, 1)),
             Err(_) => {
                 for cell in &cells {
                     let one = [*cell];
-                    if let Ok(solid) = gridfinity::build_piece(&params, &one, &one, None) {
+                    if let Ok(solid) = gridfinity::build_piece(&params, &one, &one, None, &[]) {
                         stage(&render_vertices(&solid, 1));
                     }
                 }
@@ -319,7 +319,7 @@ mod tests {
     fn emits_whole_triangles_of_position_plus_normal_vertices() {
         let bin = &parse(ONE_CELL)[0];
         let solid =
-            gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None).unwrap();
+            gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None, &[]).unwrap();
         let verts = render_vertices(&solid, ARC_SEGMENTS_PER_QUARTER);
         assert!(!verts.is_empty());
         assert_eq!(verts.len() % (3 * gridfinity_render::KERNEL_STRIDE), 0);
@@ -329,7 +329,7 @@ mod tests {
     fn every_emitted_vertex_carries_a_unit_normal() {
         let bin = &parse(ONE_CELL)[0];
         let solid =
-            gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None).unwrap();
+            gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None, &[]).unwrap();
         for v in render_vertices(&solid, ARC_SEGMENTS_PER_QUARTER)
             .chunks_exact(gridfinity_render::KERNEL_STRIDE)
         {
@@ -350,7 +350,7 @@ mod tests {
         let bin = &parse(json)[0];
         let params = bin.to_params();
         for cells in &bin.pieces {
-            let solid = gridfinity::build_piece(&params, &bin.cells, cells, None)
+            let solid = gridfinity::build_piece(&params, &bin.cells, cells, None, &[])
                 .expect("each cut piece must build");
             solid.validate().expect("each cut piece must be manifold");
         }
@@ -379,7 +379,7 @@ mod tests {
     fn the_render_buffer_is_closed_under_exact_position_welding() {
         let bin = &parse(ONE_CELL)[0];
         let solid =
-            gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None).unwrap();
+            gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None, &[]).unwrap();
         let verts = render_vertices(&solid, ARC_SEGMENTS_PER_QUARTER);
         assert_eq!(unclosed_edges(&verts), 0, "render buffer has unpaired edges");
     }
@@ -404,7 +404,7 @@ mod tests {
             );
             let mut bin = parse(&json).pop().unwrap();
             bin.pieces = vec![bin.cells.clone()];
-            let solid = gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None)
+            let solid = gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None, &[])
                 .unwrap_or_else(|e| panic!("{name} failed to build: {e}"));
             let brep = match solid.validate() {
                 Ok(()) => "B-rep manifold".to_string(),
@@ -431,7 +431,7 @@ mod tests {
         let mut bin = parse(&json).pop().unwrap();
         bin.pieces = vec![bin.cells.clone()];
         let solid =
-            gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None).unwrap();
+            gridfinity::build_piece(&bin.to_params(), &bin.cells, &bin.pieces[0], None, &[]).unwrap();
         solid.validate().expect("B-rep stays manifold even while the mesh leaks");
         assert_eq!(unclosed_edges(&render_vertices(&solid, ARC_SEGMENTS_PER_QUARTER)), 0, "rim leaks at the opening");
     }
@@ -454,7 +454,7 @@ mod tests {
                 let bin = &parse(&json)[0];
                 let params = bin.to_params();
                 let solid =
-                    gridfinity::build_piece(&params, &bin.cells, &bin.pieces[0], None)
+                    gridfinity::build_piece(&params, &bin.cells, &bin.pieces[0], None, &[])
                         .unwrap_or_else(|e| panic!("{name} (magnets={magnets}) failed: {e}"));
                 solid
                     .validate()

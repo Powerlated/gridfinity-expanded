@@ -52,6 +52,12 @@ pub(super) const PEG_TANGENT: f64 = HALF_TOL + OUTER_R;
 
 pub(super) const REENTRANT_FILLET_OVERHANG: f64 = 8.0;
 
+/// How far a baseplate piece's carving prism reaches into a cell the plate does
+/// not occupy, so its planes there stand clear of the plate's own outer faces
+/// instead of lying in them. Half a pitch: the nearest material across an empty
+/// cell is a whole pitch away, so the reach is always in empty space.
+pub(super) const BASEPLATE_PRISM_REACH: f64 = GRID_PITCH / 2.0;
+
 /// The thinnest wall a *square* cavity corner can carry inside the outer arc.
 /// A sharp corner of a cavity inset `wt` sits `sqrt(2) * (OUTER_R - wt)` from
 /// the outer arc's centre, so `OUTER_R * (1 - 1/sqrt(2))` is where it reaches

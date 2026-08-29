@@ -12,8 +12,8 @@
 
 use crate::export::{Contents, Written};
 use crate::optimize::Run;
-use gridfinity_cad::layout::{Axis, GridFootprint};
-use gridfinity_cad::printers::{BED_MARGIN, check_bed_fit};
+use gridfinity_cad::layout::{Axis, GridFootprint, Piece};
+use gridfinity_cad::printers::{BED_MARGIN, PrinterProfile, check_bed_fit};
 use gridfinity_cad::project::rects::{Rect, inflate_parts, parts_bounds, union_area};
 use std::time::Duration;
 
@@ -332,22 +332,32 @@ fn placements(run: &Run) {
 /// The dividers the placements imply, and the boundary runs that did not become
 /// one.
 fn dividers(run: &Run) {
-    let total: f64 = run.result.walls.iter().map(|w| w.length()).sum();
-    heading("Dividers");
+    let pocket_area: f64 = run.pockets.iter().map(|k| k.width * k.depth).sum();
+    let interior = run.area.width * run.area.depth;
+    heading("Compartments");
     field(
-        "generated",
+        "hollowed",
         &format!(
-            "{} walls, {} mm of centreline at {} mm thick",
-            run.wall_report.generated,
-            mm(total),
-            mm(run.spec.divider_thickness)
+            "{} pocket(s) over {} placement(s), {} of the {} packing area",
+            run.pockets.len(),
+            run.result.placements.len(),
+            mm2(pocket_area),
+            mm2(interior)
         ),
     );
     field(
-        "dropped",
+        "solid",
         &format!(
-            "{} on the cavity boundary (the perimeter wall), {} below the minimum length",
-            run.wall_report.on_boundary, run.wall_report.too_short
+            "{} of it, {}, is material: between the compartments and wherever nothing was packed",
+            mm2((interior - pocket_area).max(0.0)),
+            percent(interior - pocket_area, interior)
+        ),
+    );
+    field(
+        "walls",
+        &format!(
+            "none -- the cavity is stated, so the {} divider(s) the packer derived stand as material",
+            run.wall_report.generated
         ),
     );
 }
@@ -437,24 +447,46 @@ fn printing(run: &Run) {
             if run.pieces.len() == 1 { "" } else { "s" }
         ),
     );
-    for (piece, part) in run.pieces.iter().zip(&run.parts) {
-        let fit = check_bed_fit(&part.cells, printer);
-        let footprint = GridFootprint::from_cells(&part.cells)
-            .map_or((0, 0), |f| (f.width_cells, f.depth_cells));
-        row(&format!(
-            "  {:<38}{} x {} cells  {} x {} mm  {}",
-            piece.name,
-            footprint.0,
-            footprint.1,
-            fit.bin_width,
-            fit.bin_depth,
-            match (fit.fits, fit.rotated) {
-                (true, true) => "fits, turned on the bed",
-                (true, false) => "fits",
-                (false, _) => "DOES NOT FIT",
-            }
-        ));
+    field(
+        "baseplate",
+        &if run.baseplate.is_empty() {
+            "none -- settings.baseplate is off, so the bin's pegs have no grid to sit in"
+                .to_string()
+        } else {
+            format!(
+                "{} piece{} on the same cut lines as the bin",
+                run.baseplate.len(),
+                if run.baseplate.len() == 1 { "" } else { "s" }
+            )
+        },
+    );
+    for pieces in [&run.pieces, &run.baseplate] {
+        for (piece, part) in pieces.iter().zip(&run.parts) {
+            piece_row(&piece.name, part, printer);
+        }
     }
+}
+
+/// One row of the Printing table: what a piece is called, the cells it covers,
+/// and whether that footprint fits the bed. Bin pieces and baseplate pieces are
+/// cut on the same lines, so both read their cells off the same `Piece`.
+fn piece_row(name: &str, part: &Piece, printer: PrinterProfile) {
+    let fit = check_bed_fit(&part.cells, printer);
+    let footprint =
+        GridFootprint::from_cells(&part.cells).map_or((0, 0), |f| (f.width_cells, f.depth_cells));
+    row(&format!(
+        "  {:<38}{} x {} cells  {} x {} mm  {}",
+        name,
+        footprint.0,
+        footprint.1,
+        fit.bin_width,
+        fit.bin_depth,
+        match (fit.fits, fit.rotated) {
+            (true, true) => "fits, turned on the bed",
+            (true, false) => "fits",
+            (false, _) => "DOES NOT FIT",
+        }
+    ));
 }
 
 /// Every file written, with its size and what it holds, and how long each stage

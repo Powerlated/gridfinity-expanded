@@ -42,6 +42,23 @@ pub struct BinSlope {
     pub dir: SlopeDir,
 }
 
+/// One compartment stated outright, as the axis-aligned rectangle its cavity is
+/// to be, in the bin's own millimetres from the origin of its cell grid.
+///
+/// A pocket is the *interior* -- the void, not a claim and not a divider
+/// centreline -- so the material between two pockets is whatever they leave
+/// between them and needs no wall to be named. Corners are rounded by the bin's
+/// own `cavity_corner_radius` and the floor blended by its `floor_fillet`, the
+/// same as a walked compartment's.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Pocket {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub depth: f64,
+}
+
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase", default))]
@@ -49,6 +66,12 @@ pub struct LogicalBin {
     pub cells: Vec<GridCell>,
     pub split_lines: Vec<SplitLine>,
     pub slope: Option<BinSlope>,
+    /// The compartments to hollow out, when the caller states them rather than
+    /// letting the cell walk derive them. **Empty means the walk**, which is
+    /// every hand-drawn bin; non-empty means the bin is solid everywhere these
+    /// rectangles are not, which is what a fitted drawer wants -- the space no
+    /// object was packed into is material, not an unreachable pocket of air.
+    pub pockets: Vec<Pocket>,
 }
 
 impl LogicalBin {
@@ -173,6 +196,19 @@ impl Params {
                         "slope: Some(BinSlope {{ angle_deg: {:?}, dir: SlopeDir::{:?} }})",
                         s.angle_deg, s.dir
                     ));
+                }
+                if !bin.pockets.is_empty() {
+                    let ps: Vec<String> = bin
+                        .pockets
+                        .iter()
+                        .map(|k| {
+                            format!(
+                                "Pocket {{ x: {:?}, y: {:?}, width: {:?}, depth: {:?} }}",
+                                k.x, k.y, k.width, k.depth
+                            )
+                        })
+                        .collect();
+                    binf.push(format!("pockets: vec![{}]", ps.join(", ")));
                 }
                 format!("LogicalBin {{ {}, ..Default::default() }}", binf.join(", "))
             })

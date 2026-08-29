@@ -46,6 +46,7 @@ struct SettingsSpec {
     screws: Option<bool>,
     printer: Option<String>,
     bed: Option<BedSpec>,
+    baseplate: Option<bool>,
 }
 
 /// One box of an object, in the object's own millimetre frame.
@@ -104,6 +105,10 @@ pub struct Spec {
     pub height_units: u32,
     pub magnets: bool,
     pub screws: bool,
+    /// Whether to build the baseplate the fitted bin drops into, alongside it.
+    /// On unless the file says otherwise: a bin carries a connector peg under
+    /// every cell and has nothing to sit in without one.
+    pub baseplate: bool,
     pub effort: PackEffort,
     pub printer: PrinterProfile,
     pub objects: Vec<Object>,
@@ -310,6 +315,7 @@ pub fn parse(text: &str) -> Result<Spec, String> {
         height_units,
         magnets: settings.magnets.unwrap_or(false),
         screws: settings.screws.unwrap_or(false),
+        baseplate: settings.baseplate.unwrap_or(true),
         effort,
         printer: resolve_printer(settings)?,
         objects,
@@ -328,6 +334,7 @@ mod tests {
         assert_eq!(spec.effort, PackEffort::Standard);
         assert_eq!(spec.height_units, 3);
         assert_eq!(spec.printer.name, DEFAULT_PRINTER.name);
+        assert!(spec.baseplate, "a drawer bin gets the grid it sits in unless asked not to");
         assert!(spec.objects.is_empty());
     }
 
@@ -344,6 +351,16 @@ mod tests {
             "a three-unit bin is 19.8 mm deep inside, not {}",
             spec.cavity_depth()
         );
+    }
+
+    #[test]
+    fn takes_the_baseplate_away_when_the_file_says_so() {
+        let spec = parse(&format!("{MINIMAL}
+[settings]
+baseplate = false
+"))
+            .expect("baseplate is a setting");
+        assert!(!spec.baseplate);
     }
 
     #[test]

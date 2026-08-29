@@ -86,7 +86,7 @@ fn vert_bounds(verts: &[f32]) -> (Vec3, Vec3) {
 }
 
 fn build_bin(p: &Params, bin: &LogicalBin) -> Result<Solid, String> {
-    catch(|| gridfinity::build_piece(p, &bin.cells, &bin.cells, bin.slope))
+    catch(|| gridfinity::build_piece(p, &bin.cells, &bin.cells, bin.slope, &bin.pockets))
 }
 
 fn placeholder(p: &Params, bin: &LogicalBin) -> Vec<f32> {

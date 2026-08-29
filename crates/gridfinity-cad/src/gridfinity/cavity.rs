@@ -16,6 +16,10 @@
 //! by which compartment produced them. `shape_cavity_loop` then rounds the
 //! rectilinear result, convex corners by the cavity radius and reentrant ones by
 //! the floor fillet, so the blend that follows stays tangent continuous.
+//!
+//! `pocket_cavity` is the other way in: a caller that already knows its
+//! compartments states them as rectangles and the walk is not run at all, which
+//! leaves the bin solid everywhere a pocket is not.
 
 use super::*;
 use crate::kernel::math::Vec2;
@@ -249,6 +253,63 @@ pub(super) fn walked_cavity(
         "a piece of {} cell(s) authored no cavity at all",
         cells.len()
     );
+    outers
+        .iter()
+        .map(|ol| ((*ol).clone(), contained_holes(&loops, ol)))
+        .collect()
+}
+
+/// The bin's compartments as the caller stated them: the rectangles unioned into
+/// rectilinear loops, each outer paired with the holes it holds.
+///
+/// This replaces `walked_cavity` rather than adding to it. The walk derives the
+/// cavity from the cells and the walls between them, so every square millimetre
+/// inside the perimeter is either compartment or divider; stating the pockets
+/// instead makes the bin **solid everywhere a pocket is not**, which is the
+/// whole difference and the reason a fitted drawer wants it -- the space no
+/// object was packed into is material rather than a pocket of air nothing can
+/// reach. Downstream nothing changes: these loops are rounded, blended, stacked
+/// and capped exactly as walked ones are.
+///
+/// **Overlapping pockets merge, on purpose.** One compartment is however many
+/// rectangles the caller needed to describe it, so an L-shaped object gets its
+/// L-shaped pocket by stating two overlapping boxes; the union is what
+/// `trace_rects` returns. Two compartments that must stay apart are the
+/// caller's to keep apart -- the packer does it by construction, its claims
+/// being disjoint and each pocket inset inside its own claim.
+pub(super) fn pocket_cavity(pockets: &[Pocket]) -> Vec<(TracedLoop, Vec<TracedLoop>)> {
+    let mut rects = Vec::with_capacity(pockets.len());
+    for (i, k) in pockets.iter().enumerate() {
+        assert!(
+            k.width > 0.0 && k.depth > 0.0,
+            "pocket {i} is {} x {} mm, which encloses no compartment",
+            k.width,
+            k.depth
+        );
+        rects.push(RectF::new(k.x, k.y, k.width, k.depth));
+    }
+    let loops = trace_rects(&rects, &[]);
+    let outers: Vec<&TracedLoop> = loops.iter().filter(|l| !l.is_hole()).collect();
+    assert!(
+        !outers.is_empty(),
+        "{} pocket(s) traced {} loop(s) and not one of them bounds a compartment",
+        pockets.len(),
+        loops.len()
+    );
+    assert!(
+        outers.len() <= pockets.len(),
+        "{} pocket(s) cannot bound {} compartments; a union has no more parts than operands",
+        pockets.len(),
+        outers.len()
+    );
+    for (i, k) in pockets.iter().enumerate() {
+        let centre = Vec2::new(k.x + k.width / 2.0, k.y + k.depth / 2.0);
+        assert!(
+            outers.iter().any(|ol| ol.contains(centre)),
+            "pocket {i} at {centre:?} lies in none of the {} compartment(s) its own union traced",
+            outers.len()
+        );
+    }
     outers
         .iter()
         .map(|ol| ((*ol).clone(), contained_holes(&loops, ol)))
