@@ -1,7 +1,5 @@
 pub mod kernel;
 
-#[cfg(feature = "badapple")]
-pub mod badapple;
 pub mod gridfinity;
 pub mod layout;
 pub mod printers;
@@ -2719,8 +2717,8 @@ mod audit_tests {
         let _ = tessellate(&solid, 6);
     }
 
-    /// Multi-cell polyomino bins at `arc_segs_per_quarter = 1`, the shape and
-    /// resolution the Bad Apple stress test drives. Coarse arcs put most planar
+    /// Multi-cell polyomino bins at `arc_segs_per_quarter = 1`, the coarsest
+    /// resolution the tessellator is asked for. Coarse arcs put most planar
     /// faces on the small-polygon fast path in `triangulate`, and reentrant
     /// corners exercise the holes-and-chords path, so this is where a
     /// tessellator regression would surface first.

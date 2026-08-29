@@ -15,7 +15,6 @@
 //! the fitting report to stdout, and a windows-subsystem process inherits no
 //! console, so the report would go nowhere in a release build.
 
-mod badapple;
 mod debugger;
 mod editor;
 mod export;
@@ -67,13 +66,6 @@ fn flagged(tess: &gridfinity_cad::Tessellation, bad: bool) -> Vec<f32> {
         bad,
     );
     out
-}
-
-/// A point the kernel measured in millimetres, as the camera's own `f32`
-/// vector. The kernel models in `f64` and the renderer draws in `f32`, so this
-/// is where a coordinate crosses.
-fn render_point(p: [f64; 3]) -> Vec3 {
-    Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32)
 }
 
 fn vert_bounds(verts: &[f32]) -> (Vec3, Vec3) {
@@ -261,20 +253,8 @@ struct App {
     tri_count: usize,
     status: String,
     errors: Vec<BinError>,
-    badapple: Option<BadApple>,
 }
 
-struct BadApple {
-    worker: badapple::Worker,
-    frame: usize,
-    inflight: usize,
-    last_requested: Option<usize>,
-    epoch: f64,
-    looping: bool,
-    tri_rate: f64,
-    tris: usize,
-    build_secs: f64,
-}
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, initial: Option<optimize::View>) -> App {
@@ -310,7 +290,6 @@ impl App {
             tri_count: 0,
             status: String::new(),
             errors: Vec::new(),
-            badapple: None,
         };
         app.regenerate(true);
         app
@@ -361,81 +340,8 @@ impl App {
         self.dirty = false;
     }
 
-    fn badapple_start(&mut self, time: f64) {
-        let (min, max) = badapple::bounds();
-        self.camera.frame(render_point(min), render_point(max));
-        self.camera.yaw = 1.05;
-        self.camera.pitch = 0.35;
-        self.badapple = Some(BadApple {
-            worker: badapple::Worker::spawn(),
-            frame: usize::MAX,
-            inflight: 0,
-            last_requested: None,
-            epoch: time,
-            looping: true,
-            tri_rate: 0.0,
-            tris: 0,
-            build_secs: 0.0,
-        });
-        self.errors.clear();
-        self.labels.clear();
-    }
 
-    fn badapple_tick(&mut self, time: f64) -> bool {
-        if self.badapple.is_none() {
-            return false;
-        }
-        let n = badapple::frame_count();
 
-        {
-            let ba = self.badapple.as_mut().unwrap();
-            let elapsed = (time - ba.epoch).max(0.0);
-            if (elapsed * badapple::FPS) as usize >= n {
-                if ba.looping {
-                    ba.epoch = time;
-                } else {
-                    self.badapple = None;
-                    self.dirty = true;
-                    return false;
-                }
-            }
-        }
-
-        if let Some((r, seen)) = self.badapple.as_ref().unwrap().worker.try_recv() {
-            let ba = self.badapple.as_mut().unwrap();
-            ba.inflight = ba.inflight.saturating_sub(seen);
-            ba.frame = r.frame;
-            ba.tris = r.tris;
-            ba.build_secs = r.build_secs;
-            let inst = if r.build_secs > 0.0 { r.tris as f64 / r.build_secs } else { 0.0 };
-            ba.tri_rate = if ba.tri_rate == 0.0 { inst } else { 0.85 * ba.tri_rate + 0.15 * inst };
-            self.tri_count = r.tris;
-            let mut rr = self.renderer.lock().unwrap();
-            rr.upload(&self.gpu.device, &self.gpu.queue, &r.verts);
-            rr.upload_lines(&self.gpu.device, &self.gpu.queue, &[]);
-        }
-
-        let ba = self.badapple.as_mut().unwrap();
-        let elapsed = (time - ba.epoch).max(0.0);
-        let target = ((elapsed * badapple::FPS) as usize).min(n - 1);
-        if ba.inflight < badapple::PIPELINE_DEPTH
-            && target != ba.frame
-            && ba.last_requested != Some(target)
-        {
-            ba.worker.request(target);
-            ba.last_requested = Some(target);
-            ba.inflight += 1;
-        }
-        true
-    }
-
-    /// The bin as a Rust literal, with what the fillets actually did to it.
-    ///
-    /// The config alone says what was asked for; the `BlendReport` says which
-    /// blends landed and, when one did not, the message the kernel refused it
-    /// with. That message is the part that names the defect -- a count of
-    /// dropped edges does not -- and it is otherwise only visible from inside
-    /// `fillet_best_effort`.
     fn config_report(&self) -> String {
         let mut out = self.params.rust_literal();
         out.push('\n');
@@ -556,11 +462,7 @@ impl eframe::App for App {
             false
         };
 
-        if self.badapple.is_some() {
-            let time = ui.input(|i| i.time);
-            self.badapple_tick(time);
-            ui.ctx().request_repaint();
-        } else if self.dirty || dbg_changed {
+        if self.dirty || dbg_changed {
             self.dirty = true;
             self.regenerate(false);
         }
@@ -579,40 +481,6 @@ impl App {
 
         ui.heading("Gridfinity");
         ui.add_space(4.0);
-
-        ui.horizontal(|ui| {
-            let playing = self.badapple.is_some();
-            let label = if playing { "■ Stop Bad Apple" } else { "▶ Bad Apple!!" };
-            if ui.button(label).clicked() {
-                if playing {
-                    self.badapple = None;
-                    self.dirty = true;
-                } else {
-                    let time = ui.input(|i| i.time);
-                    self.badapple_start(time);
-                }
-            }
-        });
-        if let Some(ba) = &self.badapple {
-            let n = badapple::frame_count();
-            let shown = if ba.frame == usize::MAX { 0 } else { ba.frame + 1 };
-            ui.label(format!("frame {shown}/{n}  ·  {} tris", ba.tris));
-            ui.label(
-                egui::RichText::new(format!("{:.2} M triangles/sec", ba.tri_rate / 1e6))
-                    .strong()
-                    .color(egui::Color32::from_rgb(120, 220, 140)),
-            );
-            ui.label(
-                egui::RichText::new(format!(
-                    "kernel build: {:.2} ms/frame",
-                    ba.build_secs * 1e3
-                ))
-                .small()
-                .weak(),
-            );
-            ui.separator();
-            return;
-        }
 
         let p = &mut self.params;
 

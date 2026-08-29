@@ -198,17 +198,3 @@ export interface ExportParasolidRequest {
 export type ExportParasolidResponse =
   | { ok: true; xt: string }
   | { ok: false; error: string };
-
-export interface BadAppleRequest {
-  frame: number;
-}
-
-export type BadAppleResponse =
-  | { ok: true; frame: number; vertices: Float32Array }
-  | { ok: false; frame: number };
-
-export interface BadAppleClip {
-  frameCount: number;
-  fps: number;
-  bounds: { min: [number, number, number]; max: [number, number, number] };
-}

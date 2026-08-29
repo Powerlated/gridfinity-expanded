@@ -1390,7 +1390,6 @@ dependencies = [
  "gridfinity-cad",
  "gridfinity-render",
  "mimalloc",
- "rayon",
  "rfd",
  "serde",
  "toml",
@@ -1401,7 +1400,6 @@ dependencies = [
 name = "gridfinity-cad"
 version = "0.1.0"
 dependencies = [
- "flate2",
  "glam",
  "mimalloc",
  "proc-macro2",

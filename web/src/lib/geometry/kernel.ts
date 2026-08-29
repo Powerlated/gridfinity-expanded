@@ -21,15 +21,11 @@
 import init, {
   PackSearch as WasmPackSearch,
   Viewer,
-  badapple_bounds,
-  badapple_fps,
-  badapple_frame_count,
-  badapple_frame_vertices,
   create_viewer,
   export_parasolid,
   generate_geometry,
 } from '../../wasm/gridfinity_wasm.js';
-import type { BadAppleClip, Bin, BinParameters, PackInput, PackResult } from '../types';
+import type { Bin, BinParameters, PackInput, PackResult } from '../types';
 
 export type { Viewer };
 
@@ -111,33 +107,6 @@ export function createPackSearch(_kernel: GeometryKernel, input: PackInput): Pac
     result: () => search.result() as PackResult,
     free: () => search.free(),
   };
-}
-
-export function badAppleClip(_kernel: GeometryKernel): BadAppleClip {
-  const b = badapple_bounds();
-  return {
-    frameCount: badapple_frame_count(),
-    fps: badapple_fps(),
-    bounds: {
-      min: [b[0], b[1], b[2]],
-      max: [b[3], b[4], b[5]],
-    },
-  };
-}
-
-/**
- * Builds one clip frame as a render-ready flat-shaded vertex buffer.
- *
- * The colour is baked in here, inside the worker, so the main thread never
- * expands a triangle soup: at 30 frames a second that expansion starved the
- * render loop and pointer handling, which showed up as camera lag.
- */
-export function badAppleFrameVertices(
-  _kernel: GeometryKernel,
-  frame: number,
-  rgb: number,
-): Float32Array {
-  return badapple_frame_vertices(frame, rgb);
 }
 
 /**

@@ -4,13 +4,10 @@ import wasmUrl from '../../wasm/gridfinity_wasm_bg.wasm?url';
 import { createViewer, initKernel } from '../../lib/geometry/kernel';
 import type { Viewer } from '../../lib/geometry/kernel';
 import { previewLayout } from '../../lib/preview';
-import type { PreviewPiece } from '../../lib/preview';
 import type { Bin } from '../../lib/types';
-import type { BadAppleFeed } from '../../hooks/useBadApple';
 import { binColor } from '../sidebar/binColors';
 import { RENDER_QUALITY_INDEX, renderQualityFromIndex, useAppStore } from '../../store';
 
-const NO_PARTS: PreviewPiece[] = [];
 const CLEAR_COLOR = 0x1c1c21;
 const DEFAULT_CAMERA_YAW = 0.9;
 const FACE_ORIENTATION = 'counter-clockwise';
@@ -24,27 +21,17 @@ function hexToRgb(hex: string): number {
 interface Props {
   bins: Bin[];
   error: string | null;
-  badApple?: BadAppleFeed | null;
 }
 
-export function ModelViewer({
-  bins,
-  error,
-  badApple = null,
-}: Props) {
-  const designParts = useMemo(() => previewLayout(bins), [bins]);
-  const active = badApple?.active ?? false;
-  const parts = active ? NO_PARTS : designParts;
+export function ModelViewer({ bins, error }: Props) {
+  const parts = useMemo(() => previewLayout(bins), [bins]);
   const renderQuality = useAppStore((state) => state.renderQuality);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewerRef = useRef<Viewer | null>(null);
-  const feedRef = useRef<BadAppleFeed | null>(null);
-  const badAppleFramedRef = useRef(false);
   const qualityRef = useRef(RENDER_QUALITY_INDEX[renderQuality]);
   const publishedQualityRef = useRef<string | null>(null);
   qualityRef.current = RENDER_QUALITY_INDEX[renderQuality];
-  feedRef.current = active ? badApple : null;
   const [viewer, setViewer] = useState<Viewer | null>(null);
   const [kernelError, setKernelError] = useState<string | null>(null);
   const [exploded, setExploded] = useState(false);
@@ -100,25 +87,6 @@ export function ModelViewer({
             created.set_explode(explodeRef.current);
             if (containerRef.current) {
               containerRef.current.dataset.explode = explodeRef.current.toFixed(2);
-            }
-          }
-          const next = feedRef.current?.pending.current ?? null;
-          if (next) {
-            feedRef.current!.pending.current = null;
-            created.upload_vertices(next.vertices);
-            if (!badAppleFramedRef.current) {
-              badAppleFramedRef.current = true;
-              const clipBounds = feedRef.current?.clip?.bounds;
-              if (clipBounds) {
-                created.frame_bounds(
-                  Float32Array.from(clipBounds.min),
-                  Float32Array.from(clipBounds.max),
-                );
-              }
-              created.look_down();
-            }
-            if (containerRef.current) {
-              containerRef.current.dataset.badappleFrame = String(next.frame);
             }
           }
           const level = renderQualityFromIndex(created.quality());
@@ -192,7 +160,7 @@ export function ModelViewer({
   }, [viewer]);
 
   useEffect(() => {
-    if (!viewer || active) return;
+    if (!viewer) return;
     viewer.begin_scene();
     for (const part of parts) {
       viewer.add_piece(
@@ -204,9 +172,7 @@ export function ModelViewer({
       );
     }
     viewer.commit_scene(true);
-    badAppleFramedRef.current = false;
-    delete containerRef.current?.dataset.badappleFrame;
-  }, [active, parts, viewer]);
+  }, [parts, viewer]);
 
   return (
     <div

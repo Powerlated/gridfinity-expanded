@@ -7,7 +7,6 @@ import { ProjectPanel } from './components/project/ProjectPanel';
 import { ObjectPanel } from './components/project/ObjectPanel';
 import { ProjectWorkspace } from './components/project/ProjectWorkspace';
 import { ExportMenu } from './components/ExportMenu';
-import { useBadApple } from './hooks/useBadApple';
 import { useBinGeometry } from './hooks/useBinGeometry';
 import { useAppStore, type AppMode } from './store';
 
@@ -26,7 +25,6 @@ export default function App() {
   const appMode = useAppStore((s) => s.appMode);
   const setAppMode = useAppStore((s) => s.setAppMode);
   const { bins, generating, error } = useBinGeometry(design);
-  const badApple = useBadApple();
   const project = appMode === 'project';
 
   return (
@@ -69,11 +67,7 @@ export default function App() {
             </div>
           </div>
         )}>
-          <ModelViewer
-            bins={bins}
-            error={error}
-            badApple={badApple}
-          />
+          <ModelViewer bins={bins} error={error} />
         </Suspense>
         <div className={project ? undefined : 'project-pane--hidden'}>
           <ProjectWorkspace />

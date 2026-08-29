@@ -11,7 +11,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-gridfinity-cad = { path = "../gridfinity-cad", features = ["serde", "badapple"] }
+gridfinity-cad = { path = "../gridfinity-cad", features = ["serde"] }
 gridfinity-render = { path = "../gridfinity-render" }
 glam = "0.29"
 wgpu = { workspace = true }
