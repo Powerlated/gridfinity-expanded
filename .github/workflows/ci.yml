@@ -24,28 +24,34 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: web/package-lock.json
 
       - name: Install dependencies
         run: npm ci
+        working-directory: web
 
       - name: Set up Rust
         run: rustup target add wasm32-unknown-unknown
 
       - name: Build the geometry kernel
         run: npm run build:wasm
+        working-directory: web
 
       - name: Classify changed paths
         id: changes
-        run: node scripts/classify-changes.mjs "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}" >> "$GITHUB_OUTPUT"
+        run: node web/scripts/classify-changes.mjs "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Lint
         run: npm run lint
+        working-directory: web
 
       - name: Run unit tests
         run: npm run test
+        working-directory: web
 
       - name: Build
         run: npm run build
+        working-directory: web
 
       - name: Validate geometry
         if: steps.changes.outputs.geometry == 'true'
@@ -54,7 +60,9 @@ jobs:
       - name: Install Chromium
         if: steps.changes.outputs.playwright == 'true'
         run: npx playwright install --with-deps chromium
+        working-directory: web
 
       - name: Run browser smoke tests
         if: steps.changes.outputs.playwright == 'true'
         run: npm run test:e2e
+        working-directory: web

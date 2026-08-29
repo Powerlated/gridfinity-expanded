@@ -16,7 +16,7 @@
  * every spatial value into generation coordinates.
  *
  * The `.wasm` is a build artifact, not source: `npm run build:wasm` compiles it
- * from the Rust workspace into `src/wasm/`, which is gitignored.
+ * from the Rust workspace into `web/src/wasm/`, which is gitignored.
  */
 import init, {
   PackSearch as WasmPackSearch,

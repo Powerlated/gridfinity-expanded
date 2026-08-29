@@ -28,24 +28,28 @@ jobs:
         with:
           node-version: 20
           cache: npm
+          cache-dependency-path: web/package-lock.json
 
       - name: Install dependencies
         run: npm ci
+        working-directory: web
 
       - name: Set up Rust
         run: rustup target add wasm32-unknown-unknown
 
       - name: Build the geometry kernel
         run: npm run build:wasm
+        working-directory: web
 
       - name: Build
         run: npm run build
+        working-directory: web
 
       - uses: actions/configure-pages@v4
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: web/dist
 
       # Work around actions/upload-pages-artifact#97: a timeout during upload
       # finalization triggers a retry that leaves TWO artifacts named

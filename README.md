@@ -6,12 +6,16 @@ The editor supports multiple explicitly selected bins, perimeter openings, full-
 
 ## Development
 
+The npm app lives in `web/` and the cargo workspace at the repository root, so `npm` commands run
+from `web/` and `cargo` commands from the root.
+
 ```sh
+cd web
 npm install
 npm run dev
 ```
 
-Required validation commands are documented in [`AGENTS.md`](./AGENTS.md).
+Required validation commands are documented in [`CLAUDE.md`](./CLAUDE.md).
 
 ## Fitting a drawer from the command line
 
@@ -34,4 +38,4 @@ cargo run -- optimize examples/drawer.toml --format parasolid_x_t drawer.x_t --v
 
 ## Geometry documentation
 
-[`AGENTS.md`](./AGENTS.md) is the canonical specification and architecture record. It documents the trusted-input contract, shape/wall/cut ownership, solid construction, direct preview, STL export, and printability gates. Normative Gridfinity dimensions and their sources live in `src/lib/gridfinitySpec.ts`.
+[`CLAUDE.md`](./CLAUDE.md) is the canonical specification and architecture record. It documents the trusted-input contract, shape/wall/cut ownership, solid construction, direct preview, STL export, and printability gates. Normative Gridfinity dimensions and their sources live in `web/src/lib/gridfinitySpec.ts`.
