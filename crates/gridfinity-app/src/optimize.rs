@@ -163,11 +163,18 @@ impl Run {
 /// One placed object's box, in the bin's own millimetre coordinates: what the
 /// packer reserved for it, standing on the cavity floor.
 ///
-/// `fits` is whether the object's stated height clears the cavity, which is the
+/// `name` is the object's own, carried so the window can label the box with it:
+/// a box is the one thing in the scene the viewer cannot identify by looking,
+/// every one of them being a white rectangle. `instance` is which placement it
+/// belongs to, so the several boxes of an L-shaped object are known to be one
+/// object and named once rather than once per part. `fits` is whether the object's
+/// stated height clears the cavity, which is the
 /// same question the report's warnings answer in words -- a box that does not
 /// fit still stands its full height, poking out of the bin it was packed into,
 /// because hiding that is hiding the warning.
 pub struct ObjectBox {
+    pub name: String,
+    pub instance: usize,
     pub min: Vec3,
     pub max: Vec3,
     pub fits: bool,
@@ -211,7 +218,7 @@ fn object_boxes(run: &Run) -> Vec<ObjectBox> {
     let floor = gridfinity::BASE_TOTAL_HEIGHT + gridfinity::FLOOR_THICKNESS;
     let margin = run.claim_margin;
     let mut out = Vec::new();
-    for placement in &run.result.placements {
+    for (instance, placement) in run.result.placements.iter().enumerate() {
         let object = run
             .spec
             .objects
@@ -235,6 +242,8 @@ fn object_boxes(run: &Run) -> Vec<ObjectBox> {
         );
         for part in &parts {
             out.push(ObjectBox {
+                name: object.pack.name.clone(),
+                instance,
                 min: Vec3::new(part.x, part.y, floor),
                 max: Vec3::new(part.right(), part.bottom(), floor + height),
                 fits: height <= depth,

@@ -148,6 +148,28 @@ impl Explosion {
         Vec3::new(band_offset(col, self.x.len()), band_offset(row, self.y.len()), 0.0)
     }
 
+    /// The millimetres the band containing the point `(x, y)` is displaced by.
+    ///
+    /// This is `shift` addressed by position rather than by piece, which is what
+    /// a label on a *whole* item needs: the item is named once, at a point of
+    /// its own, and has to travel with the piece that point stands on rather
+    /// than being drawn where nothing is any more. The outermost bands are open
+    /// outwards, so every point of the plane lands in exactly one band along
+    /// each axis.
+    pub fn shift_at(&self, x: f64, y: f64) -> Vec3 {
+        let band_of = |bands: &[Band], v: f64| {
+            bands
+                .iter()
+                .position(|b| v >= b.lo && v < b.hi)
+                .unwrap_or_else(|| panic!("{v} mm lies in no band, but the outer bands are open"))
+        };
+        Vec3::new(
+            band_offset(band_of(&self.x, x) as i32, self.x.len()),
+            band_offset(band_of(&self.y, y) as i32, self.y.len()),
+            0.0,
+        )
+    }
+
     /// The part of the axis-aligned box `min`..`max` that lies in band
     /// `(col, row)`, or `None` when the two do not overlap in both axes. The z
     /// range is the box's own: a cut is a vertical plane, so it takes nothing

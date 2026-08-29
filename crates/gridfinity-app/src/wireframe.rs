@@ -15,9 +15,15 @@ use gridfinity_cad::kernel::topo::{Builder, Solid};
 pub const SKETCH_BLACK: [f32; 3] = [0.05, 0.05, 0.06];
 pub const EDGE_ORANGE: [f32; 3] = [1.0, 0.45, 0.05];
 
+/// One piece of text drawn over the scene at a point in it: what the thing
+/// under it is called.
+///
+/// The text is owned rather than borrowed because a label names a *thing* --
+/// a piece the export writes, an object the packer placed -- as often as it
+/// names a kind of curve, and only the kinds are known at compile time.
 pub struct Label {
     pub at: Vec3,
-    pub text: &'static str,
+    pub text: String,
     pub color: [f32; 3],
 }
 
@@ -58,7 +64,7 @@ impl Wireframe {
             self.push_polyline(&pts, color);
             self.labels.push(Label {
                 at: midpoint(&pts),
-                text: curve_kind(&e.curve),
+                text: curve_kind(&e.curve).to_string(),
                 color,
             });
         }
@@ -76,7 +82,7 @@ impl Wireframe {
             self.push_polyline(&pts, color);
             self.labels.push(Label {
                 at: midpoint(&pts),
-                text: seg_kind(&profile[k]),
+                text: seg_kind(&profile[k]).to_string(),
                 color,
             });
         }

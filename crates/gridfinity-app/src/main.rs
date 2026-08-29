@@ -35,7 +35,8 @@ use debugger::Debugger;
 use explode::Explosion;
 use editor::{BIN_COLORS, Editor, Tool};
 use gridfinity_cad::gridfinity::{self, BinSlope, LogicalBin, Mode, Params, SlopeDir};
-use gridfinity_cad::layout::{GridFootprint, SplitLine};
+use gridfinity_cad::kernel::math::Vec3 as KernelVec3;
+use gridfinity_cad::layout::{GridCell, GridFootprint, SplitLine};
 use gridfinity_cad::printers::{DEFAULT_PRINTER, PRINTER_PROFILES, PrinterProfile, check_bed_fit, compute_auto_split_lines};
 use gridfinity_cad::kernel::build::extrude;
 use glam::Vec3;
@@ -56,6 +57,14 @@ pub const DEBUG_BASE_COLOR: u32 = 0x4c8cd9;
 /// The colour of a packed object's box: white, so an object reads as a thing
 /// placed in the bin rather than as part of it.
 pub const OBJECT_WHITE: u32 = 0xffffff;
+
+/// The colour a label is drawn in: near black, which reads over the bin's blue,
+/// the plate's grey and an object's white alike.
+pub const LABEL_INK: [f32; 3] = [0.05, 0.05, 0.06];
+
+/// The colour of a label on an object that does not clear the cavity it was
+/// packed into -- the same thing the box's own red rim says, in words.
+pub const LABEL_BAD: [f32; 3] = [0.75, 0.1, 0.05];
 
 /// The colour of the baseplate under a fitted bin: a neutral grey, so the two
 /// bodies read apart where they interleave and a plate piece lapping a bin seam
@@ -200,6 +209,133 @@ fn object_box_vertices(boxes: &[optimize::ObjectBox], bin: &LogicalBin, pitch: f
             let mut verts = shaded(&tessellate(&solid, PREVIEW_RES), OBJECT_WHITE, !b.fits);
             displace(&mut verts, explosion.shift(part.col, part.row));
             out.extend(verts);
+        }
+    }
+    out
+}
+
+/// The centre of a set of cells in millimetres, on the x-y plane: where the
+/// label naming the body those cells make up is drawn.
+///
+/// The centre of the *cells* and not of the built solid, because the two differ
+/// by an inset a label does not care about and cells are what every caller here
+/// already has.
+fn cells_centre(cells: &[GridCell], pitch: f64) -> (f64, f64) {
+    let (mut lo_x, mut hi_x, mut lo_y, mut hi_y) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+    for c in cells {
+        lo_x = lo_x.min(c.x);
+        hi_x = hi_x.max(c.x);
+        lo_y = lo_y.min(c.y);
+        hi_y = hi_y.max(c.y);
+    }
+    assert!(
+        lo_x <= hi_x && lo_y <= hi_y,
+        "a body to label has at least one cell, but its cells span {lo_x}..{hi_x} x {lo_y}..{hi_y}"
+    );
+    (
+        (lo_x + hi_x + 1) as f64 * pitch / 2.0,
+        (lo_y + hi_y + 1) as f64 * pitch / 2.0,
+    )
+}
+
+/// One body named once: `text` at the centre of `cells`, on top of the body at
+/// height `top`, moved with the band that centre stands in.
+///
+/// **A label names an item, not a piece of one.** Cutting a bin for the bed does
+/// not make it two bins, so a split body carries the one name its unsplit self
+/// carries; the label rides the band its centre falls in so it stands on the
+/// body rather than in the gap a cut opened.
+fn body_label(
+    explosion: &Explosion,
+    cells: &[GridCell],
+    pitch: f64,
+    top: f64,
+    text: String,
+    color: [f32; 3],
+) -> wireframe::Label {
+    let (x, y) = cells_centre(cells, pitch);
+    let shift = explosion.shift_at(x, y);
+    wireframe::Label {
+        at: KernelVec3::new(x + f64::from(shift.x), y + f64::from(shift.y), top),
+        text,
+        color,
+    }
+}
+
+/// Every item in the scene named where it stands: each bin, the baseplate under
+/// it, and each object the packer placed.
+///
+/// **One label per item, never per piece.** A bin cut into six for the bed is
+/// still one bin and is named once; an object crossing a cut is still one
+/// object, named once over the whole of it, and an object made of several boxes
+/// is named once over all of them. Each label rides the band its own point falls
+/// in, so it stands on the item rather than in a gap the explosion opened.
+///
+/// An object is named in red where it does not clear the cavity -- the same
+/// thing the box's red rim says, in words. Object labels come first because
+/// `paint_labels` keeps the first label in each cell of its grid: where an
+/// object's name and the body it sits in would collide, the object wins, being
+/// the thing the viewer cannot identify by looking.
+fn scene_labels(
+    params: &Params,
+    boxes: &[optimize::ObjectBox],
+    plate: Option<&Params>,
+) -> Vec<wireframe::Label> {
+    let pitch = params.pitch;
+    let bins: Vec<&LogicalBin> = params.bins.iter().filter(|b| !b.cells.is_empty()).collect();
+    let mut out = Vec::new();
+    if let Some(bin) = bins.first() {
+        let explosion = Explosion::of(bin, pitch);
+        let mut instances: Vec<(usize, &optimize::ObjectBox, KernelVec3, KernelVec3)> = Vec::new();
+        for b in boxes {
+            match instances.iter_mut().find(|(i, ..)| *i == b.instance) {
+                Some((_, _, min, max)) => {
+                    *min = min.min(b.min);
+                    *max = max.max(b.max);
+                }
+                None => instances.push((b.instance, b, b.min, b.max)),
+            }
+        }
+        for (_, b, min, max) in &instances {
+            let (x, y) = ((min.x + max.x) / 2.0, (min.y + max.y) / 2.0);
+            let shift = explosion.shift_at(x, y);
+            out.push(wireframe::Label {
+                at: KernelVec3::new(x + f64::from(shift.x), y + f64::from(shift.y), max.z),
+                text: b.name.clone(),
+                color: if b.fits { LABEL_INK } else { LABEL_BAD },
+            });
+        }
+    }
+    for (i, bin) in bins.iter().enumerate() {
+        let text = if bins.len() == 1 { "bin".to_string() } else { format!("bin {}", i + 1) };
+        out.push(body_label(
+            &Explosion::of(bin, pitch),
+            &bin.cells,
+            pitch,
+            params.total_height(),
+            text,
+            LABEL_INK,
+        ));
+    }
+    if let Some(plate) = plate {
+        let cells = plate.all_cells();
+        if !cells.is_empty() {
+            let mut splits: Vec<SplitLine> = Vec::new();
+            for bin in &plate.bins {
+                for line in &bin.split_lines {
+                    if !splits.contains(line) {
+                        splits.push(*line);
+                    }
+                }
+            }
+            out.push(body_label(
+                &Explosion::new(&cells, &splits, plate.pitch),
+                &cells,
+                plate.pitch,
+                gridfinity::PEG_HEIGHT,
+                "baseplate".to_string(),
+                LABEL_INK,
+            ));
         }
     }
     out
@@ -468,6 +604,12 @@ impl App {
             self.camera.frame(min, max);
         }
         self.labels = wf.labels;
+        if dbg_solid.is_none() {
+            let boxes: &[optimize::ObjectBox] =
+                if self.show_object_boxes { &self.object_boxes } else { &[] };
+            let plate = if self.show_plate { self.plate.as_ref() } else { None };
+            self.labels.extend(scene_labels(&self.params, boxes, plate));
+        }
 
         let mut r = self.renderer.lock().unwrap();
         r.upload(&self.gpu.device, &self.gpu.queue, &verts);
@@ -943,7 +1085,7 @@ impl App {
                 (g * 255.0) as u8,
                 (b * 255.0) as u8,
             );
-            painter.text(p, egui::Align2::CENTER_CENTER, label.text, font.clone(), color);
+            painter.text(p, egui::Align2::CENTER_CENTER, label.text.clone(), font.clone(), color);
         }
     }
 }
@@ -1052,6 +1194,129 @@ mod tests {
         );
     }
 
+    fn boxed(
+        name: &str,
+        instance: usize,
+        min: KernelVec3,
+        max: KernelVec3,
+        fits: bool,
+    ) -> optimize::ObjectBox {
+        optimize::ObjectBox { name: name.to_string(), instance, min, max, fits }
+    }
+
+    /// Everything `--view` puts on screen says what it is: both bodies, and
+    /// every object packed into them. A white box and a grey plate are
+    /// otherwise unidentifiable, and the point of the view is matching what is
+    /// on screen to what the report names.
+    #[test]
+    fn every_item_in_the_view_is_labelled() {
+        let cells = [GridCell { x: 0, y: 0 }, GridCell { x: 1, y: 0 }];
+        let params = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }]);
+        let plate = Params { mode: Mode::Baseplate, ..split_bin(&cells, &[]) };
+        let boxes = [
+            boxed("socket set", 0, KernelVec3::new(2.0, 2.0, 0.0), KernelVec3::new(30.0, 30.0, 5.0), true),
+            boxed("tape measure", 1, KernelVec3::new(50.0, 2.0, 0.0), KernelVec3::new(80.0, 30.0, 400.0), false),
+        ];
+        let labels = scene_labels(&params, &boxes, Some(&plate));
+        let text: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            text,
+            vec!["socket set", "tape measure", "bin", "baseplate"],
+            "one label per item, objects first so they win the collision grid"
+        );
+
+        let too_tall = labels
+            .iter()
+            .find(|l| l.text == "tape measure")
+            .expect("the object that does not fit is labelled too");
+        assert_eq!(
+            too_tall.color, LABEL_BAD,
+            "an object that does not clear the cavity says so in its label as well as its rim"
+        );
+        assert!(
+            labels.iter().filter(|l| l.text == "socket set").all(|l| l.color == LABEL_INK),
+            "an object that fits is labelled plainly"
+        );
+        assert!(
+            (too_tall.at.z - 400.0).abs() < 1e-9,
+            "a box's label sits on top of it, not inside it: {}",
+            too_tall.at.z
+        );
+        let bin = labels.iter().find(|l| l.text == "bin").expect("the bin is labelled");
+        assert!(
+            (bin.at.z - params.total_height()).abs() < 1e-9,
+            "the bin is labelled on its rim, not at {}",
+            bin.at.z
+        );
+        let plate_label = labels.iter().find(|l| l.text == "baseplate").expect("so is the plate");
+        assert!(
+            (plate_label.at.z - gridfinity::PEG_HEIGHT).abs() < 1e-9,
+            "the plate is labelled at its own height, under the bin's"
+        );
+    }
+
+    /// A cut is not a new item. A bin split into six for the bed is one bin and
+    /// is named once, and an object crossing a cut -- or made of several boxes
+    /// -- is named once over the whole of it.
+    #[test]
+    fn a_split_item_is_labelled_once_not_once_per_piece() {
+        let cells: Vec<GridCell> = (0..4)
+            .flat_map(|x| (0..2).map(move |y| GridCell { x, y }))
+            .collect();
+        let splits = [
+            SplitLine { axis: Axis::X, index: 1 },
+            SplitLine { axis: Axis::X, index: 3 },
+            SplitLine { axis: Axis::Y, index: 1 },
+        ];
+        let params = split_bin(&cells, &splits);
+        let pitch = gridfinity::GRID_PITCH;
+        assert_eq!(
+            Explosion::of(&params.bins[0], pitch).pieces().len(),
+            6,
+            "the fixture is a bin in six pieces"
+        );
+        let l_shaped = [
+            boxed("bracket", 0, KernelVec3::new(10.0, 10.0, 0.0), KernelVec3::new(140.0, 30.0, 5.0), true),
+            boxed("bracket", 0, KernelVec3::new(10.0, 30.0, 0.0), KernelVec3::new(40.0, 60.0, 5.0), true),
+        ];
+        let labels = scene_labels(&params, &l_shaped, None);
+        let text: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            text,
+            vec!["bracket", "bin"],
+            "six pieces and a two-box object crossing three cuts are still two items"
+        );
+        assert!(
+            (labels[0].at.x - 75.0).abs() < f64::from(SPLIT_APART_MM) + 1e-9,
+            "the object is named over the whole of it, near the centre of its own boxes, not {}",
+            labels[0].at.x
+        );
+    }
+
+    /// A whole item's label rides the band its own centre stands in, so it is
+    /// drawn on the item rather than in the gap a cut opened beside it.
+    #[test]
+    fn a_labels_position_follows_the_piece_its_centre_stands_on() {
+        let cells: Vec<GridCell> = (0..3).map(|x| GridCell { x, y: 0 }).collect();
+        let pitch = gridfinity::GRID_PITCH;
+        let centred = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }]);
+        let label = scene_labels(&centred, &[], None);
+        assert_eq!(label.len(), 1);
+        assert!(
+            (label[0].at.x - (1.5 * pitch + f64::from(SPLIT_APART_MM) / 2.0)).abs() < 1e-9,
+            "the bin's centre stands on the second band, so its name moves with it, not to {}",
+            label[0].at.x
+        );
+
+        let other = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 2 }]);
+        let label = scene_labels(&other, &[], None);
+        assert!(
+            (label[0].at.x - (1.5 * pitch - f64::from(SPLIT_APART_MM) / 2.0)).abs() < 1e-9,
+            "cut later and the same centre stands on the first band instead, not {}",
+            label[0].at.x
+        );
+    }
+
     /// The plate the bin drops into is cut and exploded exactly as the bin is,
     /// on its own lines. Without it a split baseplate previewed as one solid,
     /// which is the picture of an assembly that does not come apart.
@@ -1121,6 +1386,8 @@ mod tests {
         let bin = &split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }]).bins[0];
         let pitch = gridfinity::GRID_PITCH;
         let across = optimize::ObjectBox {
+            name: "across the cut".to_string(),
+            instance: 0,
             min: KernelVec3::new(0.25 * pitch, 0.25 * pitch, 0.0),
             max: KernelVec3::new(1.75 * pitch, 0.75 * pitch, 5.0),
             fits: true,
@@ -1145,6 +1412,8 @@ mod tests {
     fn an_object_that_does_not_fit_is_flagged_rather_than_hidden() {
         let bin = &split_bin(&[GridCell { x: 0, y: 0 }], &[]).bins[0];
         let tall = optimize::ObjectBox {
+            name: "too tall".to_string(),
+            instance: 0,
             min: KernelVec3::new(5.0, 5.0, 0.0),
             max: KernelVec3::new(30.0, 30.0, 400.0),
             fits: false,
