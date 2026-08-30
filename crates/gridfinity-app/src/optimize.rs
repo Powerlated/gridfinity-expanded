@@ -24,24 +24,24 @@
 //! fires before the writer has touched anything.
 
 use crate::export::{self, Format};
-use crate::input::{self, Object, Spec};
+use crate::grouping::{GroupPlan, Grouping, choose_groups, outer_pack, plan_group_bin};
+use crate::input::{self, Spec};
 use crate::report;
 use clap::{Parser, ValueEnum};
 use gridfinity_cad::gridfinity::{self, BinPiece, LogicalBin, Mode, Params, Pocket};
 use gridfinity_cad::kernel::math::Vec3;
 use gridfinity_cad::kernel::program::BlendReport;
 use gridfinity_cad::kernel::topo::Solid;
-use gridfinity_cad::layout::{GridCell, Piece, SplitLine, compartments, partition_cells};
+use gridfinity_cad::layout::{GridCell, Piece, SplitLine, partition_cells};
 use gridfinity_cad::printers::{compute_auto_split_lines, compute_staggered_split_lines};
 use gridfinity_cad::project::drawer::{
-    DrawerGrid, MAX_GRID, drawer_cells, drawer_grid, packing_area, packing_inset,
+    DrawerGrid, MAX_GRID, drawer_cells, drawer_grid, packing_area,
 };
 use gridfinity_cad::project::pack::{
     PackEffort, PackInput, PackObject, PackResult, Placement, pack_layout,
 };
 use gridfinity_cad::project::rects::{
-    Rect, Rotation, inflate_parts, parts_bounds, rects_overlap, rotate_parts, translate_parts,
-    union_area,
+    Rect, Rotation, inflate_parts, parts_bounds, rotate_parts, translate_parts,
 };
 use gridfinity_cad::project::tidy::tidiness;
 use gridfinity_cad::project::walls::{WallReport, layout_walls_reporting};
@@ -51,20 +51,49 @@ use std::time::{Duration, Instant};
 
 /// What to build out of the fitted drawer.
 ///
-/// The two answers produce entirely different sets of parts from one input
-/// file, which is why the command line requires one rather than defaulting: a
-/// user who has not said which they want has not said what they want built.
+/// The answers produce entirely different sets of parts from one input file,
+/// which is why the command line requires one rather than defaulting: a user
+/// who has not said which they want has not said what they want built. `Auto`
+/// is a statement in the same sense -- build the smallest bins the drawer can
+/// be fitted with -- not the absence of one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum FitMode {
+    /// One bin per object where the drawer holds them, and the whole drawer as
+    /// one bin only where it does not. A discrete bin is the smaller print and
+    /// the smaller thing to lose, so the large body is what a run falls back to
+    /// rather than what it reaches for.
+    #[value(name = "auto")]
+    Auto,
     /// One discrete Gridfinity bin per object, each holding that object's whole
     /// quantity as its own compartments, all of them packed into the drawer and
     /// dropping into the one baseplate.
     #[value(name = "bins")]
     Bins,
+    /// The same discrete bins, except that objects share one where sharing pays:
+    /// a bin is a whole number of cells, so several small objects in one bin can
+    /// stand on fewer cells than one bin each. `grouping.rs` decides where.
+    #[value(name = "hybrid")]
+    Hybrid,
     /// The whole drawer as one bin, hollowed to a compartment per packed object
     /// and solid everywhere else, so the material between two compartments is
     /// the divider.
     #[value(name = "walls")]
+    Walls,
+}
+
+/// What a finished run was built as.
+///
+/// `FitMode::Auto` resolves to one of these before any geometry exists, so
+/// nothing downstream of the plan carries an arm it can never take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Built {
+    /// One discrete bin per object, as `FitMode::Bins`.
+    Bins,
+    /// One discrete bin per group of objects, as `FitMode::Hybrid`. The same
+    /// shape of run as `Bins` -- discrete bins packed into the drawer -- with
+    /// more than one object allowed to share one.
+    Hybrid,
+    /// The whole drawer as one bin, as `FitMode::Walls`.
     Walls,
 }
 
@@ -77,7 +106,7 @@ pub enum FitMode {
 #[derive(Parser, Debug, PartialEq, Eq)]
 #[command(
     about = "Fit a drawer full of objects and write the geometry",
-    long_about = "Packs the objects a TOML describes into the drawer it describes and states every compartment as a pocket -- as one drawer-wide bin with --mode walls, or as one \nGridfinity bin per object with --mode bins. Splits every body and its baseplate for the printer's bed, writes the geometry, and prints what it did."
+    long_about = "Packs the objects a TOML describes into the drawer it describes and states every compartment as a pocket -- as one drawer-wide bin with --mode walls, as one \nGridfinity bin per object with --mode bins, or with --mode auto as the bins where the drawer holds them and the one drawer-wide bin only where it does \nnot. Splits every body and its baseplate for the printer's bed, writes the geometry, and prints what it did."
 )]
 pub struct Args {
     /// The drawer's dimensions and the objects to organise in it
@@ -85,7 +114,9 @@ pub struct Args {
 
     /// What to build: `walls` states the whole drawer as one bin hollowed to a
     /// compartment per object, `bins` builds one Gridfinity bin per object,
-    /// each holding its own instances
+    /// each holding its own instances, and `auto` builds those bins where the
+    /// drawer holds them and falls back to the one drawer-wide bin where it
+    /// does not
     #[arg(long, value_name = "MODE")]
     pub mode: FitMode,
 
@@ -156,7 +187,11 @@ impl Args {
 /// so everything reading it reads one thing.
 pub struct Run {
     pub spec: Spec,
-    pub mode: FitMode,
+    pub built: Built,
+    /// Why an `Auto` run built one drawer-wide bin: the refusal the
+    /// bin-per-object plan came back with. `None` for a run that was told which
+    /// mode to build, and for an `Auto` run that got its bins.
+    pub fell_back: Option<String>,
     pub grid: DrawerGrid,
     pub area: Rect,
     pub cells: Vec<GridCell>,
@@ -168,6 +203,9 @@ pub struct Run {
     /// One entry per object that was given a bin of its own, in `params.bins`
     /// order. Empty in `walls` mode, where the drawer is the one bin.
     pub bins: Vec<FittedBin>,
+    /// How the objects were grouped into bins, for a run that grouped them.
+    /// `None` in every mode but `hybrid`, which is the only one that chooses.
+    pub grouping: Option<Grouping>,
     pub params: Params,
     pub plate_params: Option<Params>,
     pub split_lines: Vec<SplitLine>,
@@ -208,19 +246,31 @@ impl Run {
     }
 }
 
-/// One object's bin as it stands in the drawer: which object it holds, the cells
-/// it covers, how many compartments were hollowed into it, and where it is cut
-/// for the bed.
+/// One bin as it stands in the drawer: which objects it holds, the cells it
+/// covers, how many compartments were hollowed into it, and where it is cut for
+/// the bed.
 ///
 /// The cells are the polyomino the object's packed claims actually reach, not
 /// the rectangle around them, so an L-shaped object's bin is an L. They are in
 /// the drawer's own grid coordinates, so they are exactly the cells of the
 /// `LogicalBin` this describes.
 pub struct FittedBin {
-    pub object_id: String,
+    /// The objects sharing this bin, sorted. One in `bins` mode, where a bin is
+    /// an object; one or more in `hybrid`, where a bin is a group of them.
+    pub objects: Vec<String>,
     pub cells: Vec<GridCell>,
     pub instances: usize,
     pub split_lines: Vec<SplitLine>,
+}
+
+impl FittedBin {
+    /// What to call this bin: the objects sharing it, joined. A bin *is* what is
+    /// in it, so a bin of one is named by that object and a shared one by all of
+    /// them -- "bin 3" names nothing the reader of a report or a view wants.
+    pub fn name(&self) -> String {
+        assert!(!self.objects.is_empty(), "a fitted bin holds at least one object");
+        self.objects.join(" + ")
+    }
 }
 
 /// One placed object's box, in the bin's own millimetre coordinates: what the
@@ -295,7 +345,7 @@ fn object_boxes(run: &Run) -> Vec<ObjectBox> {
         }
         run.bins
             .iter()
-            .position(|b| b.object_id == object_id)
+            .position(|b| b.objects.iter().any(|id| id == object_id))
             .unwrap_or_else(|| panic!("{object_id} was packed into a bin the fit does not carry"))
     };
     let mut out = Vec::new();
@@ -549,6 +599,7 @@ fn baseplate_params(
 /// what became of the dividers the packer derives.
 struct Plan {
     result: PackResult,
+    grouping: Option<Grouping>,
     pockets: Vec<Pocket>,
     params: Params,
     wall_report: WallReport,
@@ -563,7 +614,7 @@ struct Plan {
 /// One function, so the margin a claim is grown by, the margin a pocket is inset
 /// by and the margin the report deflates a claim by are one number rather than
 /// three derivations of it.
-fn claim_input(
+pub(crate) fn claim_input(
     spec: &Spec,
     area: Rect,
     floor_fillet: f64,
@@ -581,7 +632,7 @@ fn claim_input(
 }
 
 /// The square one cell covers, in the millimetres of the grid it belongs to.
-fn cell_rect(cell: GridCell, pitch: f64) -> Rect {
+pub(crate) fn cell_rect(cell: GridCell, pitch: f64) -> Rect {
     Rect::new(f64::from(cell.x) * pitch, f64::from(cell.y) * pitch, pitch, pitch)
 }
 
@@ -650,152 +701,12 @@ fn plan_walls(spec: &Spec, cells: &[GridCell], area: Rect, floor_fillet: f64) ->
     let params = drawer_params(spec, cells, &pockets, &split_lines);
     Plan {
         result,
+        grouping: None,
         pockets,
         params,
         wall_report,
         bins: Vec::new(),
     }
-}
-
-/// One object's bin before it is placed in the drawer: the cells it covers and
-/// the claims of its instances, both in the bin's own millimetres with the
-/// bin's own grid starting at the origin.
-struct BinPlan {
-    object_id: String,
-    cells: Vec<GridCell>,
-    placements: Vec<Placement>,
-    iterations: usize,
-}
-
-/// The cell rectangles a bin may be, smallest first and squarest among equals,
-/// bounded by the drawer's own grid: the order a bin's size is searched in, so
-/// the first size that holds the object's instances is the smallest one that
-/// does.
-fn candidate_sizes(cols: u32, rows: u32) -> Vec<(u32, u32)> {
-    let mut out: Vec<(u32, u32)> = Vec::new();
-    for n in 1..=cols {
-        for m in 1..=rows {
-            out.push((n, m));
-        }
-    }
-    out.sort_by_key(|&(n, m)| (n * m, i64::from(n).abs_diff(i64::from(m)), n));
-    out
-}
-
-/// The cells of a `cols` x `rows` bin that its packed claims actually reach:
-/// every cell whose square meets a claim grown by `inset`, or the whole
-/// rectangle when what is left of it is not edge-connected.
-///
-/// Growing each claim by the perimeter inset is what makes dropping the rest
-/// safe. A dropped cell's edge becomes the bin's own outline, and the perimeter
-/// wall plus its clearance stands inside that edge, so a cell is dropped only
-/// where no compartment comes within a wall of it -- which leaves every claim
-/// inside the kept cells and every pocket inside their cavity. The connectivity
-/// fallback is the model's own precondition: the alpha generator assumes an
-/// edge-connected bin, so a trim that would sever one is not taken.
-fn footprint_cells(
-    placements: &[Placement],
-    cols: u32,
-    rows: u32,
-    pitch: f64,
-    inset: f64,
-) -> Vec<GridCell> {
-    let reach: Vec<Rect> = placements
-        .iter()
-        .flat_map(|p| inflate_parts(&p.parts, inset))
-        .collect();
-    let whole: Vec<GridCell> = (0..rows as i32)
-        .flat_map(|y| (0..cols as i32).map(move |x| GridCell { x, y }))
-        .collect();
-    let kept: Vec<GridCell> = whole
-        .iter()
-        .copied()
-        .filter(|c| {
-            let square = cell_rect(*c, pitch);
-            reach.iter().any(|r| rects_overlap(&square, r))
-        })
-        .collect();
-    assert!(
-        !kept.is_empty(),
-        "a bin holding {} claim(s) is reached by none of them",
-        placements.len()
-    );
-    if compartments(&kept, &Default::default()).len() == 1 {
-        return kept;
-    }
-    whole
-}
-
-/// The smallest bin that holds every instance of one object, and where those
-/// instances sit inside it.
-///
-/// The size search runs at `PackEffort::Quick` and the chosen size is then
-/// packed at the run's own effort, which cannot place fewer: `PackSearch::new`
-/// runs the same greedy pass at every tier and `step` only ever keeps an
-/// improvement. That is asserted rather than assumed. An object no size within
-/// the drawer holds is an error naming it, because a bin missing compartments
-/// is not the bin that was asked for.
-fn plan_one_bin(
-    spec: &Spec,
-    object: &Object,
-    grid: DrawerGrid,
-    floor_fillet: f64,
-) -> Result<BinPlan, String> {
-    let wanted = object.pack.quantity as usize;
-    let request = |cols: u32, rows: u32, effort: PackEffort| {
-        let size = DrawerGrid {
-            cols,
-            rows,
-            margin_x: 0.0,
-            margin_y: 0.0,
-        };
-        let area = packing_area(size, spec.wall_thickness, spec.pitch);
-        claim_input(spec, area, floor_fillet, vec![object.pack.clone()], effort)
-    };
-    let claim = union_area(&inflate_parts(
-        &object.pack.parts,
-        request(1, 1, PackEffort::Quick).margin(),
-    ));
-    let needed = claim * wanted as f64;
-
-    let mut chosen: Option<(u32, u32)> = None;
-    for (cols, rows) in candidate_sizes(grid.cols, grid.rows) {
-        let input = request(cols, rows, PackEffort::Quick);
-        if input.area.width <= 0.0 || input.area.depth <= 0.0 || input.area.area() < needed {
-            continue;
-        }
-        if pack_layout(input).placements.len() == wanted {
-            chosen = Some((cols, rows));
-            break;
-        }
-    }
-    let Some((cols, rows)) = chosen else {
-        return Err(format!(
-            "{} x{} does not fit any bin the {} x {} cell drawer holds: one of them claims \
-             {claim:.1} mm2 including its clearance, floor fillet and half divider",
-            object.pack.name, object.pack.quantity, grid.cols, grid.rows
-        ));
-    };
-    let result = pack_layout(request(cols, rows, spec.effort));
-    assert_eq!(
-        result.placements.len(),
-        wanted,
-        "a {cols} x {rows} cell bin held every instance of {} at the quick effort, so the run's \
-         own effort cannot place fewer",
-        object.pack.name
-    );
-    Ok(BinPlan {
-        object_id: object.pack.id.clone(),
-        cells: footprint_cells(
-            &result.placements,
-            cols,
-            rows,
-            spec.pitch,
-            packing_inset(spec.wall_thickness),
-        ),
-        placements: result.placements,
-        iterations: result.iterations,
-    })
 }
 
 /// `extra` moved by the same normalise, quarter turn and translation the packer
@@ -842,31 +753,34 @@ fn compose(inner: Rotation, outer: Rotation) -> Rotation {
         .unwrap_or_else(|e| panic!("{inner:?} after {outer:?} is not a quarter turn: {e}"))
 }
 
-/// One discrete Gridfinity bin per object, each sized to hold that object's
-/// whole quantity as its own compartments, packed into the drawer.
+/// The drawer laid out from bins already planned: the bins packed into it, every
+/// instance composed through both levels into the drawer's own millimetres, and
+/// the cavity stated as one pocket per claim.
 ///
-/// Two levels of packing. Each object is packed into the smallest bin that holds
-/// it (`plan_one_bin`), and then the bins themselves are packed into the drawer
-/// -- a plain `pack_layout` whose area is the grid's own rectangle and whose
-/// shapes are the bins' cells as pitch-sized squares, with every margin zero
-/// because a Gridfinity bin already stands `HALF_TOL` inside its cells. Every
-/// part offset, every extent and the area's origin are multiples of the pitch,
-/// so every position the scan can reach is one too; `cells_of_rects` asserts it
-/// rather than trusting it.
+/// The outer pack is a plain `pack_layout` whose area is the grid's own
+/// rectangle and whose shapes are the bins' cells as pitch-sized squares, with
+/// every margin zero because a Gridfinity bin already stands `HALF_TOL` inside
+/// its cells. Every part offset, every extent and the area's origin are
+/// multiples of the pitch, so every position the scan can reach is one too;
+/// `cells_of_rects` asserts it rather than trusting it.
 ///
-/// The instances are then composed through both levels into the drawer's own
-/// millimetres, so `Plan::result` means in `bins` exactly what it means in
-/// `walls`, and the pockets are derived from the composed claims by the same
-/// `drawer_pockets` -- a pocket is a claim inset by half a divider whichever
-/// frame the claim was solved in.
-fn plan_bins(spec: &Spec, grid: DrawerGrid, floor_fillet: f64) -> Result<Plan, String> {
-    let mut plans: Vec<BinPlan> = Vec::new();
-    let mut iterations = 0;
-    for object in &spec.objects {
-        let plan = plan_one_bin(spec, object, grid, floor_fillet)?;
-        iterations += plan.iterations;
-        plans.push(plan);
-    }
+/// This is the whole of what `bins` and `hybrid` share, and all they differ in is
+/// which groups they hand it: one object each, or whatever `choose_groups`
+/// settled on. `Plan::result` therefore means in both exactly what it means in
+/// `walls` -- the placement of every instance in drawer millimetres -- and the
+/// pockets come from the composed claims by the same `drawer_pockets`, a pocket
+/// being a claim inset by half a divider whichever frame the claim was solved in.
+fn lay_out_bins(spec: &Spec, grid: DrawerGrid, plans: &[GroupPlan]) -> Result<Plan, String> {
+    let mut seen: Vec<&str> = plans.iter().flat_map(|p| p.objects.iter().map(String::as_str)).collect();
+    let before = seen.len();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(
+        (seen.len(), before),
+        (spec.objects.len(), spec.objects.len()),
+        "the bins to lay out must hold each of the run's {} object(s) exactly once",
+        spec.objects.len()
+    );
 
     let drawer = Rect::new(
         0.0,
@@ -874,36 +788,20 @@ fn plan_bins(spec: &Spec, grid: DrawerGrid, floor_fillet: f64) -> Result<Plan, S
         f64::from(grid.cols) * spec.pitch,
         f64::from(grid.rows) * spec.pitch,
     );
-    let outer = pack_layout(PackInput {
-        area: drawer,
-        objects: plans
-            .iter()
-            .map(|plan| PackObject {
-                id: plan.object_id.clone(),
-                name: plan.object_id.clone(),
-                parts: plan.cells.iter().map(|c| cell_rect(*c, spec.pitch)).collect(),
-                quantity: 1,
-            })
-            .collect(),
-        divider_thickness: 0.0,
-        clearance: 0.0,
-        floor_fillet: 0.0,
-        effort: spec.effort,
-    });
-    iterations += outer.iterations;
+    let outer = outer_pack(spec, grid, plans, spec.effort);
+    let iterations = outer.iterations + plans.iter().map(|p| p.iterations).sum::<usize>();
 
     let mut logical: Vec<LogicalBin> = Vec::new();
     let mut fitted: Vec<FittedBin> = Vec::new();
     let mut pockets: Vec<Pocket> = Vec::new();
     let mut placements: Vec<Placement> = Vec::new();
     let mut placed_by_object_id: BTreeMap<String, u32> = BTreeMap::new();
-    for plan in &plans {
-        let Some(placement) = outer.placements.iter().find(|p| p.object_id == plan.object_id)
-        else {
+    for plan in plans {
+        let id = plan.objects.join("+");
+        let Some(placement) = outer.placements.iter().find(|p| p.object_id == id) else {
             return Err(format!(
-                "the drawer has no room for {}'s own bin, which is {} cell(s); the bins already \
-                 placed leave it nowhere to stand",
-                plan.object_id,
+                "the drawer has no room for {}'s own bin, which is {} cell(s); the bins already                  placed leave it nowhere to stand",
+                plan.objects.join(" + "),
                 plan.cells.len()
             ));
         };
@@ -940,12 +838,15 @@ fn plan_bins(spec: &Spec, grid: DrawerGrid, floor_fillet: f64) -> Result<Plan, S
             pockets: mine_pockets.clone(),
         });
         fitted.push(FittedBin {
-            object_id: plan.object_id.clone(),
+            objects: plan.objects.clone(),
             cells,
             instances: mine.len(),
             split_lines,
         });
-        placed_by_object_id.insert(plan.object_id.clone(), mine.len() as u32);
+        for id in &plan.objects {
+            let held = mine.iter().filter(|p| &p.object_id == id).count() as u32;
+            placed_by_object_id.insert(id.clone(), held);
+        }
         pockets.extend(mine_pockets);
         placements.extend(mine);
     }
@@ -962,7 +863,37 @@ fn plan_bins(spec: &Spec, grid: DrawerGrid, floor_fillet: f64) -> Result<Plan, S
         params: bins_params(spec, logical),
         wall_report: WallReport::default(),
         bins: fitted,
+        grouping: None,
     })
+}
+
+/// One discrete Gridfinity bin per object, each sized to hold that object's whole
+/// quantity as its own compartments, packed into the drawer.
+///
+/// Two levels of packing: each object into the smallest bin that holds it
+/// (`plan_group_bin` over a group of one), and then the bins into the drawer
+/// (`lay_out_bins`).
+fn plan_bins(spec: &Spec, grid: DrawerGrid, floor_fillet: f64) -> Result<Plan, String> {
+    let mut plans: Vec<GroupPlan> = Vec::new();
+    for object in &spec.objects {
+        plans.push(plan_group_bin(spec, &[object], grid, floor_fillet, spec.effort)?);
+    }
+    lay_out_bins(spec, grid, &plans)
+}
+
+/// One Gridfinity bin per *group* of objects, the groups chosen by
+/// `choose_groups`, packed into the drawer.
+///
+/// The only difference from `plan_bins` is which objects share a bin, and the
+/// search that decides it can only return a grouping `better` than one bin per
+/// object -- it starts there and asserts it before returning. So a hybrid fit
+/// stands on the same two levels of packing, uses no more cells, and may fit a
+/// drawer a bin per object cannot be laid out in.
+fn plan_hybrid(spec: &Spec, grid: DrawerGrid, floor_fillet: f64) -> Result<Plan, String> {
+    let groups = choose_groups(spec, grid, floor_fillet)?;
+    let mut plan = lay_out_bins(spec, grid, &groups.plans)?;
+    plan.grouping = Some(groups.grouping);
+    Ok(plan)
 }
 
 /// `Ok` when every instance of every object was placed, and an error naming
@@ -1003,6 +934,31 @@ fn refuse_unplaced(spec: &Spec, result: &PackResult) -> Result<(), String> {
     ))
 }
 
+/// One mode's plan for this drawer, checked against the quantities it was asked
+/// for, or the reason that mode cannot fit the drawer.
+///
+/// The check belongs to the plan rather than to the pipeline after it, because
+/// `Auto` chooses between the two modes on exactly this question: a plan that
+/// leaves an instance unplaced has not fitted the drawer, whether it said so
+/// itself or only left the shortfall to be counted. So a caller holding a plan
+/// holds one that places every instance of every object.
+fn plan_and_check(
+    spec: &Spec,
+    built: Built,
+    grid: DrawerGrid,
+    cells: &[GridCell],
+    area: Rect,
+    floor_fillet: f64,
+) -> Result<Plan, String> {
+    let plan = match built {
+        Built::Walls => plan_walls(spec, cells, area, floor_fillet),
+        Built::Bins => plan_bins(spec, grid, floor_fillet)?,
+        Built::Hybrid => plan_hybrid(spec, grid, floor_fillet)?,
+    };
+    refuse_unplaced(spec, &plan.result)?;
+    Ok(plan)
+}
+
 /// The whole pipeline for one validated run: pack, state the cavities, split,
 /// build.
 ///
@@ -1012,6 +968,15 @@ fn refuse_unplaced(spec: &Spec, result: &PackResult) -> Result<(), String> {
 /// staggered off whatever seams the bins came to, and every piece is built and
 /// audited the same way. A run that cannot place everything it was given fails
 /// here, before any of that work is done.
+///
+/// `FitMode::Auto` is resolved here and nowhere else: the discrete bins are
+/// tried first -- grouped where grouping pays, which is `Hybrid` and can only
+/// beat one bin per object -- and the drawer-wide bin is built only where that
+/// plan is refused, because a discrete bin is the smaller print and the smaller
+/// thing to lose. The refusal it fell back from is carried on the `Run`, so a reader
+/// of the report is told which of the two was built and why. A drawer neither
+/// plan can hold fails with the *walls* refusal, which is the message naming
+/// the shortfall against the whole drawer rather than against one bin.
 fn fit(spec: Spec, mode: FitMode) -> Result<Run, String> {
     let grid = drawer_grid(spec.drawer_width, spec.drawer_depth, MAX_GRID, spec.pitch);
     if grid.cols == 0 || grid.rows == 0 {
@@ -1026,15 +991,21 @@ fn fit(spec: Spec, mode: FitMode) -> Result<Run, String> {
     let claim_margin = claim_input(&spec, area, floor_fillet, Vec::new(), spec.effort).margin();
 
     let started = Instant::now();
-    let plan = match mode {
-        FitMode::Walls => plan_walls(&spec, &cells, area, floor_fillet),
-        FitMode::Bins => plan_bins(&spec, grid, floor_fillet)?,
+    let plan_for = |built| plan_and_check(&spec, built, grid, &cells, area, floor_fillet);
+    let (built, fell_back, plan) = match mode {
+        FitMode::Walls => (Built::Walls, None, plan_for(Built::Walls)?),
+        FitMode::Bins => (Built::Bins, None, plan_for(Built::Bins)?),
+        FitMode::Hybrid => (Built::Hybrid, None, plan_for(Built::Hybrid)?),
+        FitMode::Auto => match plan_for(Built::Hybrid) {
+            Ok(plan) => (Built::Hybrid, None, plan),
+            Err(why) => (Built::Walls, Some(why), plan_for(Built::Walls)?),
+        },
     };
     let pack_time = started.elapsed();
-    refuse_unplaced(&spec, &plan.result)?;
 
     let Plan {
         result,
+        grouping,
         pockets,
         params,
         wall_report,
@@ -1092,7 +1063,8 @@ fn fit(spec: Spec, mode: FitMode) -> Result<Run, String> {
 
     let mut run = Run {
         spec,
-        mode,
+        built,
+        fell_back,
         grid,
         area,
         cells,
@@ -1102,6 +1074,7 @@ fn fit(spec: Spec, mode: FitMode) -> Result<Run, String> {
         wall_report,
         pockets,
         bins,
+        grouping,
         params,
         plate_params,
         split_lines,
@@ -1149,7 +1122,7 @@ pub fn run(args: &Args) -> Result<Option<View>, String> {
     report::print(&run, &written);
     Ok(args.view.then(|| View {
         boxes: object_boxes(&run),
-        bin_names: run.bins.iter().map(|b| b.object_id.clone()).collect(),
+        bin_names: run.bins.iter().map(FittedBin::name).collect(),
         params: run.params,
         plate: run.plate_params,
     }))
@@ -1159,7 +1132,7 @@ pub fn run(args: &Args) -> Result<Option<View>, String> {
 mod tests {
     use super::*;
     use gridfinity_cad::kernel::geom::Surface;
-    use gridfinity_cad::layout::{Axis, GridFootprint};
+    use gridfinity_cad::layout::{Axis, GridFootprint, compartments};
     use gridfinity_cad::kernel::math::Vec2;
     use gridfinity_cad::kernel::sketch::point_in_polygon;
 
@@ -1180,9 +1153,10 @@ mod tests {
         Args::try_parse_from(all).map_err(|e| e.to_string())
     }
 
-    /// The two modes build entirely different sets of parts out of one file, so
-    /// an invocation that has not said which it wants has not said what it wants
-    /// built.
+    /// The modes build entirely different sets of parts out of one file, so an
+    /// invocation that has not said which it wants has not said what it wants
+    /// built -- `auto` included, which asks for the smallest bins that fit and
+    /// is therefore an answer rather than the absence of one.
     #[test]
     fn refuses_an_invocation_that_does_not_state_a_mode() {
         let err = Args::try_parse_from(["optimize", "in.toml", "-o", "out.x_t"])
@@ -1206,8 +1180,20 @@ mod tests {
                 .mode,
             FitMode::Walls
         );
+        assert_eq!(
+            args(&["in.toml", "--mode", "auto", "--view"])
+                .expect("auto is a mode")
+                .mode,
+            FitMode::Auto
+        );
+        assert_eq!(
+            args(&["in.toml", "--mode", "hybrid", "--view"])
+                .expect("hybrid is a mode")
+                .mode,
+            FitMode::Hybrid
+        );
         let err = args(&["in.toml", "--mode", "pockets", "--view"])
-            .expect_err("there are two modes");
+            .expect_err("there are four modes");
         assert!(err.contains("pockets"), "{err}");
     }
 
@@ -1948,8 +1934,8 @@ boxes = [
         let run = fit(spec, FitMode::Bins).expect("two objects in a four-cell drawer build");
 
         assert_eq!(
-            run.bins.iter().map(|b| b.object_id.as_str()).collect::<Vec<&str>>(),
-            vec!["block", "rod"],
+            run.bins.iter().map(FittedBin::name).collect::<Vec<String>>(),
+            vec!["block".to_string(), "rod".to_string()],
             "one bin per object, in the order the file states them"
         );
         assert_eq!(run.params.bins.len(), run.bins.len());
@@ -2071,6 +2057,188 @@ boxes = [
         }
     }
 
+    /// A drawer whose objects each fit a bin of their own is built as those
+    /// bins: `auto` reaches for the discrete bins first -- grouped where
+    /// grouping pays, which for these two it does not -- and the drawer-wide
+    /// body is what it falls back to rather than what it prefers.
+    #[test]
+    fn auto_gives_every_object_its_own_bin_when_the_drawer_holds_them() {
+        let spec = input::parse(TWO).expect("the fixture is a valid run");
+        let run = fit(spec, FitMode::Auto).expect("two objects in a four-cell drawer build");
+
+        assert_eq!(run.built, Built::Hybrid);
+        assert!(
+            run.fell_back.is_none(),
+            "nothing was refused, so there is nothing to report having fallen back from: {:?}",
+            run.fell_back
+        );
+        assert_eq!(
+            run.bins.iter().map(FittedBin::name).collect::<Vec<String>>(),
+            vec!["block".to_string(), "rod".to_string()],
+            "the same bins --mode bins gives: neither fits in the other's cells"
+        );
+        assert_eq!(run.result.placements.len(), 3);
+    }
+
+    /// Four small objects in a four-cell drawer, each claiming 19.16 mm square:
+    /// four of those claims stand in one cell's 39.1 mm packing area, so one bin
+    /// per object costs four cells for what one bin holds.
+    const SMALL_FOUR: &str = "[drawer]
+width = 84
+depth = 84
+
+[settings]
+effort = \"quick\"
+
+[[objects]]
+name = \"washers\"
+size = [12, 12]
+
+[[objects]]
+name = \"nuts\"
+size = [12, 12]
+
+[[objects]]
+name = \"grub screws\"
+size = [12, 12]
+
+[[objects]]
+name = \"o-rings\"
+size = [12, 12]
+";
+
+    /// The hybrid fit end to end: the objects that share a cell share a bin, and
+    /// the bin the model builds really is hollowed to a compartment each.
+    #[test]
+    fn hybrid_puts_small_objects_that_share_a_cell_in_one_bin() {
+        let spec = input::parse(SMALL_FOUR).expect("the fixture is a valid run");
+        let apart = fit(spec, FitMode::Bins).expect("four small objects fit four bins");
+        assert_eq!(apart.bins.len(), 4, "one bin per object is four bins");
+
+        let spec = input::parse(SMALL_FOUR).expect("the fixture is a valid run");
+        let run = fit(spec, FitMode::Hybrid).expect("and one bin between them");
+
+        assert_eq!(run.built, Built::Hybrid);
+        assert_eq!(run.bins.len(), 1, "all four objects share a bin");
+        assert_eq!(run.bins[0].cells.len(), 1, "which stands on a single cell");
+        assert_eq!(run.bins[0].instances, 4);
+        assert_eq!(
+            run.bins[0].name(),
+            "grub screws + nuts + o-rings + washers",
+            "a bin is named by everything in it"
+        );
+        assert_eq!(run.result.placements.len(), 4, "every instance is placed");
+        assert_eq!(
+            run.pockets.len(),
+            4,
+            "each object is one box, so the shared bin is hollowed four times"
+        );
+        assert!(
+            run.grouping.is_some(),
+            "a hybrid fit reports how it grouped; nothing else does"
+        );
+        assert!(
+            run.bins.iter().map(|b| b.cells.len()).sum::<usize>()
+                < apart.bins.iter().map(|b| b.cells.len()).sum::<usize>(),
+            "grouping is worth doing here, or the fixture is not the case it claims to be"
+        );
+        for (piece, sound) in run.all_pieces().iter().zip(&run.soundness) {
+            assert_eq!(sound.shells, 1, "{} is one shell", piece.name);
+        }
+    }
+
+    /// And the other half: where sharing recovers no cell the objects keep their
+    /// own bins, so `hybrid` is a decision and not a habit.
+    #[test]
+    fn hybrid_leaves_objects_apart_where_sharing_recovers_nothing() {
+        let spec = input::parse(TWO).expect("the fixture is a valid run");
+        let apart = fit(spec, FitMode::Bins).expect("two objects, two bins");
+        let spec = input::parse(TWO).expect("the fixture is a valid run");
+        let run = fit(spec, FitMode::Hybrid).expect("two objects, still two bins");
+
+        assert_eq!(
+            run.bins.iter().map(FittedBin::name).collect::<Vec<String>>(),
+            apart.bins.iter().map(FittedBin::name).collect::<Vec<String>>()
+        );
+        assert_eq!(
+            run.bins.iter().map(|b| b.cells.len()).sum::<usize>(),
+            apart.bins.iter().map(|b| b.cells.len()).sum::<usize>(),
+            "and it costs the drawer nothing to have asked"
+        );
+    }
+
+    /// Four objects across three cells: a discrete bin is a whole number of
+    /// cells, so each of these rounds up to a cell of its own and the four want
+    /// one more than the drawer has, while all four claims stand side by side
+    /// in the one drawer-wide packing area.
+    ///
+    /// 22 x 30 mm objects in a 126 x 42 mm drawer: a claim is the object plus
+    /// `2 * (clearance + floor_fillet + divider / 2)` = 7.16 mm at these
+    /// settings, so 29.16 x 37.16 mm fits the 39.1 mm square packing area of a
+    /// single cell, and four of them span 116.64 mm of the drawer's own 123.1.
+    const ROUNDS_UP: &str = "[drawer]
+width = 126
+depth = 42
+
+[settings]
+effort = \"quick\"
+
+[[objects]]
+name = \"awl\"
+size = [22, 30]
+
+[[objects]]
+name = \"bradawl\"
+size = [22, 30]
+
+[[objects]]
+name = \"chisel\"
+size = [22, 30]
+
+[[objects]]
+name = \"drift\"
+size = [22, 30]
+";
+
+    /// The whole point of `auto`: the one large body is built only where the
+    /// small ones cannot be, and the run says which it built and why.
+    ///
+    /// Both halves of that are asserted directly on the same fixture rather than
+    /// inferred from the automatic run, because the test is worth nothing unless
+    /// `bins` really is refused here and `walls` really is not.
+    #[test]
+    fn auto_builds_one_drawer_wide_bin_only_when_the_bins_do_not_fit() {
+        let spec = input::parse(ROUNDS_UP).expect("the fixture is a valid run");
+        let refusal = fit(spec, FitMode::Hybrid)
+            .err()
+            .expect("four one-cell bins do not stand in three cells, grouped or not");
+        let spec = input::parse(ROUNDS_UP).expect("the fixture is a valid run");
+        assert!(
+            fit(spec, FitMode::Bins).is_err(),
+            "nor do they as a bin each -- no two of these claims share a cell, so grouping              has nothing to recover here"
+        );
+
+        let spec = input::parse(ROUNDS_UP).expect("the fixture is a valid run");
+        let walls = fit(spec, FitMode::Walls).expect("four claims stand side by side in one bin");
+        assert_eq!(walls.result.placements.len(), 4);
+
+        let spec = input::parse(ROUNDS_UP).expect("the fixture is a valid run");
+        let run = fit(spec, FitMode::Auto).expect("the drawer is fitted as one bin");
+        assert_eq!(run.built, Built::Walls);
+        assert_eq!(
+            run.fell_back.as_deref(),
+            Some(refusal.as_str()),
+            "the run reports the refusal it fell back from, not a message of its own"
+        );
+        assert_eq!(
+            run.result.placements.len(),
+            4,
+            "every object is placed, or the fallback fitted nothing"
+        );
+        assert_eq!(run.params.bins.len(), 1, "the fallback is the one drawer-wide bin");
+        assert!(run.bins.is_empty(), "which is not a bin per object");
+    }
+
     /// A run that cannot hold what it was given has not fitted the drawer, so it
     /// fails outright rather than building geometry missing compartments.
     #[test]
@@ -2097,6 +2265,21 @@ size = [200, 30]
             panic!("nor does it fit a bin the drawer holds");
         };
         assert!(err.contains("crowbar"), "{err}");
+
+        let spec = input::parse(text).expect("the fixture is a valid run");
+        let Err(err) = fit(spec, FitMode::Hybrid) else {
+            panic!("nor does grouping help an object that fits no bin at all");
+        };
+        assert!(err.contains("crowbar"), "{err}");
+
+        let spec = input::parse(text).expect("the fixture is a valid run");
+        let Err(err) = fit(spec, FitMode::Auto) else {
+            panic!("neither plan holds a 200 mm object, so there is nothing to fall back to");
+        };
+        assert!(
+            err.contains("crowbar") && err.contains("0 of 1 placed"),
+            "an automatic run refuses with the drawer's own shortfall, not one bin's: {err}"
+        );
     }
 
     #[test]

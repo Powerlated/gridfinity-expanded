@@ -19,10 +19,15 @@ mod debugger;
 mod editor;
 mod explode;
 mod export;
+mod grouping;
 mod input;
 mod optimize;
 mod report;
+mod settings;
+mod sidebar;
+mod theme;
 mod viewport;
+mod widgets;
 mod wireframe;
 
 use clap::{Parser, Subcommand};
@@ -33,11 +38,11 @@ static ALLOC: gridfinity_cad::kernel::perf::CountingAlloc<mimalloc::MiMalloc> =
     gridfinity_cad::kernel::perf::CountingAlloc::new(mimalloc::MiMalloc);
 use debugger::Debugger;
 use explode::Explosion;
-use editor::{BIN_COLORS, Editor, Tool};
-use gridfinity_cad::gridfinity::{self, BinSlope, LogicalBin, Mode, Params, SlopeDir};
+use editor::Editor;
+use gridfinity_cad::gridfinity::{self, LogicalBin, Mode, Params};
 use gridfinity_cad::kernel::math::Vec3 as KernelVec3;
-use gridfinity_cad::layout::{GridCell, GridFootprint, SplitLine};
-use gridfinity_cad::printers::{DEFAULT_PRINTER, PRINTER_PROFILES, PrinterProfile, check_bed_fit, compute_auto_split_lines};
+use gridfinity_cad::layout::{GridCell, SplitLine};
+use gridfinity_cad::printers::{DEFAULT_PRINTER, PrinterProfile};
 use gridfinity_cad::kernel::build::extrude;
 use glam::Vec3;
 use gridfinity_cad::kernel::sketch::Sketch;
@@ -113,6 +118,16 @@ fn displace(verts: &mut [f32], shift: Vec3) {
     }
 }
 
+/// The explosion as asked for: itself when the gaps are shown, collapsed when
+/// they are not.
+///
+/// One function so the bin, the baseplate and the object boxes cannot disagree
+/// about whether the scene is open -- a body standing apart from boxes that
+/// stayed put is a picture of nothing.
+fn explode(explosion: Explosion, gaps: bool) -> Explosion {
+    if gaps { explosion } else { explosion.collapsed() }
+}
+
 /// One bin's preview vertices, given the whole solid the kernel built for it:
 /// that solid tessellated when the bin is not split, and otherwise its carved
 /// pieces, each displaced by its band's `Explosion::shift` so every cut the
@@ -122,8 +137,13 @@ fn displace(verts: &mut [f32], shift: Vec3) {
 /// carved out of the one solid -- so what the window shows apart is what the
 /// files hold separately, and a carve the kernel refuses here is the error it
 /// would be there.
-fn bin_vertices(bin: &LogicalBin, pitch: f64, solid: &Solid) -> Result<Vec<f32>, String> {
-    let explosion = Explosion::of(bin, pitch);
+fn bin_vertices(
+    bin: &LogicalBin,
+    pitch: f64,
+    solid: &Solid,
+    gaps: bool,
+) -> Result<Vec<f32>, String> {
+    let explosion = explode(Explosion::of(bin, pitch), gaps);
     if !explosion.is_split() {
         return Ok(flagged(&tessellate(solid, PREVIEW_RES), false));
     }
@@ -148,7 +168,7 @@ fn bin_vertices(bin: &LogicalBin, pitch: f64, solid: &Solid) -> Result<Vec<f32>,
 /// without the pieces of the other that span its seams. Carving is
 /// `carve_baseplate_to_cells`, the same call the export makes, so what the
 /// window shows apart is what the files hold separately.
-fn plate_vertices(p: &Params, solid: &Solid) -> Result<Vec<f32>, String> {
+fn plate_vertices(p: &Params, solid: &Solid, gaps: bool) -> Result<Vec<f32>, String> {
     let cells = p.all_cells();
     let mut splits: Vec<SplitLine> = Vec::new();
     for bin in &p.bins {
@@ -158,7 +178,7 @@ fn plate_vertices(p: &Params, solid: &Solid) -> Result<Vec<f32>, String> {
             }
         }
     }
-    let explosion = Explosion::new(&cells, &splits, p.pitch);
+    let explosion = explode(Explosion::new(&cells, &splits, p.pitch), gaps);
     if !explosion.is_split() {
         return Ok(shaded(&tessellate(solid, PREVIEW_RES), PLATE_GREY, false));
     }
@@ -191,11 +211,15 @@ fn plate_vertices(p: &Params, solid: &Solid) -> Result<Vec<f32>, String> {
 /// compartment is only M mm deep` warning made visible. The box stands its full
 /// height either way: clipping it to the cavity would hide the thing worth
 /// seeing.
-fn object_box_vertices(boxes: &[optimize::ObjectBox], params: &Params) -> Vec<f32> {
+fn object_box_vertices(
+    boxes: &[optimize::ObjectBox],
+    params: &Params,
+    gaps: bool,
+) -> Vec<f32> {
     let explosions: Vec<Explosion> = params
         .bins
         .iter()
-        .map(|bin| Explosion::of(bin, params.pitch))
+        .map(|bin| explode(Explosion::of(bin, params.pitch), gaps))
         .collect();
     let mut out = Vec::new();
     for b in boxes {
@@ -400,8 +424,11 @@ fn try_whole(p: &Params) -> Result<Solid, String> {
     catch(|| gridfinity::try_build(p))
 }
 
-fn build_scene(p: &Params) -> (Vec<f32>, Vec<BinError>) {
-    build_scene_with(p, build_bin)
+/// Every bin of `p` as preview vertices, with the split bodies standing apart
+/// when `gaps` and abutting as printed when not -- the viewport's *Show gaps*
+/// toggle, and the only thing the window varies about the scene.
+fn build_scene(p: &Params, gaps: bool) -> (Vec<f32>, Vec<BinError>) {
+    build_scene_with(p, build_bin, gaps)
 }
 
 /// `build_scene` with the per-bin builder supplied.
@@ -415,11 +442,12 @@ fn build_scene(p: &Params) -> (Vec<f32>, Vec<BinError>) {
 fn build_scene_with(
     p: &Params,
     build: impl Fn(&Params, &LogicalBin) -> Result<Solid, String>,
+    gaps: bool,
 ) -> (Vec<f32>, Vec<BinError>) {
     let mut verts = Vec::new();
     let mut errors = Vec::new();
     if p.mode != Mode::Bin {
-        match try_whole(p).and_then(|s| plate_vertices(p, &s)) {
+        match try_whole(p).and_then(|s| plate_vertices(p, &s, gaps)) {
             Ok(v) => verts = v,
             Err(msg) => errors.push(BinError { bin: 0, msg }),
         }
@@ -434,7 +462,7 @@ fn build_scene_with(
         if bin.cells.is_empty() {
             continue;
         }
-        match build(p, bin).and_then(|solid| bin_vertices(bin, p.pitch, &solid)) {
+        match build(p, bin).and_then(|solid| bin_vertices(bin, p.pitch, &solid, gaps)) {
             Ok(piece_verts) => verts.extend(piece_verts),
             Err(msg) => {
                 errors.push(BinError { bin: i, msg });
@@ -533,6 +561,7 @@ struct App {
     show_object_boxes: bool,
     plate: Option<Params>,
     show_plate: bool,
+    show_gaps: bool,
     dirty: bool,
     program_dirty: bool,
     tri_count: usize,
@@ -543,6 +572,7 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, initial: Option<optimize::View>) -> App {
+        theme::apply(&cc.egui_ctx);
         let state =
             cc.wgpu_render_state.as_ref().expect("this build requires the wgpu backend");
         let gpu = Gpu {
@@ -563,6 +593,7 @@ impl App {
             bin_names,
             object_boxes,
             show_plate: plate.is_some(),
+            show_gaps: true,
             plate,
             params,
             editor: Editor::default(),
@@ -598,7 +629,7 @@ impl App {
                 }
                 Err(msg) => (Vec::new(), vec![BinError { bin: 0, msg }]),
             },
-            None => build_scene(&self.params),
+            None => build_scene(&self.params, self.show_gaps),
         };
         self.errors = errors;
         self.tri_count = verts.len() / (3 * MESH_STRIDE);
@@ -609,11 +640,11 @@ impl App {
             }
         }
         if self.show_object_boxes && !self.params.bins.is_empty() {
-            verts.extend(object_box_vertices(&self.object_boxes, &self.params));
+            verts.extend(object_box_vertices(&self.object_boxes, &self.params, self.show_gaps));
         }
         if dbg_solid.is_none() && self.show_plate {
             if let Some(plate) = &self.plate {
-                let (plate_verts, plate_errors) = build_scene(plate);
+                let (plate_verts, plate_errors) = build_scene(plate, self.show_gaps);
                 verts.extend(plate_verts);
                 self.errors.extend(plate_errors);
             }
@@ -734,32 +765,51 @@ impl App {
     }
 }
 
+/// Which workspace the window is showing, and so what the right panel holds.
+///
+/// The web app's header switches between the bin editor and Project mode and
+/// swaps both panels' contents with it; this binary's second workspace is the
+/// construction debugger, so the switch is in the same place and does the same
+/// thing to the same panel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Workspace {
+    Editor,
+    Debugger,
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::left("params")
+        let mut changed = false;
+        let mut dbg_changed = false;
+
+        egui::Panel::top("header")
+            .exact_size(theme::HEADER_HEIGHT)
+            .show(ui, |ui| self.header(ui));
+
+        egui::Panel::left("sidebar")
             .resizable(true)
-            .default_size(340.0)
+            .default_size(theme::SIDEBAR_WIDTH)
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.params_panel(ui));
+                changed |= sidebar::panel(self, ui);
             });
 
-        let dbg_changed = if self.debugger.is_shown() {
-            let mut out = false;
-            egui::Panel::right("debug")
-                .resizable(true)
-                .default_size(320.0)
-                .show(ui, |ui| {
+        egui::Panel::right("settings")
+            .resizable(true)
+            .default_size(theme::SETTINGS_WIDTH)
+            .show(ui, |ui| {
+                if self.debugger.is_shown() {
                     egui::ScrollArea::neither().show(ui, |ui| {
-                        if self.debugger.panel(ui) {
-                            out = true;
-                        }
+                        dbg_changed = self.debugger.panel(ui);
                     });
-                });
-            out
-        } else {
-            false
-        };
+                } else {
+                    changed |= settings::panel(self, ui);
+                }
+            });
 
+        if changed {
+            self.dirty = true;
+            self.program_dirty = true;
+        }
         if self.dirty || dbg_changed {
             self.dirty = true;
             self.regenerate(false);
@@ -774,251 +824,54 @@ impl eframe::App for App {
 }
 
 impl App {
-    fn params_panel(&mut self, ui: &mut egui::Ui) {
-        let mut changed = false;
-
-        ui.heading("Gridfinity");
-        ui.add_space(4.0);
-
-        let p = &mut self.params;
-
-        ui.horizontal(|ui| {
-            let mut shown = self.debugger.is_shown();
-            if ui.checkbox(&mut shown, "Construction debugger").changed() {
-                self.debugger.set_shown(shown);
-                changed = true;
+    /// The header strip: what the app is, which workspace is showing, and the
+    /// two exports. `App.tsx`'s `AppShell.Header`, item for item.
+    fn header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_centered(|ui| {
+            ui.label(
+                egui::RichText::new("gridfinity-expanded")
+                    .strong()
+                    .size(theme::FONT_SM)
+                    .extra_letter_spacing(0.5)
+                    .color(theme::TEXT_BRIGHT),
+            );
+            ui.add_space(12.0);
+            let mut workspace = if self.debugger.is_shown() {
+                Workspace::Debugger
+            } else {
+                Workspace::Editor
+            };
+            if widgets::segmented(
+                ui,
+                &mut workspace,
+                &[(Workspace::Editor, "Bin editor"), (Workspace::Debugger, "Debugger")],
+                false,
+            ) {
+                self.debugger.set_shown(workspace == Workspace::Debugger);
+                self.dirty = true;
+                self.program_dirty = true;
             }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("Render");
-            let before = self.quality;
-            for (level, label) in [
-                (Quality::Low, "Low"),
-                (Quality::Medium, "Medium"),
-                (Quality::High, "High"),
-            ] {
-                ui.selectable_value(&mut self.quality, level, label);
-            }
-            if self.quality != before {
-                self.renderer.lock().unwrap().set_quality(self.quality);
-            }
-        });
-
-        ui.horizontal(|ui| {
-            for (tool, label) in [
-                (Tool::Cells, "Cells"),
-                (Tool::Edges, "Edges"),
-                (Tool::Split, "Split"),
-                (Tool::Walls, "Walls"),
-            ] {
-                ui.selectable_value(&mut self.editor.tool, tool, label);
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            for bi in 0..p.bins.len() {
-                let col = BIN_COLORS[bi % BIN_COLORS.len()];
-                let label = egui::RichText::new(format!("Bin {}", bi + 1)).color(col);
-                ui.selectable_value(&mut self.editor.active_bin, bi, label);
-            }
-            if ui.button("＋ bin").clicked() {
-                p.bins.push(LogicalBin::default());
-                self.editor.active_bin = p.bins.len() - 1;
-            }
-            if p.bins.len() > 1 && ui.button("− bin").clicked() {
-                p.bins.remove(self.editor.active_bin);
-                self.editor.active_bin = 0;
-                changed = true;
-            }
-        });
-        match self.editor.tool {
-            Tool::Cells => ui.label("Click cells to paint the active bin."),
-            Tool::Edges => ui.label("Click a perimeter edge → open; internal edge → divider."),
-            Tool::Split => ui.label("Click a grid line inside the active bin to split it."),
-            Tool::Walls => ui.label("Drag to draw a free-form inner wall."),
-        };
-        changed |= self.editor.canvas(ui, p);
-
-        if self.editor.tool == Tool::Walls {
-            ui.horizontal(|ui| {
-                ui.label("width");
-                ui.add(egui::DragValue::new(&mut self.editor.wall_width).range(0.4..=8.0).speed(0.1));
-                ui.checkbox(&mut self.editor.wall_full, "full height");
-                if !self.editor.wall_full {
-                    ui.add(egui::DragValue::new(&mut self.editor.wall_height).range(0.5..=60.0).speed(0.5));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("Copy config")
+                    .on_hover_text(
+                        "The bin as a Rust `Params` literal, plus what the fillets did to it. \
+                         Goes to the clipboard, and optionally to a file. Paste it into a test \
+                         to reproduce this exact bin.",
+                    )
+                    .clicked()
+                {
+                    let ctx = ui.ctx().clone();
+                    self.export_config(&ctx);
+                }
+                if ui.button("Export pieces…").clicked() {
+                    self.export_pieces();
+                }
+                if ui.button("Export STL…").clicked() {
+                    self.export_stl();
                 }
             });
-            let mut remove: Option<usize> = None;
-            for (i, w) in p.inner_walls.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    let h = w.height.map_or("full".into(), |h| format!("{h:.1} mm"));
-                    ui.label(format!(
-                        "#{}: ({:.0},{:.0})→({:.0},{:.0}) w{:.1} {h}",
-                        i + 1, w.x1, w.y1, w.x2, w.y2, w.width
-                    ));
-                    if ui.small_button("✕").clicked() {
-                        remove = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                p.inner_walls.remove(i);
-                changed = true;
-            }
-        }
-
-        ui.separator();
-        egui::Grid::new("dims").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-            ui.label("Height (7 mm units)");
-            changed |= ui.add(egui::DragValue::new(&mut p.height_units).range(1..=30)).changed();
-            ui.end_row();
         });
-
-        ui.label("Walls & floor");
-        changed |= ui.add(egui::Slider::new(&mut p.wall_thickness, 0.8..=4.0).text("wall")).changed();
-        changed |= ui.add(egui::Slider::new(&mut p.cavity_corner_radius, 0.0..=8.0).text("corner r")).changed();
-        changed |= ui.add(egui::Slider::new(&mut p.floor_fillet, 0.0..=6.0).text("floor fillet")).changed();
-
-        ui.separator();
-        ui.label(format!("Sloped floor (bin {})", self.editor.active_bin + 1));
-        if let Some(bin) = p.bins.get_mut(self.editor.active_bin) {
-            let mut on = bin.slope.is_some();
-            changed |= ui.checkbox(&mut on, "Enable (disables floor fillet)").changed();
-            if on {
-                let slope = bin.slope.get_or_insert(BinSlope { angle_deg: 20.0, dir: SlopeDir::MinusX });
-                changed |= ui
-                    .add(egui::Slider::new(&mut slope.angle_deg, 5.0..=45.0).text("angle °"))
-                    .changed();
-                ui.horizontal(|ui| {
-                    for (dir, label) in [
-                        (SlopeDir::MinusX, "−X"),
-                        (SlopeDir::PlusX, "+X"),
-                        (SlopeDir::MinusY, "−Y"),
-                        (SlopeDir::PlusY, "+Y"),
-                    ] {
-                        changed |= ui.selectable_value(&mut slope.dir, dir, label).changed();
-                    }
-                });
-            } else if bin.slope.take().is_some() {
-                changed = true;
-            }
-        }
-
-        ui.separator();
-        ui.label("Fasteners");
-        changed |= ui.checkbox(&mut p.magnet_holes, "Magnet holes (⌀6.5 × 2.4)").changed();
-        changed |= ui.checkbox(&mut p.screw_holes, "Screw holes (M3 × 6)").changed();
-
-        ui.separator();
-        ui.horizontal(|ui| {
-            changed |= ui.selectable_value(&mut p.mode, Mode::Bin, "Bin").changed();
-            changed |= ui.selectable_value(&mut p.mode, Mode::Baseplate, "Baseplate").changed();
-        });
-
-        ui.separator();
-        ui.label("Printer");
-        egui::ComboBox::from_id_salt("printer")
-            .selected_text(self.printer.name)
-            .show_ui(ui, |ui| {
-                for prof in PRINTER_PROFILES {
-                    ui.selectable_value(&mut self.printer, *prof, prof.name);
-                }
-            });
-        let pitch = p.pitch;
-        if let Some(bin) = p.bins.get_mut(self.editor.active_bin) {
-            if !bin.cells.is_empty() {
-                let fit = check_bed_fit(&bin.cells, self.printer, pitch);
-                let (w, d) = GridFootprint::from_cells(&bin.cells)
-                    .map(|f| f.mm(pitch))
-                    .unwrap_or((0.0, 0.0));
-                if fit.fits {
-                    ui.label(format!("Bin {} fits: {w:.0} × {d:.0} mm{}",
-                        self.editor.active_bin + 1,
-                        if fit.rotated { " (rotated)" } else { "" }));
-                } else {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(0xd6, 0x63, 0x33),
-                        format!("Bin {} exceeds bed ({w:.0} × {d:.0} mm)", self.editor.active_bin + 1),
-                    );
-                    if ui.button("Auto-split to fit").clicked() {
-                        bin.split_lines = compute_auto_split_lines(&bin.cells, self.printer, pitch);
-                        changed = true;
-                    }
-                }
-                if !bin.split_lines.is_empty() && ui.button("Clear splits").clicked() {
-                    bin.split_lines.clear();
-                    changed = true;
-                }
-            }
-        }
-
-        ui.separator();
-        ui.horizontal(|ui| {
-            if ui.button("Export STL…").clicked() {
-                self.export_stl();
-            }
-            if ui.button("Export pieces…").clicked() {
-                self.export_pieces();
-            }
-            if ui.button("Fit view").clicked() {
-                self.regenerate(true);
-            }
-        });
-        ui.horizontal(|ui| {
-            if ui
-                .button("Copy config")
-                .on_hover_text(
-                    "The bin as a Rust `Params` literal, plus what the fillets did to it. \
-                     Goes to the clipboard, and optionally to a file. Paste it into a test \
-                     to reproduce this exact bin.",
-                )
-                .clicked()
-            {
-                let ctx = ui.ctx().clone();
-                self.export_config(&ctx);
-            }
-        });
-        if !self.object_boxes.is_empty() {
-            let too_tall = self.object_boxes.iter().filter(|b| !b.fits).count();
-            let mut show = self.show_object_boxes;
-            if ui
-                .checkbox(&mut show, format!("Object boxes ({too_tall} too tall)"))
-                .on_hover_text(
-                    "The boxes the packer reserved for the fitted objects, standing on the \
-                     cavity floor. Red is an object taller than the compartment it was \
-                     packed into.",
-                )
-                .changed()
-            {
-                self.show_object_boxes = show;
-                self.dirty = true;
-            }
-        }
-        if self.plate.is_some() {
-            let mut show = self.show_plate;
-            if ui
-                .checkbox(&mut show, "Baseplate")
-                .on_hover_text(
-                    "The grid the fitted bin drops into, cut on its own seams rather than \
-                     the bin's and exploded along them. A plate piece spanning a bin seam \
-                     is what holds the bin's pieces together, and the other way round.",
-                )
-                .changed()
-            {
-                self.show_plate = show;
-                self.dirty = true;
-            }
-        }
-        ui.label(format!("{} triangles", self.tri_count));
-        if !self.status.is_empty() {
-            ui.add_space(4.0);
-            ui.label(&self.status);
-        }
-
-        if changed {
-            self.dirty = true;
-            self.program_dirty = true;
-        }
     }
 
     fn viewport(&mut self, ui: &mut egui::Ui) {
@@ -1041,21 +894,49 @@ impl App {
         }
         ui.painter().add(viewport::callback(rect, self.gpu.clone(), renderer, cam, time));
         self.paint_labels(ui, rect);
+        self.viewport_tools(ui, rect);
         self.paint_error_banner(ui, rect);
+    }
+
+    /// The two buttons over the top-right corner of the 3D view: whether a
+    /// split body is shown open, and reframing the camera.
+    ///
+    /// `ModelViewer`'s `.viewer-tools`, in the same corner and with the same
+    /// words. *Show gaps* rebuilds rather than easing a displacement per frame
+    /// the way the web viewer's uniform does -- here the pieces are carved on
+    /// the CPU, so the toggle is a rebuild and eating one is what it costs.
+    fn viewport_tools(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect.shrink(8.0))
+                .layout(egui::Layout::right_to_left(egui::Align::TOP)),
+        );
+        if child.button("Reset view").clicked() {
+            self.regenerate(true);
+        }
+        let label = if self.show_gaps { "Close up" } else { "Show gaps" };
+        if child
+            .add(egui::Button::new(label).selected(self.show_gaps))
+            .on_hover_text("Stand every cut piece off its neighbours, or abut them as printed.")
+            .clicked()
+        {
+            self.show_gaps = !self.show_gaps;
+            self.dirty = true;
+        }
     }
 
     fn paint_error_banner(&self, ui: &mut egui::Ui, rect: egui::Rect) {
         if self.errors.is_empty() {
             return;
         }
-        let red = egui::Color32::from_rgb(255, 90, 70);
+        let red = theme::RED;
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(rect.shrink(12.0))
                 .layout(egui::Layout::bottom_up(egui::Align::LEFT)),
         );
         egui::Frame::popup(ui.style())
-            .fill(egui::Color32::from_rgba_unmultiplied(40, 6, 8, 235))
+            .fill(theme::RED.gamma_multiply(0.12))
             .stroke(egui::Stroke::new(1.0, red))
             .show(&mut child, |ui| {
                 ui.set_max_width(rect.width() * 0.6);
@@ -1070,12 +951,12 @@ impl App {
                             .color(red)
                             .strong(),
                     );
-                    ui.label(egui::RichText::new(&e.msg).color(egui::Color32::from_rgb(255, 190, 180)));
+                    ui.label(egui::RichText::new(&e.msg).color(theme::RED_PALE));
                 }
                 ui.label(
                     egui::RichText::new("Shown as a plain block; the rest of the layout is unaffected.")
                         .small()
-                        .color(egui::Color32::from_rgb(200, 150, 145)),
+                        .color(theme::TEXT_DIMMED),
                 );
             });
     }
@@ -1146,7 +1027,7 @@ mod tests {
     #[test]
     fn a_bin_that_cannot_be_built_is_reported_not_fatal() {
         let p = bins_at(&[GridCell { x: 0, y: 0 }]);
-        let (verts, errors) = build_scene_with(&p, always_fails);
+        let (verts, errors) = build_scene_with(&p, always_fails, true);
         assert_eq!(errors.len(), 1, "the one bad bin should be reported once");
         assert_eq!(errors[0].bin, 0);
         assert!(!errors[0].msg.is_empty(), "the failure needs a message to show");
@@ -1157,7 +1038,7 @@ mod tests {
 
     #[test]
     fn a_valid_layout_reports_nothing_and_flags_nothing() {
-        let (verts, errors) = build_scene(&Params::default());
+        let (verts, errors) = build_scene(&Params::default(), true);
         assert!(errors.is_empty(), "default bin should build: {:?}", errors[0].msg);
         let (good, bad) = flags(&verts);
         assert!(good > 0);
@@ -1167,11 +1048,11 @@ mod tests {
     #[test]
     fn a_failed_bin_does_not_take_its_neighbours_with_it() {
         let p = bins_at(&[GridCell { x: 0, y: 0 }, GridCell { x: 4, y: 0 }]);
-        let (verts, errors) = build_scene_with(&p, always_fails);
+        let (verts, errors) = build_scene_with(&p, always_fails, true);
         assert_eq!(errors.len(), 2, "both bins were refused");
         assert_eq!(errors.iter().map(|e| e.bin).collect::<Vec<_>>(), vec![0, 1]);
 
-        let (ok_verts, ok_errors) = build_scene(&p);
+        let (ok_verts, ok_errors) = build_scene(&p, true);
         assert!(ok_errors.is_empty());
         assert!(ok_verts.len() > verts.len(), "real geometry beats placeholders");
     }
@@ -1192,12 +1073,10 @@ mod tests {
     #[test]
     fn a_split_bin_previews_as_pieces_a_gap_apart() {
         let cells = [GridCell { x: 0, y: 0 }, GridCell { x: 1, y: 0 }];
-        let (whole, errors) = build_scene(&split_bin(&cells, &[]));
+        let (whole, errors) = build_scene(&split_bin(&cells, &[]), true);
         assert!(errors.is_empty(), "the uncut bin must build");
-        let (cut, errors) = build_scene(&split_bin(
-            &cells,
-            &[SplitLine { axis: Axis::X, index: 1 }],
-        ));
+        let (cut, errors) =
+            build_scene(&split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }]), true);
         assert!(errors.is_empty(), "the cut bin must build");
 
         let (whole_min, whole_max) = vert_bounds(&whole);
@@ -1347,9 +1226,9 @@ mod tests {
             mode: Mode::Baseplate,
             ..split_bin(&cells, splits)
         };
-        let (whole, errors) = build_scene(&plate(&[]));
+        let (whole, errors) = build_scene(&plate(&[]), true);
         assert!(errors.is_empty(), "the uncut plate must build");
-        let (cut, errors) = build_scene(&plate(&[SplitLine { axis: Axis::X, index: 1 }]));
+        let (cut, errors) = build_scene(&plate(&[SplitLine { axis: Axis::X, index: 1 }]), true);
         assert!(errors.is_empty(), "the cut plate must build");
 
         let (whole_min, whole_max) = vert_bounds(&whole);
@@ -1413,7 +1292,7 @@ mod tests {
             max: KernelVec3::new(1.75 * pitch, 0.75 * pitch, 5.0),
             fits: true,
         };
-        let verts = object_box_vertices(std::slice::from_ref(&across), &params);
+        let verts = object_box_vertices(std::slice::from_ref(&across), &params, true);
         let (min, max) = vert_bounds(&verts);
         assert!(
             ((max.x - min.x) - (across.max.x - across.min.x) as f32 - SPLIT_APART_MM).abs() < 1e-3,
@@ -1440,7 +1319,7 @@ mod tests {
             max: KernelVec3::new(30.0, 30.0, 400.0),
             fits: false,
         };
-        let verts = object_box_vertices(std::slice::from_ref(&tall), &params);
+        let verts = object_box_vertices(std::slice::from_ref(&tall), &params, true);
         let (_, max) = vert_bounds(&verts);
         assert!((max.z - 400.0).abs() < 1e-3, "the box stands its full height, not {}", max.z);
         let (good, bad) = flags(&verts);
@@ -1450,7 +1329,7 @@ mod tests {
     #[test]
     fn the_placeholder_sits_on_the_failed_bin_footprint() {
         let p = bins_at(&[GridCell { x: 2, y: 1 }]);
-        let (verts, _) = build_scene_with(&p, always_fails);
+        let (verts, _) = build_scene_with(&p, always_fails, true);
         let (min, max) = vert_bounds(&verts);
         let pitch = gridfinity::GRID_PITCH as f32;
         assert!(min.x > 2.0 * pitch - 1.0 && max.x < 3.0 * pitch + 1.0, "x {min:?}..{max:?}");

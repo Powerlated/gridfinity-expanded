@@ -12,7 +12,8 @@
 //! `mm2`, `bytes`, `secs`, `percent`) fix how each kind of quantity is spelled.
 
 use crate::export::{Contents, Written};
-use crate::optimize::{FitMode, Run};
+use crate::grouping::score as grouping_score;
+use crate::optimize::{Built, Run};
 use gridfinity_cad::project::tidy::score as layout_score;
 use gridfinity_cad::layout::{Axis, GridFootprint, Piece, SplitLine};
 use gridfinity_cad::printers::{BED_MARGIN, PrinterProfile, check_bed_fit};
@@ -157,6 +158,38 @@ fn drawer(run: &Run) {
             mm(run.spec.total_height())
         ),
     );
+    field("fit", &fitted_as(run));
+}
+
+/// What the drawer was built as, and -- for a run that asked for the smallest
+/// bins and could not have them -- the refusal that sent it to the one
+/// drawer-wide bin.
+///
+/// A run told which mode to build says only which it built; there is nothing
+/// else to say about a choice the command line made. An automatic run that fell
+/// back has to say why, or the reader is left to guess whether the large body
+/// was preferred or merely unavoidable.
+fn fitted_as(run: &Run) -> String {
+    let shared = run.bins.iter().filter(|b| b.objects.len() > 1).count();
+    let built = match run.built {
+        Built::Walls => format!(
+            "the whole drawer as one bin, hollowed to {} compartment(s)",
+            run.pockets.len()
+        ),
+        Built::Bins => format!("{} bin(s), one per object", run.bins.len()),
+        Built::Hybrid if shared == 0 => format!(
+            "{} bin(s), one per object -- no grouping paid",
+            run.bins.len()
+        ),
+        Built::Hybrid => format!(
+            "{} bin(s), {shared} of them shared by more than one object",
+            run.bins.len()
+        ),
+    };
+    match &run.fell_back {
+        None => built,
+        Some(why) => format!("{built} -- a bin per object was refused: {why}"),
+    }
 }
 
 /// One row per object: how many were wanted, how many were placed, how big its
@@ -368,23 +401,42 @@ fn placements(run: &Run) {
 /// The bin each object was given: what it covers, how many compartments are in
 /// it, and whether it prints whole. Nothing in `walls` mode, where the drawer is
 /// one bin and the Printing section already says everything about it.
+///
+/// A hybrid fit prints its `grouping` here too, the way `Packing` prints its
+/// tidiness: the six terms are what decided which objects share a bin, and a
+/// weight that reads oddly on a real drawer is only visible as its term.
 fn bins(run: &Run) {
     if run.bins.is_empty() {
         return;
     }
     let printer = run.spec.printer;
     heading("Bins");
+    if let Some(g) = &run.grouping {
+        field(
+            "grouping",
+            &format!(
+                "{:.2} cells (on {:.0}, air {:.1}, biggest {:.0}, cut {:.0}, shared {:.0}, oblong {:.1})",
+                grouping_score(g),
+                g.cells,
+                g.air,
+                g.largest,
+                g.cut,
+                g.shared,
+                g.oblong
+            ),
+        );
+    }
     row(&format!(
-        "{:<22}{:>7}{:>9}{:>14}{:>14}  {}",
-        "object", "cells", "grid", "size mm", "compartments", "built as"
+        "{:<28}{:>7}{:>9}{:>14}{:>14}  {}",
+        "objects", "cells", "grid", "size mm", "compartments", "built as"
     ));
     for (index, bin) in run.bins.iter().enumerate() {
         let fit = check_bed_fit(&bin.cells, printer, run.spec.pitch);
         let footprint = GridFootprint::from_cells(&bin.cells)
             .map_or((0, 0), |f| (f.width_cells, f.depth_cells));
         row(&format!(
-            "{:<22}{:>7}{:>9}{:>14}{:>14}  {}",
-            bin.object_id,
+            "{:<28}{:>7}{:>9}{:>14}{:>14}  {}",
+            bin.name(),
             bin.cells.len(),
             format!("{} x {}", footprint.0, footprint.1),
             format!("{} x {}", fit.bin_width, fit.bin_depth),
@@ -397,9 +449,9 @@ fn bins(run: &Run) {
 /// What the report calls the files one bin becomes: the name the model gave its
 /// piece, or the stem those pieces share when it was cut for the bed.
 ///
-/// A bin in `bins` mode *is* an object, and the model names its pieces by
-/// position rather than by what is in them, so without this the report names
-/// every object and every file and leaves the reader to pair them off by order.
+/// A bin *is* what is in it, and the model names its pieces by position rather
+/// than by what is in them, so without this the report names every object and
+/// every file and leaves the reader to pair them off by order.
 fn built_as(run: &Run, index: usize) -> String {
     let Some(piece) = run.pieces.iter().find(|p| p.bin == index) else {
         return "-".to_string();
@@ -416,9 +468,9 @@ fn built_as(run: &Run, index: usize) -> String {
 fn dividers(run: &Run) {
     let pocket_area: f64 = run.pockets.iter().map(|k| k.width * k.depth).sum();
     let pitch = run.spec.pitch;
-    let (interior, whose) = match run.mode {
-        FitMode::Walls => (run.area.width * run.area.depth, "packing area"),
-        FitMode::Bins => (
+    let (interior, whose) = match run.built {
+        Built::Walls => (run.area.width * run.area.depth, "packing area"),
+        Built::Bins | Built::Hybrid => (
             run.bins.iter().map(|b| b.cells.len() as f64 * pitch * pitch).sum(),
             "the bins cover",
         ),
@@ -444,13 +496,13 @@ fn dividers(run: &Run) {
     );
     field(
         "walls",
-        &match run.mode {
-            FitMode::Walls => format!(
+        &match run.built {
+            Built::Walls => format!(
                 "none -- the cavity is stated, so the {} divider(s) the packer derived stand as material",
                 run.wall_report.generated
             ),
-            FitMode::Bins => {
-                "none -- every object has its own bin, so what stands between two \
+            Built::Bins | Built::Hybrid => {
+                "none -- the cavity of every bin is stated, so what stands between two \
                  compartments is that bin's own material"
                     .to_string()
             }
@@ -511,8 +563,8 @@ fn printing(run: &Run) {
             mm(f64::from(BED_MARGIN))
         ),
     );
-    let (label, whole) = match run.mode {
-        FitMode::Walls => {
+    let (label, whole) = match run.built {
+        Built::Walls => {
             let fit = check_bed_fit(&run.cells, printer, run.spec.pitch);
             (
                 "whole bin",
@@ -524,7 +576,7 @@ fn printing(run: &Run) {
                 ),
             )
         }
-        FitMode::Bins => {
+        Built::Bins | Built::Hybrid => {
             let cut = run
                 .bins
                 .iter()
@@ -533,7 +585,7 @@ fn printing(run: &Run) {
             (
                 "bins",
                 format!(
-                    "{} bin(s), one per object -- {}",
+                    "{} bin(s) -- {}",
                     run.bins.len(),
                     if cut == 0 {
                         "every one prints whole".to_string()

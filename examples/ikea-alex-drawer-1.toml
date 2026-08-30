@@ -62,10 +62,6 @@ size = ["380 mm", "100 mm"]
 # size = ["80 mm", "135 mm"]
 
 [[objects]]
-name = "gorilla super glue gel xl"
-size = ["45mm", "120mm"]
-
-[[objects]]
-name = "gorilla epoxy clear"
-size = ["17cm", "45mm"]
+name = "ethernet cable"
+size = ["43 mm", "130 mm"]
 

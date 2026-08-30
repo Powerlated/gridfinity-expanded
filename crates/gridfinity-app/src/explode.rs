@@ -46,6 +46,7 @@ pub struct Explosion {
     pieces: Vec<Piece>,
     x: Vec<Band>,
     y: Vec<Band>,
+    gap: f32,
 }
 
 /// The bands along one axis: for each chunk index in `keys`, the millimetres the
@@ -83,13 +84,14 @@ fn bands(mut spans: Vec<(i32, i32)>, pitch: f64) -> Vec<Band> {
 /// of the middle for an even count, whole gaps from the middle for an odd one.
 /// A single band is centred on zero, which is why an axis with no cut moves
 /// nothing.
-fn band_offset(i: i32, count: usize) -> f32 {
+fn band_offset(i: i32, count: usize, gap: f32) -> f32 {
     assert!(count > 0, "an axis of a bin with cells has at least one band, not {count}");
     assert!(
         i >= 0 && (i as usize) < count,
         "band {i} is not one of the {count} bands along this axis"
     );
-    (i as f32 - (count - 1) as f32 / 2.0) * SPLIT_APART_MM
+    assert!(gap >= 0.0, "pieces stand apart or abut, so a gap is not {gap} mm");
+    (i as f32 - (count - 1) as f32 / 2.0) * gap
 }
 
 impl Explosion {
@@ -125,7 +127,20 @@ impl Explosion {
         };
         let x = bands(spans(|p| p.col, |c| c.x), pitch);
         let y = bands(spans(|p| p.row, |c| c.y), pitch);
-        Explosion { pieces, x, y }
+        Explosion { pieces, x, y, gap: SPLIT_APART_MM }
+    }
+
+    /// The same pieces and bands with every offset zero: the body shown as it
+    /// is printed, its pieces abutting on the cut planes exactly as the kernel
+    /// carved them.
+    ///
+    /// This is what the viewport's *Show gaps* toggle turns off, and it is the
+    /// web viewer at explode 0. The pieces are still carved separately -- a
+    /// collapsed explosion is not the unsplit solid, it is the split one closed
+    /// up -- so what is on screen is still what the files hold.
+    pub fn collapsed(mut self) -> Explosion {
+        self.gap = 0.0;
+        self
     }
 
     /// The pieces the bin partitions into, in the order `partition_cells`
@@ -145,7 +160,11 @@ impl Explosion {
     /// by exactly `SPLIT_APART_MM`, so every cut opens by the same gap however
     /// many pieces the bin has and wherever in it they sit.
     pub fn shift(&self, col: i32, row: i32) -> Vec3 {
-        Vec3::new(band_offset(col, self.x.len()), band_offset(row, self.y.len()), 0.0)
+        Vec3::new(
+            band_offset(col, self.x.len(), self.gap),
+            band_offset(row, self.y.len(), self.gap),
+            0.0,
+        )
     }
 
     /// The millimetres the band containing the point `(x, y)` is displaced by.
@@ -164,8 +183,8 @@ impl Explosion {
                 .unwrap_or_else(|| panic!("{v} mm lies in no band, but the outer bands are open"))
         };
         Vec3::new(
-            band_offset(band_of(&self.x, x) as i32, self.x.len()),
-            band_offset(band_of(&self.y, y) as i32, self.y.len()),
+            band_offset(band_of(&self.x, x) as i32, self.x.len(), self.gap),
+            band_offset(band_of(&self.y, y) as i32, self.y.len(), self.gap),
             0.0,
         )
     }
@@ -259,6 +278,35 @@ mod tests {
                 (to - from).length()
             );
         }
+    }
+
+    /// *Show gaps* off is the same partition standing still: the pieces are
+    /// the ones the export writes, and every one of them is where the kernel
+    /// carved it.
+    #[test]
+    fn a_collapsed_explosion_keeps_the_pieces_and_moves_none_of_them() {
+        let apart = ikea();
+        let together = ikea().collapsed();
+        assert_eq!(
+            together.pieces().len(),
+            apart.pieces().len(),
+            "closing the gaps does not weld the pieces back together"
+        );
+        assert!(together.is_split(), "a bin cut on three lines is still a bin cut on three lines");
+        for piece in together.pieces() {
+            assert_eq!(
+                together.shift(piece.col, piece.row),
+                Vec3::ZERO,
+                "piece ({}, {}) abuts its neighbours, so it is not displaced",
+                piece.col,
+                piece.row
+            );
+        }
+        assert_eq!(
+            together.shift_at(3.5 * GRID_PITCH, 6.0 * GRID_PITCH),
+            Vec3::ZERO,
+            "a point moves with its band, and no band moves"
+        );
     }
 
     /// The defect this replaced a radial displacement to fix: the middle row's
