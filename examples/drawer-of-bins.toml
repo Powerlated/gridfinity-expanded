@@ -1,0 +1,41 @@
+# A worked input for `cargo run -- optimize --mode bins`.
+#
+#   cargo run -- optimize examples/drawer-of-bins.toml --mode bins --format stl -o out
+#   cargo run -- optimize examples/drawer-of-bins.toml --mode bins -o bins.x_t --view
+#
+# --mode bins gives every object a Gridfinity bin of its own, sized to hold that
+# object's whole quantity as its own compartments and shaped to the cells those
+# compartments reach. Every bin drops into the one baseplate written beside them.
+#
+# A bin is a whole number of cells on each axis, so discrete bins cost more of a
+# drawer than one divided bin does: `examples/drawer.toml` fits the same drawer
+# with --mode walls but has more in it than it holds as separate bins, and says
+# so rather than leaving an object out. This file is that list, trimmed to what
+# fits.
+
+[drawer]
+width = 400            # the drawer's inside measurements, in mm
+depth = 300
+
+[settings]
+effort = "standard"    # quick | standard | thorough
+height_units = 4       # 7 mm each, above a 7 mm base
+baseplate = true       # the grid every bin drops into
+
+[[objects]]
+name = "calipers"
+size = [160, 40, 22]   # width, depth, and an optional height
+
+[[objects]]
+name = "socket 1/4in"
+quantity = 12
+size = [26, 26, 25]
+
+[[objects]]
+name = "tape measure"
+size = [70, 70, 25]
+
+[[objects]]
+name = "spare bits"
+quantity = 4
+size = [45, 35, 15]

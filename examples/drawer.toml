@@ -1,7 +1,12 @@
 # A worked input for `cargo run -- optimize`.
 #
-#   cargo run -- optimize examples/drawer.toml --format stl out
-#   cargo run -- optimize examples/drawer.toml --format parasolid_x_t drawer.x_t --view
+#   cargo run -- optimize examples/drawer.toml --mode walls --format stl -o out
+#   cargo run -- optimize examples/drawer.toml --mode walls -o drawer.x_t --view
+#
+# --mode is required: `walls` divides the whole drawer into one bin's compartments,
+# `bins` gives every object a Gridfinity bin of its own. This drawer is a `walls`
+# fit -- as discrete bins its six objects want more cells than the drawer has, and
+# the run says so rather than leaving one out.
 
 # Every measurement may be a bare number of millimetres or a string carrying a
 # unit: mm, cm, m, in, ft. See examples/ikea-alex-drawer-1.toml.

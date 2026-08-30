@@ -181,20 +181,26 @@ fn plate_vertices(p: &Params, solid: &Solid) -> Result<Vec<f32>, String> {
     Ok(out)
 }
 
-/// The packed objects as solid boxes in the bin's own millimetre coordinates,
-/// each cut on the bin's split lines and each part displaced with the piece it
-/// lies in, so an object crosses a cut exactly the way the drawer does.
+/// The packed objects as solid boxes in the drawer's own millimetre coordinates,
+/// each cut on the split lines of the bin it stands in and each part displaced
+/// with the piece it lies in, so an object crosses a cut exactly the way the
+/// body holding it does.
 ///
 /// White, and flagged bad -- the renderer's pulsing red rim -- for an object
 /// that does not clear the cavity, which is the report's `is N mm tall, but a
 /// compartment is only M mm deep` warning made visible. The box stands its full
 /// height either way: clipping it to the cavity would hide the thing worth
 /// seeing.
-fn object_box_vertices(boxes: &[optimize::ObjectBox], bin: &LogicalBin, pitch: f64) -> Vec<f32> {
-    let explosion = Explosion::of(bin, pitch);
+fn object_box_vertices(boxes: &[optimize::ObjectBox], params: &Params) -> Vec<f32> {
+    let explosions: Vec<Explosion> = params
+        .bins
+        .iter()
+        .map(|bin| Explosion::of(bin, params.pitch))
+        .collect();
     let mut out = Vec::new();
     for b in boxes {
         assert!(b.max.z > b.min.z, "an object box stands some height, but {} is not under {}", b.min, b.max);
+        let explosion = &explosions[b.bin];
         for part in explosion.pieces() {
             let Some((min, max)) = explosion.clip(part.col, part.row, b.min, b.max) else {
                 continue;
@@ -271,6 +277,10 @@ fn body_label(
 /// is named once over all of them. Each label rides the band its own point falls
 /// in, so it stands on the item rather than in a gap the explosion opened.
 ///
+/// A bin is named by `bin_names` where the fit gave it a name -- in `bins` mode
+/// a bin *is* an object, and "bin 3" says nothing the viewer wants -- and
+/// falls back to "bin" or "bin N" for a run that named none.
+///
 /// An object is named in red where it does not clear the cavity -- the same
 /// thing the box's red rim says, in words. Object labels come first because
 /// `paint_labels` keeps the first label in each cell of its grid: where an
@@ -280,34 +290,44 @@ fn scene_labels(
     params: &Params,
     boxes: &[optimize::ObjectBox],
     plate: Option<&Params>,
+    bin_names: &[String],
 ) -> Vec<wireframe::Label> {
     let pitch = params.pitch;
-    let bins: Vec<&LogicalBin> = params.bins.iter().filter(|b| !b.cells.is_empty()).collect();
+    let bins: Vec<(usize, &LogicalBin)> = params
+        .bins
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| !b.cells.is_empty())
+        .collect();
     let mut out = Vec::new();
-    if let Some(bin) = bins.first() {
-        let explosion = Explosion::of(bin, pitch);
-        let mut instances: Vec<(usize, &optimize::ObjectBox, KernelVec3, KernelVec3)> = Vec::new();
-        for b in boxes {
-            match instances.iter_mut().find(|(i, ..)| *i == b.instance) {
-                Some((_, _, min, max)) => {
-                    *min = min.min(b.min);
-                    *max = max.max(b.max);
-                }
-                None => instances.push((b.instance, b, b.min, b.max)),
+    let mut instances: Vec<(usize, &optimize::ObjectBox, KernelVec3, KernelVec3)> = Vec::new();
+    for b in boxes {
+        match instances.iter_mut().find(|(i, ..)| *i == b.instance) {
+            Some((_, _, min, max)) => {
+                *min = min.min(b.min);
+                *max = max.max(b.max);
             }
-        }
-        for (_, b, min, max) in &instances {
-            let (x, y) = ((min.x + max.x) / 2.0, (min.y + max.y) / 2.0);
-            let shift = explosion.shift_at(x, y);
-            out.push(wireframe::Label {
-                at: KernelVec3::new(x + f64::from(shift.x), y + f64::from(shift.y), max.z),
-                text: b.name.clone(),
-                color: if b.fits { LABEL_INK } else { LABEL_BAD },
-            });
+            None => instances.push((b.instance, b, b.min, b.max)),
         }
     }
-    for (i, bin) in bins.iter().enumerate() {
-        let text = if bins.len() == 1 { "bin".to_string() } else { format!("bin {}", i + 1) };
+    for (_, b, min, max) in &instances {
+        let Some(bin) = params.bins.get(b.bin) else {
+            continue;
+        };
+        let (x, y) = ((min.x + max.x) / 2.0, (min.y + max.y) / 2.0);
+        let shift = Explosion::of(bin, pitch).shift_at(x, y);
+        out.push(wireframe::Label {
+            at: KernelVec3::new(x + f64::from(shift.x), y + f64::from(shift.y), max.z),
+            text: b.name.clone(),
+            color: if b.fits { LABEL_INK } else { LABEL_BAD },
+        });
+    }
+    for (ord, (index, bin)) in bins.iter().enumerate() {
+        let text = match bin_names.get(*index) {
+            Some(name) => name.clone(),
+            None if bins.len() == 1 => "bin".to_string(),
+            None => format!("bin {}", ord + 1),
+        };
         out.push(body_label(
             &Explosion::of(bin, pitch),
             &bin.cells,
@@ -508,6 +528,7 @@ struct App {
     camera: Camera,
     quality: Quality,
     labels: Vec<wireframe::Label>,
+    bin_names: Vec<String>,
     object_boxes: Vec<optimize::ObjectBox>,
     show_object_boxes: bool,
     plate: Option<Params>,
@@ -533,12 +554,13 @@ impl App {
             Renderer::new(&gpu.device, &state.adapter)
                 .expect("the wgpu backend must build the viewport pipelines"),
         ));
-        let (params, object_boxes, plate) = match initial {
-            Some(view) => (view.params, view.boxes, view.plate),
-            None => (Params::default(), Vec::new(), None),
+        let (params, object_boxes, plate, bin_names) = match initial {
+            Some(view) => (view.params, view.boxes, view.plate, view.bin_names),
+            None => (Params::default(), Vec::new(), None, Vec::new()),
         };
         let mut app = App {
             show_object_boxes: !object_boxes.is_empty(),
+            bin_names,
             object_boxes,
             show_plate: plate.is_some(),
             plate,
@@ -586,10 +608,8 @@ impl App {
                 wf.add_sketch(profile, plane, PREVIEW_RES, wireframe::SKETCH_BLACK);
             }
         }
-        if self.show_object_boxes {
-            if let Some(bin) = self.params.bins.iter().find(|b| !b.cells.is_empty()) {
-                verts.extend(object_box_vertices(&self.object_boxes, bin, self.params.pitch));
-            }
+        if self.show_object_boxes && !self.params.bins.is_empty() {
+            verts.extend(object_box_vertices(&self.object_boxes, &self.params));
         }
         if dbg_solid.is_none() && self.show_plate {
             if let Some(plate) = &self.plate {
@@ -608,7 +628,7 @@ impl App {
             let boxes: &[optimize::ObjectBox] =
                 if self.show_object_boxes { &self.object_boxes } else { &[] };
             let plate = if self.show_plate { self.plate.as_ref() } else { None };
-            self.labels.extend(scene_labels(&self.params, boxes, plate));
+            self.labels.extend(scene_labels(&self.params, boxes, plate, &self.bin_names));
         }
 
         let mut r = self.renderer.lock().unwrap();
@@ -1201,7 +1221,7 @@ mod tests {
         max: KernelVec3,
         fits: bool,
     ) -> optimize::ObjectBox {
-        optimize::ObjectBox { name: name.to_string(), instance, min, max, fits }
+        optimize::ObjectBox { name: name.to_string(), instance, bin: 0, min, max, fits }
     }
 
     /// Everything `--view` puts on screen says what it is: both bodies, and
@@ -1217,7 +1237,7 @@ mod tests {
             boxed("socket set", 0, KernelVec3::new(2.0, 2.0, 0.0), KernelVec3::new(30.0, 30.0, 5.0), true),
             boxed("tape measure", 1, KernelVec3::new(50.0, 2.0, 0.0), KernelVec3::new(80.0, 30.0, 400.0), false),
         ];
-        let labels = scene_labels(&params, &boxes, Some(&plate));
+        let labels = scene_labels(&params, &boxes, Some(&plate), &[]);
         let text: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(
             text,
@@ -1279,7 +1299,7 @@ mod tests {
             boxed("bracket", 0, KernelVec3::new(10.0, 10.0, 0.0), KernelVec3::new(140.0, 30.0, 5.0), true),
             boxed("bracket", 0, KernelVec3::new(10.0, 30.0, 0.0), KernelVec3::new(40.0, 60.0, 5.0), true),
         ];
-        let labels = scene_labels(&params, &l_shaped, None);
+        let labels = scene_labels(&params, &l_shaped, None, &[]);
         let text: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(
             text,
@@ -1300,7 +1320,7 @@ mod tests {
         let cells: Vec<GridCell> = (0..3).map(|x| GridCell { x, y: 0 }).collect();
         let pitch = gridfinity::GRID_PITCH;
         let centred = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }]);
-        let label = scene_labels(&centred, &[], None);
+        let label = scene_labels(&centred, &[], None, &[]);
         assert_eq!(label.len(), 1);
         assert!(
             (label[0].at.x - (1.5 * pitch + f64::from(SPLIT_APART_MM) / 2.0)).abs() < 1e-9,
@@ -1309,7 +1329,7 @@ mod tests {
         );
 
         let other = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 2 }]);
-        let label = scene_labels(&other, &[], None);
+        let label = scene_labels(&other, &[], None, &[]);
         assert!(
             (label[0].at.x - (1.5 * pitch - f64::from(SPLIT_APART_MM) / 2.0)).abs() < 1e-9,
             "cut later and the same centre stands on the first band instead, not {}",
@@ -1383,16 +1403,17 @@ mod tests {
     #[test]
     fn an_object_box_is_cut_and_moved_with_the_piece_it_lies_in() {
         let cells = [GridCell { x: 0, y: 0 }, GridCell { x: 1, y: 0 }];
-        let bin = &split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }]).bins[0];
+        let params = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }]);
         let pitch = gridfinity::GRID_PITCH;
         let across = optimize::ObjectBox {
             name: "across the cut".to_string(),
             instance: 0,
+            bin: 0,
             min: KernelVec3::new(0.25 * pitch, 0.25 * pitch, 0.0),
             max: KernelVec3::new(1.75 * pitch, 0.75 * pitch, 5.0),
             fits: true,
         };
-        let verts = object_box_vertices(std::slice::from_ref(&across), bin, gridfinity::GRID_PITCH);
+        let verts = object_box_vertices(std::slice::from_ref(&across), &params);
         let (min, max) = vert_bounds(&verts);
         assert!(
             ((max.x - min.x) - (across.max.x - across.min.x) as f32 - SPLIT_APART_MM).abs() < 1e-3,
@@ -1410,15 +1431,16 @@ mod tests {
 
     #[test]
     fn an_object_that_does_not_fit_is_flagged_rather_than_hidden() {
-        let bin = &split_bin(&[GridCell { x: 0, y: 0 }], &[]).bins[0];
+        let params = split_bin(&[GridCell { x: 0, y: 0 }], &[]);
         let tall = optimize::ObjectBox {
             name: "too tall".to_string(),
             instance: 0,
+            bin: 0,
             min: KernelVec3::new(5.0, 5.0, 0.0),
             max: KernelVec3::new(30.0, 30.0, 400.0),
             fits: false,
         };
-        let verts = object_box_vertices(std::slice::from_ref(&tall), bin, gridfinity::GRID_PITCH);
+        let verts = object_box_vertices(std::slice::from_ref(&tall), &params);
         let (_, max) = vert_bounds(&verts);
         assert!((max.z - 400.0).abs() < 1e-3, "the box stands its full height, not {}", max.z);
         let (good, bad) = flags(&verts);

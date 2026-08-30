@@ -21,28 +21,41 @@ Required validation commands are documented in [`CLAUDE.md`](./CLAUDE.md).
 
 The Rust workspace ships one binary, `gridfinity-app`. With no arguments it opens the egui
 construction debugger. With `optimize` it fits a drawer headlessly: give it a TOML naming the
-drawer's inside measurements and the objects to organise in it, and it packs them, generates the
-dividers, splits the bin for your printer's bed, writes the geometry, and prints what it did —
-packing efficiency, unplaced objects, dividers generated, rounding that would not land, and how
+drawer's inside measurements and the objects to organise in it, and it packs them, hollows a
+compartment for each, splits every body for your printer's bed, writes the geometry, and prints
+what it did — packing efficiency, the compartments hollowed, rounding that would not land, and how
 many pieces the bed forced.
+
+`--mode` is required and says what to build. `--mode walls` makes the whole drawer **one bin**,
+solid everywhere no object was packed and hollowed to a compartment per object. `--mode bins` makes
+**one ordinary Gridfinity bin per object**, sized to hold that object's whole quantity as its own
+compartments and shaped to the cells its compartments actually reach, with every bin dropping into
+the one baseplate. Either way, an object the packer cannot place fails the run rather than being
+quietly left out.
 
 ```sh
 # one binary STL per printable piece, into out/
-cargo run -- optimize examples/drawer.toml --format stl -o out
+cargo run -- optimize examples/drawer.toml --mode walls --format stl -o out
 
 # every piece as a body of one Parasolid transmit file, then open it in the debugger
 # (.x_t names the format, so --format may be left off)
-cargo run -- optimize examples/drawer.toml -o drawer.x_t --view
+cargo run -- optimize examples/drawer.toml --mode walls -o drawer.x_t --view
 
-# fit it and just look at it, writing nothing
-cargo run -- optimize examples/drawer.toml --view
+# a Gridfinity bin of its own for every object, fitted and just looked at, writing nothing
+cargo run -- optimize examples/drawer-of-bins.toml --mode bins --view
 ```
 
+`--mode` must be given: the two modes build entirely different sets of parts out of one file.
 `-o` names the output and at least one of `-o` and `--view` must be given. `--format` is inferred
 from a `.x_t` output and required otherwise, since an STL run writes a directory of one file per
 piece.
 
-[`examples/drawer.toml`](./examples/drawer.toml) is a worked input with every setting spelled out.
+[`examples/drawer.toml`](./examples/drawer.toml) is a worked `--mode walls` input with every
+setting spelled out, and [`examples/drawer-of-bins.toml`](./examples/drawer-of-bins.toml) is a
+worked `--mode bins` one. A discrete bin is a whole number of cells on each axis, so the same
+drawer holds less as separate bins than it does divided: the first file's object list is more than
+`--mode bins` can fit, and the run names the object it ran out of room for rather than dropping
+it.
 
 ## Geometry documentation
 

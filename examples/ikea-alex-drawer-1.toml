@@ -1,7 +1,12 @@
 # A worked input for `cargo run -- optimize`.
 #
-#   cargo run -- optimize examples/drawer.toml --format stl out
-#   cargo run -- optimize examples/drawer.toml --format parasolid_x_t drawer.x_t --view
+#   cargo run -- optimize examples/ikea-alex-drawer-1.toml --mode walls --format stl -o out
+#   cargo run -- optimize examples/ikea-alex-drawer-1.toml --mode walls -o drawer.x_t --view
+#
+# --mode is required: `walls` divides the whole drawer into one bin's compartments,
+# `bins` gives every object a Gridfinity bin of its own. This drawer is a `walls`
+# fit -- as discrete bins its objects want more cells than the drawer has, and the
+# run says which one it ran out of room for rather than leaving it out.
 
 # A measurement is millimetres unless it is a string naming its unit, as the
 # level's is below: mm, cm, m, in and ft are the units.
@@ -13,7 +18,7 @@ depth = 523.24
 [settings]             # every key here is optional
 grid_size = 40         # the cell pitch; 42 mm is the Gridfinity standard
 divider_thickness = 1.2
-clearance = 0.5
+clearance = 2
 effort = "standard"    # quick | standard | thorough
 height_units = 4       # 7 mm each, above a 7 mm base
 wall_thickness = 1.2
@@ -27,3 +32,40 @@ printer = "Elegoo Centauri Carbon"
 [[objects]]
 name = "level"
 size = ["2.1 in", "9.2 in"]
+
+[[objects]]
+name = "caliper box"
+size = ["25 cm", "9 cm"]
+
+[[objects]]
+name = "AAA batteries"
+size = ["4.5 cm", "124 mm"]
+
+[[objects]]
+name = "tape measure"
+size = ["80 mm", "85 mm"]
+
+[[objects]]
+name = "swiss army knife"
+size = ["114 mm", "32 mm"]
+
+[[objects]]
+name = "steel file set"
+size = ["380 mm", "100 mm"]
+
+# [[objects]]
+# name = "tape roll"
+# size = ["152 mm", "110 mm"]
+
+# [[objects]]
+# name = "game boy color"
+# size = ["80 mm", "135 mm"]
+
+[[objects]]
+name = "gorilla super glue gel xl"
+size = ["45mm", "120mm"]
+
+[[objects]]
+name = "gorilla epoxy clear"
+size = ["17cm", "45mm"]
+

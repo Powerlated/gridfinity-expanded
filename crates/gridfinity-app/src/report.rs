@@ -1,18 +1,18 @@
 //! What an `optimize` run tells the user about itself.
 //!
-//! `print` writes the whole report to stdout in ten sections -- the drawer it
+//! `print` writes the whole report to stdout in eleven sections -- the drawer it
 //! resolved, the objects it was given, how the packing went, where each instance
-//! landed, the dividers that came out of it, what became of the rounding, how the
-//! bin and its baseplate had to be split for the printer and how the two sets of
-//! seams interlock, what each built piece is made of, the
-//! files written, and the warnings. Nothing here decides
+//! landed, the bin each object was given (in `bins` mode, where there is one per
+//! object), what became of the cavity, what became of the rounding, how the
+//! bodies had to be split for the printer and how their seams interlock, what
+//! each built piece is made of, the files written, and the warnings. Nothing here decides
 //! anything: every number is read back off the finished `Run`, so the report
 //! cannot disagree with the geometry. The section helpers (`heading`, `field`,
 //! `row`) exist only so the columns line up; the measurement helpers (`mm`,
 //! `mm2`, `bytes`, `secs`, `percent`) fix how each kind of quantity is spelled.
 
 use crate::export::{Contents, Written};
-use crate::optimize::Run;
+use crate::optimize::{FitMode, Run};
 use gridfinity_cad::layout::{Axis, GridFootprint, Piece, SplitLine};
 use gridfinity_cad::printers::{BED_MARGIN, PrinterProfile, check_bed_fit};
 use gridfinity_cad::kernel::topo::Solid;
@@ -97,6 +97,7 @@ pub fn print(run: &Run, written: &[Written]) {
     objects(run);
     packing(run);
     placements(run);
+    bins(run);
     dividers(run);
     rounding(run);
     printing(run);
@@ -337,16 +338,69 @@ fn placements(run: &Run) {
     }
 }
 
-/// The dividers the placements imply, and the boundary runs that did not become
-/// one.
+/// The bin each object was given: what it covers, how many compartments are in
+/// it, and whether it prints whole. Nothing in `walls` mode, where the drawer is
+/// one bin and the Printing section already says everything about it.
+fn bins(run: &Run) {
+    if run.bins.is_empty() {
+        return;
+    }
+    let printer = run.spec.printer;
+    heading("Bins");
+    row(&format!(
+        "{:<22}{:>7}{:>9}{:>14}{:>14}  {}",
+        "object", "cells", "grid", "size mm", "compartments", "built as"
+    ));
+    for (index, bin) in run.bins.iter().enumerate() {
+        let fit = check_bed_fit(&bin.cells, printer, run.spec.pitch);
+        let footprint = GridFootprint::from_cells(&bin.cells)
+            .map_or((0, 0), |f| (f.width_cells, f.depth_cells));
+        row(&format!(
+            "{:<22}{:>7}{:>9}{:>14}{:>14}  {}",
+            bin.object_id,
+            bin.cells.len(),
+            format!("{} x {}", footprint.0, footprint.1),
+            format!("{} x {}", fit.bin_width, fit.bin_depth),
+            bin.instances,
+            built_as(run, index)
+        ));
+    }
+}
+
+/// What the report calls the files one bin becomes: the name the model gave its
+/// piece, or the stem those pieces share when it was cut for the bed.
+///
+/// A bin in `bins` mode *is* an object, and the model names its pieces by
+/// position rather than by what is in them, so without this the report names
+/// every object and every file and leaves the reader to pair them off by order.
+fn built_as(run: &Run, index: usize) -> String {
+    let Some(piece) = run.pieces.iter().find(|p| p.bin == index) else {
+        return "-".to_string();
+    };
+    match piece.name.find("-piece-") {
+        Some(cut) => format!("{}-piece-1..{}.stl", &piece.name[..cut], piece.piece_count),
+        None => piece.name.clone(),
+    }
+}
+
+/// What became of the cavity: how much of it was hollowed into compartments, how
+/// much stands as material, and what happened to the dividers the packer derives
+/// between two claims.
 fn dividers(run: &Run) {
     let pocket_area: f64 = run.pockets.iter().map(|k| k.width * k.depth).sum();
-    let interior = run.area.width * run.area.depth;
+    let pitch = run.spec.pitch;
+    let (interior, whose) = match run.mode {
+        FitMode::Walls => (run.area.width * run.area.depth, "packing area"),
+        FitMode::Bins => (
+            run.bins.iter().map(|b| b.cells.len() as f64 * pitch * pitch).sum(),
+            "the bins cover",
+        ),
+    };
     heading("Compartments");
     field(
         "hollowed",
         &format!(
-            "{} pocket(s) over {} placement(s), {} of the {} packing area",
+            "{} pocket(s) over {} placement(s), {} of the {} {whose}",
             run.pockets.len(),
             run.result.placements.len(),
             mm2(pocket_area),
@@ -363,10 +417,17 @@ fn dividers(run: &Run) {
     );
     field(
         "walls",
-        &format!(
-            "none -- the cavity is stated, so the {} divider(s) the packer derived stand as material",
-            run.wall_report.generated
-        ),
+        &match run.mode {
+            FitMode::Walls => format!(
+                "none -- the cavity is stated, so the {} divider(s) the packer derived stand as material",
+                run.wall_report.generated
+            ),
+            FitMode::Bins => {
+                "none -- every object has its own bin, so what stands between two \
+                 compartments is that bin's own material"
+                    .to_string()
+            }
+        },
     );
 }
 
@@ -412,7 +473,6 @@ fn rounding(run: &Run) {
 /// fares.
 fn printing(run: &Run) {
     let printer = run.spec.printer;
-    let whole = check_bed_fit(&run.cells, printer, run.spec.pitch);
     heading("Printing");
     field(
         "printer",
@@ -424,15 +484,40 @@ fn printing(run: &Run) {
             mm(f64::from(BED_MARGIN))
         ),
     );
-    field(
-        "whole bin",
-        &format!(
-            "{} x {} mm -- {}",
-            whole.bin_width,
-            whole.bin_depth,
-            if whole.fits { "fits the bed" } else { "too big for the bed" }
-        ),
-    );
+    let (label, whole) = match run.mode {
+        FitMode::Walls => {
+            let fit = check_bed_fit(&run.cells, printer, run.spec.pitch);
+            (
+                "whole bin",
+                format!(
+                    "{} x {} mm -- {}",
+                    fit.bin_width,
+                    fit.bin_depth,
+                    if fit.fits { "fits the bed" } else { "too big for the bed" }
+                ),
+            )
+        }
+        FitMode::Bins => {
+            let cut = run
+                .bins
+                .iter()
+                .filter(|b| !b.split_lines.is_empty())
+                .count();
+            (
+                "bins",
+                format!(
+                    "{} bin(s), one per object -- {}",
+                    run.bins.len(),
+                    if cut == 0 {
+                        "every one prints whole".to_string()
+                    } else {
+                        format!("{cut} of them had to be cut for the bed")
+                    }
+                ),
+            )
+        }
+    };
+    field(label, &whole);
     field(
         "splits",
         &format!(
@@ -621,10 +706,12 @@ fn footprint_mm(solid: &Solid) -> (f64, f64) {
 }
 
 /// Everything worth a second look: rounding that did not land, objects that do
-/// not fit the cavity's depth, instances left unplaced, a baseplate piece the
-/// bed cannot take, the extra pieces staggering the plate's seams cost, a stack
-/// whose two bodies part on one plane after all, and drawer margin big enough to
-/// have been another cell.
+/// not fit the cavity's depth, a baseplate piece the bed cannot take, the extra
+/// pieces staggering the plate's seams cost, a stack whose two bodies part on
+/// one plane after all, and drawer margin big enough to have been another cell.
+///
+/// An instance the packer could not place is **not** here: a run that cannot
+/// hold what it was given fails outright, before anything is built.
 fn warnings(run: &Run) {
     let mut lines: Vec<String> = Vec::new();
     let depth = run.spec.cavity_depth();
@@ -646,14 +733,6 @@ fn warnings(run: &Run) {
             "{} of {} floor fillets could not be built; those inside corners are sharp",
             run.blends.requested - run.blends.made(),
             run.blends.requested
-        ));
-    }
-    let wanted: u32 = run.spec.objects.iter().map(|o| o.pack.quantity).sum();
-    let placed = run.result.placements.len() as u32;
-    if placed < wanted {
-        lines.push(format!(
-            "{} of {wanted} instances did not fit; the bin was built without them",
-            wanted - placed
         ));
     }
     for piece in &run.baseplate {
