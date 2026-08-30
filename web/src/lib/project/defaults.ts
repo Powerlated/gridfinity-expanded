@@ -8,9 +8,9 @@ import type { PackEffort, Project, ProjectObject } from '../types';
  * spent; this table only names it.
  */
 export const PACK_RESTARTS: Record<PackEffort, number> = {
-  quick: 30,
-  standard: 200,
-  thorough: 800,
+  quick: 250,
+  standard: 2_000,
+  thorough: 10_000,
 };
 
 export const PROJECT_DEFAULTS = {

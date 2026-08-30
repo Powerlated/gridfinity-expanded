@@ -13,11 +13,20 @@
 //! `PACK_SEED`, so one drawer and one object list always give one layout. The
 //! caller may spend the budget in chunks (`step`) to report progress, or all at
 //! once (`pack_layout`).
+//!
+//! **Once everything asked for fits, the search is choosing between layouts that
+//! place the same claims and cover the same area**, and what it prefers among
+//! those is the tidiest: `tidy::score` of the finished pass, which is why
+//! `Scored` carries a `Tidiness` and `better` compares it third. That is also
+//! why a restart varies the `Scan` axis as well as the instance order -- scanning
+//! rows then columns can only ever produce row-major layouts, and half the
+//! arrangements worth looking at are the other kind.
 
 use super::rects::{
     ROTATIONS, Rect, Rotation, inflate_parts, normalize_parts, parts_bounds, parts_key, quantize,
     rect_contains, rects_overlap, rotate_parts, translate_parts, union_area,
 };
+use super::tidy::{self, Tidiness};
 use super::walls::{Wall, layout_walls};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -54,11 +63,18 @@ impl PackEffort {
     }
 
     /// How many perturbed instance orders this tier tries after the first.
+    ///
+    /// The budget is an iteration count and never wall-clock, so a drawer and an
+    /// object list always give one layout whatever machine fits them. The
+    /// numbers are large because the objective they are spent on is a *choice*:
+    /// once everything fits, every restart places the same claims over the same
+    /// area and the search is looking for the tidiest arrangement of them, which
+    /// is a search worth actually running.
     pub fn restarts(self) -> usize {
         match self {
-            PackEffort::Quick => 30,
-            PackEffort::Standard => 200,
-            PackEffort::Thorough => 800,
+            PackEffort::Quick => 250,
+            PackEffort::Standard => 2_000,
+            PackEffort::Thorough => 10_000,
         }
     }
 }
@@ -139,8 +155,12 @@ pub struct Placement {
 }
 
 /// A finished layout: every placement, how many of each object were placed, the
-/// dividers those placements imply, and how many restarts were spent reaching
-/// it.
+/// dividers those placements imply, how tidy the result reads, and how many
+/// restarts were spent reaching it.
+///
+/// `tidiness` is the winning pass's own reading, carried rather than recomputed:
+/// it is what the search chose this layout *for*, so a caller re-deriving it
+/// could disagree with the thing that was optimised.
 #[derive(Clone, Debug, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
@@ -149,6 +169,8 @@ pub struct PackResult {
     pub placed_by_object_id: BTreeMap<String, u32>,
     pub iterations: usize,
     pub walls: Vec<Wall>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub tidiness: Tidiness,
 }
 
 /// The mulberry32 generator, bit for bit: a 32-bit state advanced by a fixed
@@ -173,6 +195,62 @@ impl Mulberry32 {
     }
 }
 
+/// How far into the swept rows or columns one pass is willing to start looking,
+/// per instance.
+///
+/// A first fit takes the earliest position that works, so permuting the instance
+/// order is the only thing a restart can change and the layouts it reaches are
+/// all the same shape: everything jammed against the origin in the order it was
+/// considered. Measured on `examples/drawer.toml`, that neighbourhood is
+/// exhausted inside 250 restarts -- 10 000 found nothing 250 had not.
+///
+/// So a pass may also *decline* the first few bands and place an instance
+/// further in, which is what leaves a gap for the next instance of the same
+/// object to sit beside, or lines an edge up with one already placed. Each
+/// instance draws its own skip, most of them zero; `strength` is how jittery
+/// this particular pass is, drawn once for it, so the budget covers passes from
+/// pure bottom-left greed to thoroughly perturbed.
+///
+/// The draws come from a generator seeded from the restart index alone, so a
+/// pass is a function of its index and nothing about how many draws the passes
+/// before it made can move it.
+struct Jitter {
+    random: Mulberry32,
+    strength: f64,
+}
+
+/// The most bands an instance is ever asked to skip. Three is enough to step
+/// past a neighbour and leave room beside it; more and the pass stops being a
+/// packing at all.
+const MAX_SKIP: f64 = 3.0;
+
+impl Jitter {
+    /// The jitter for restart `index`: its own generator, and a strength drawn
+    /// from it, so restarts range from greedy to heavily perturbed.
+    fn for_restart(index: usize) -> Jitter {
+        let mut random = Mulberry32::new(PACK_SEED ^ (index as u32).wrapping_mul(0x9e37_79b9));
+        let strength = random.next() * random.next();
+        Jitter { random, strength }
+    }
+
+    /// No jitter at all: the plain bottom-left first fit, which is what the
+    /// greedy pass every search starts from must be.
+    fn none() -> Jitter {
+        Jitter {
+            random: Mulberry32::new(PACK_SEED),
+            strength: 0.0,
+        }
+    }
+
+    /// How many bands the next instance declines before it starts looking.
+    fn skip(&mut self) -> usize {
+        if self.strength <= 0.0 || self.random.next() >= self.strength {
+            return 0;
+        }
+        1 + (self.random.next() * MAX_SKIP).floor() as usize
+    }
+}
+
 /// One rotation of one object's claim: the turn, the turned boxes normalised to
 /// the origin, and their bounding box.
 #[derive(Clone, Debug)]
@@ -193,6 +271,48 @@ struct Instance {
     area: f64,
 }
 
+/// Which way one pass sweeps the candidate positions: rows first and then
+/// columns along each row, or columns first and then rows down each column.
+///
+/// A first fit is "first" in the order it scans, so the scan *is* the layout's
+/// grain: `Rows` fills the drawer in bands across it and `Columns` in bands down
+/// it, and no permutation of the instance order turns one into the other. The
+/// first greedy pass is always `Rows`, so the pass every effort tier starts from
+/// is the one it always was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scan {
+    Rows,
+    Columns,
+}
+
+impl Scan {
+    /// The attempt's coordinate along the axis this scan sweeps first, which is
+    /// the one an earlier position must beat outright.
+    fn outer_of(self, attempt: &Attempt) -> f64 {
+        match self {
+            Scan::Rows => attempt.y,
+            Scan::Columns => attempt.x,
+        }
+    }
+
+    /// The attempt's coordinate along the axis this scan sweeps second, which
+    /// breaks ties along the first.
+    fn inner_of(self, attempt: &Attempt) -> f64 {
+        match self {
+            Scan::Rows => attempt.x,
+            Scan::Columns => attempt.y,
+        }
+    }
+
+    /// The `(x, y)` a pair of swept coordinates names.
+    fn position(self, outer: f64, inner: f64) -> (f64, f64) {
+        match self {
+            Scan::Rows => (inner, outer),
+            Scan::Columns => (outer, inner),
+        }
+    }
+}
+
 /// A candidate placement found for one instance: its boxes already in drawer
 /// coordinates, the turn they are at, and the position that put them there.
 #[derive(Clone, Debug)]
@@ -204,12 +324,21 @@ struct Attempt {
 }
 
 /// One completed pass over one instance order: the placements it made, how much
-/// claim area they cover, and how far from the origin they sit in total.
+/// claim area they cover, how the finished layout reads, and how far from the
+/// origin they sit in total.
+///
+/// `area` and `spread` accumulate as the pass places, which is what keeps a pass
+/// linear in its instances. `tidiness` cannot: every one of its terms is a
+/// property of the *whole* arrangement, so it is measured once, on the finished
+/// layout, in `pack_once` -- never per placement, and never again by a caller
+/// re-measuring what the search already decided.
 #[derive(Clone, Debug, Default)]
 struct Scored {
     placements: Vec<Placement>,
     area: f64,
     spread: f64,
+    tidiness: Tidiness,
+    score: f64,
 }
 
 /// The distinct rotations of one object's claim, deduplicated by shape so a
@@ -282,11 +411,24 @@ fn candidate_axis(base: f64, limit: f64, edges: &[f64], offsets: &[f64]) -> Vec<
     values
 }
 
-/// The first position, scanning y then x, where this rotation of the claim fits
-/// inside `area` without overlapping anything already placed -- or `None`. When
-/// `best` is given the scan is pruned to positions strictly earlier than it, so
-/// a later rotation only ever returns an improvement.
-fn first_fit(shape: &Shape, placed: &[Rect], area: &Rect, best: Option<&Attempt>) -> Option<Attempt> {
+/// The first position, scanning as `scan` says and starting `skip` bands in,
+/// where this rotation of the claim fits inside `area` without overlapping
+/// anything already placed -- or `None`. When `best` is given the scan is pruned
+/// to positions strictly earlier than it, so a later rotation only ever returns
+/// an improvement.
+///
+/// `skip` restricts the candidate set rather than changing what is chosen from
+/// it: each rotation still returns *its* earliest admissible position, which is
+/// what keeps the pruning against `best` sound. It is clamped to the last band,
+/// so a large skip narrows the search rather than emptying it.
+fn first_fit(
+    shape: &Shape,
+    placed: &[Rect],
+    area: &Rect,
+    best: Option<&Attempt>,
+    scan: Scan,
+    skip: usize,
+) -> Option<Attempt> {
     let limit_x = quantize(area.right() - shape.bounds.width);
     let limit_y = quantize(area.bottom() - shape.bounds.depth);
     if limit_x < area.x || limit_y < area.y {
@@ -316,15 +458,20 @@ fn first_fit(shape: &Shape, placed: &[Rect], area: &Rect, best: Option<&Attempt>
              all: {axis:?}"
         );
     }
-    for y in ys {
-        if best.is_some_and(|b| y > b.y) {
+    let (outer, inner) = match scan {
+        Scan::Rows => (&ys, &xs),
+        Scan::Columns => (&xs, &ys),
+    };
+    for first in outer.iter().skip(skip.min(outer.len() - 1)) {
+        if best.is_some_and(|b| *first > scan.outer_of(b)) {
             break;
         }
-        for x in &xs {
-            if best.is_some_and(|b| y == b.y && *x >= b.x) {
+        for second in inner {
+            if best.is_some_and(|b| *first == scan.outer_of(b) && *second >= scan.inner_of(b)) {
                 break;
             }
-            let parts = translate_parts(&shape.parts, *x, y);
+            let (x, y) = scan.position(*first, *second);
+            let parts = translate_parts(&shape.parts, x, y);
             if parts.iter().any(|part| !rect_contains(area, part)) {
                 continue;
             }
@@ -337,7 +484,7 @@ fn first_fit(shape: &Shape, placed: &[Rect], area: &Rect, best: Option<&Attempt>
             return Some(Attempt {
                 parts,
                 rotation: shape.rotation,
-                x: *x,
+                x,
                 y,
             });
         }
@@ -347,10 +494,16 @@ fn first_fit(shape: &Shape, placed: &[Rect], area: &Rect, best: Option<&Attempt>
 
 /// The earliest position any of the instance's rotations fits at, or `None` when
 /// none of them fits at all.
-fn place_instance(instance: &Instance, placed: &[Rect], area: &Rect) -> Option<Attempt> {
+fn place_instance(
+    instance: &Instance,
+    placed: &[Rect],
+    area: &Rect,
+    scan: Scan,
+    skip: usize,
+) -> Option<Attempt> {
     let mut best: Option<Attempt> = None;
     for shape in &instance.shapes {
-        if let Some(found) = first_fit(shape, placed, area, best.as_ref()) {
+        if let Some(found) = first_fit(shape, placed, area, best.as_ref(), scan, skip) {
             best = Some(found);
         }
     }
@@ -360,7 +513,7 @@ fn place_instance(instance: &Instance, placed: &[Rect], area: &Rect) -> Option<A
 /// One greedy pass in the given order: each instance placed at its earliest fit,
 /// and once one instance of a claim shape does not fit, every later instance of
 /// that same shape is skipped rather than retried.
-fn pack_once(order: &[Instance], area: &Rect) -> Scored {
+fn pack_once(order: &[Instance], area: &Rect, scan: Scan, jitter: &mut Jitter) -> Scored {
     let mut placed: Vec<Rect> = Vec::new();
     let mut placements: Vec<Placement> = Vec::new();
     let mut blocked: BTreeSet<&str> = BTreeSet::new();
@@ -369,7 +522,7 @@ fn pack_once(order: &[Instance], area: &Rect) -> Scored {
         if blocked.contains(instance.key.as_str()) {
             continue;
         }
-        let Some(attempt) = place_instance(instance, &placed, area) else {
+        let Some(attempt) = place_instance(instance, &placed, area, scan, jitter.skip()) else {
             blocked.insert(instance.key.as_str());
             continue;
         };
@@ -397,18 +550,41 @@ fn pack_once(order: &[Instance], area: &Rect) -> Scored {
         scored.area += instance.area;
         scored.spread += attempt.x + attempt.y;
     }
+    scored.tidiness = tidy::tidiness(&placements, area);
+    scored.score = tidy::score(&scored.tidiness);
     scored.placements = placements;
     scored
 }
 
 /// Whether the candidate pass beats the incumbent: more instances placed first,
-/// then more claim area, then packed closer to the origin.
+/// then more claim area, then the tidier layout, then packed closer to the
+/// origin.
+///
+/// The first two are absolute, so **a prettier layout can never cost a placed
+/// object**: tidiness decides only among arrangements that fit the same things.
+/// That is the common case rather than the rare one -- a drawer everything fits
+/// in ties on both of the first two keys at every restart -- which is what makes
+/// the third key the one the budget is really spent on. `spread` survives as the
+/// last tie-break, so two layouts the objective cannot tell apart still resolve
+/// the same way every run.
+///
+/// **The area key is compared quantised, and must be.** A pass accumulates its
+/// area as it places, so two passes placing the same claims in a different order
+/// reach the same total by different additions and can differ in the last bit --
+/// 121146.20680000001 against 121146.20680000003 on a drawer of eight objects.
+/// That is not a difference in what was placed, and an exact comparison lets it
+/// decide: the area key fires on a tie it should have passed over, and every key
+/// after it is unreachable. It cost the tidiest layout of that drawer at restart
+/// 1431, which is how it was found.
 fn better(candidate: &Scored, incumbent: &Scored) -> bool {
     if candidate.placements.len() != incumbent.placements.len() {
         return candidate.placements.len() > incumbent.placements.len();
     }
-    if candidate.area != incumbent.area {
+    if quantize(candidate.area) != quantize(incumbent.area) {
         return candidate.area > incumbent.area;
+    }
+    if candidate.score != incumbent.score {
+        return candidate.score < incumbent.score;
     }
     candidate.spread < incumbent.spread
 }
@@ -472,7 +648,7 @@ impl PackSearch {
         } else {
             input.effort.restarts()
         };
-        let best = pack_once(&order, &input.area);
+        let best = pack_once(&order, &input.area, Scan::Rows, &mut Jitter::none());
         PackSearch {
             input,
             order,
@@ -501,7 +677,9 @@ impl PackSearch {
         while self.done < until {
             self.done += 1;
             let candidate_order = perturb(&self.order, &mut self.random, self.stagnation);
-            let scored = pack_once(&candidate_order, &self.input.area);
+            let scan = if self.random.next() < 0.5 { Scan::Rows } else { Scan::Columns };
+            let mut jitter = Jitter::for_restart(self.done);
+            let scored = pack_once(&candidate_order, &self.input.area, scan, &mut jitter);
             if better(&scored, &self.best) {
                 self.best = scored;
                 self.order = candidate_order;
@@ -530,6 +708,7 @@ impl PackSearch {
             placements: self.best.placements.clone(),
             placed_by_object_id,
             iterations: self.done,
+            tidiness: self.best.tidiness,
             walls: layout_walls(
                 &self.best.placements,
                 &self.input.area,
@@ -727,5 +906,131 @@ mod tests {
             );
         }
         assert_ne!(draws[0], draws[1], "the generator repeated its first draw");
+    }
+
+    /// The eight objects of `examples/ikea-alex-drawer-1.toml`, in a packing
+    /// area of that drawer's size: the layout this objective was built for, and
+    /// big enough that the search has real choices to make.
+    fn ikea_drawer() -> PackInput {
+        PackInput {
+            area: Rect::new(6.5, 6.5, 277.1, 517.1),
+            objects: vec![
+                object("glue", 45.0, 120.0, 1),
+                object("knife", 114.0, 32.0, 1),
+                object("calipers", 90.0, 250.0, 1),
+                object("files", 100.0, 380.0, 1),
+                object("batteries", 45.0, 124.0, 1),
+                object("epoxy", 45.0, 170.0, 1),
+                object("tape measure", 80.0, 85.0, 1),
+                object("level", 53.3, 233.7, 1),
+            ],
+            divider_thickness: 1.2,
+            clearance: 2.0,
+            floor_fillet: 2.08,
+            effort: PackEffort::Thorough,
+        }
+    }
+
+    /// Spending more of the budget can only improve the answer, by the
+    /// objective's own ordering.
+    ///
+    /// Stated as `better` rather than as a falling score, because the score is
+    /// only the *third* key: a restart that places an instance the incumbent
+    /// could not legitimately takes a worse-looking layout, and must. What may
+    /// never happen is the search ending on something a shorter run of the same
+    /// search would have beaten.
+    ///
+    /// This is the test that caught the area key comparing unquantised: at
+    /// restart 1431 of this very drawer a layout scoring 1.14 displaced one
+    /// scoring 0.80, because their accumulated areas differed by one ulp.
+    #[test]
+    fn a_longer_search_is_never_beaten_by_a_shorter_one() {
+        let mut search = PackSearch::new(ikea_drawer());
+        let mut best_so_far = search.best.clone();
+        let mut improved = 0;
+        while search.step(1) {
+            assert!(
+                !better(&best_so_far, &search.best),
+                "restart {} replaced a layout the objective prefers: {} placed scoring {} \
+                 became {} placed scoring {}",
+                search.done(),
+                best_so_far.placements.len(),
+                best_so_far.score,
+                search.best.placements.len(),
+                search.best.score
+            );
+            if better(&search.best, &best_so_far) {
+                improved += 1;
+                best_so_far = search.best.clone();
+            }
+        }
+        assert!(
+            improved > 0,
+            "the search never improved on its first greedy pass, so it is not searching"
+        );
+    }
+
+    /// The whole point of the tidiness key: on a drawer everything fits in, the
+    /// budget buys a tidier layout and nothing else.
+    ///
+    /// The area is the ikea drawer's grown until the greedy pass places all
+    /// eight, which the test asserts before it asserts anything else -- with an
+    /// instance left over, the search would be improving the *placement* count
+    /// and the comparison would say nothing about tidiness.
+    #[test]
+    fn searching_a_drawer_everything_fits_in_buys_a_tidier_layout() {
+        let input = PackInput {
+            area: Rect::new(6.5, 6.5, 320.0, 560.0),
+            ..ikea_drawer()
+        };
+        let first = PackSearch::new(input.clone()).result();
+        assert_eq!(
+            first.placements.len(),
+            input.objects.len(),
+            "the fixture must fit greedily, or the search is buying placements and not tidiness"
+        );
+        let settled = pack_layout(input);
+        assert_eq!(
+            first.placements.len(),
+            settled.placements.len(),
+            "everything fits either way, so the search is choosing on tidiness alone"
+        );
+        assert!(
+            tidy::score(&settled.tidiness) < tidy::score(&first.tidiness),
+            "the search settled on {:?}, which is no tidier than the greedy pass's {:?}",
+            settled.tidiness,
+            first.tidiness
+        );
+    }
+
+    /// A pass may only sweep rows first or columns first, and the two reach
+    /// different layouts -- which is why a restart varies it. Without this the
+    /// budget only ever buys permutations of one grain.
+    #[test]
+    fn the_two_scan_axes_reach_different_layouts() {
+        let input = ikea_drawer();
+        let order = {
+            let mut order = build_instances(&input.objects, input.margin());
+            order.sort_by(|a, b| b.area.total_cmp(&a.area).then_with(|| a.object_id.cmp(&b.object_id)));
+            order
+        };
+        let rows = pack_once(&order, &input.area, Scan::Rows, &mut Jitter::none());
+        let columns = pack_once(&order, &input.area, Scan::Columns, &mut Jitter::none());
+        assert_ne!(
+            rows.placements, columns.placements,
+            "one instance order packed both ways gave the same layout, so the scan axis is not \
+             reaching anything the other does not"
+        );
+        for pass in [&rows, &columns] {
+            for placement in &pass.placements {
+                for part in &placement.parts {
+                    assert!(
+                        rect_contains(&input.area, part),
+                        "a column-major pass placed {part:?} outside {:?}",
+                        input.area
+                    );
+                }
+            }
+        }
     }
 }

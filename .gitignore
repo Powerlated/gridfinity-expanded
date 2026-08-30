@@ -38,3 +38,6 @@ xt-ladder/
 # Claude Code session transcripts
 session-*.md
 [0-9]*-commit.txt
+
+# Fits written by `cargo run -- optimize ... -o optimize-out`
+optimize-out/

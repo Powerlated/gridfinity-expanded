@@ -73,10 +73,28 @@ export interface Placement {
   parts: Rect[];
 }
 
+/**
+ * How a finished layout reads, term by term, each a fraction in 0..=1 with 0 the
+ * tidiest: unshared divider lines and runs, leftover broken into pieces, leftover
+ * too narrow to hold anything, instances of one object standing apart, and the
+ * layout's centre of area off the drawer's. The packer minimises their weighted
+ * sum once everything asked for fits, and carries the winning reading back rather
+ * than leaving it to be recomputed.
+ */
+export interface Tidiness {
+  lines: number;
+  runs: number;
+  fragments: number;
+  slivers: number;
+  grouping: number;
+  balance: number;
+}
+
 export interface PackResult {
   placements: Placement[];
   placedByObjectId: Record<string, number>;
   iterations: number;
+  tidiness: Tidiness;
   /**
    * The dividers these placements imply, derived by the Rust packer alongside
    * them. They arrive with the result rather than being recomputed here because

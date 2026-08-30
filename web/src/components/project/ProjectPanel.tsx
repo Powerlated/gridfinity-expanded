@@ -168,8 +168,10 @@ export function ProjectPanel() {
               }))}
             />
             <Hint>
-              {PACK_RESTARTS[packEffort]} attempts. The search is seeded, so the same drawer
-              and objects always produce the same layout.
+              {PACK_RESTARTS[packEffort].toLocaleString()} attempts. Every one that fits the
+              same objects is judged on how the layout reads &mdash; shared divider lines,
+              leftover in one block, objects of a kind together. The search is seeded, so the
+              same drawer and objects always produce the same layout.
             </Hint>
             <Group gap="xs" wrap="nowrap">
               <Button

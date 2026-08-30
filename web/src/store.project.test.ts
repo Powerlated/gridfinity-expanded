@@ -33,6 +33,7 @@ function stubLayout(): PackResult {
     ],
     placedByObjectId: { [objectId]: 2 },
     iterations: 30,
+    tidiness: { lines: 0, runs: 0, fragments: 0, slivers: 0, grouping: 0, balance: 0 },
     walls: [
       { start: { x: 61.45, y: 0.85 }, end: { x: 61.45, y: 42.05 }, width: 1.2 },
       { start: { x: 0.85, y: 41.45 }, end: { x: 122.05, y: 41.45 }, width: 1.2 },

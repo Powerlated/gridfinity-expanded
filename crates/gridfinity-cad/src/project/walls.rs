@@ -62,7 +62,12 @@ impl Wall {
 
 /// Whether the run lies on the packing area's own edge, where the bin's
 /// perimeter wall already stands.
-fn on_area_boundary(segment: &Segment, area: &Rect) -> bool {
+///
+/// `tidy` asks the same question of the same runs, because the divider set this
+/// module derives is the thing the viewer sees and so is the thing tidiness is
+/// measured on; two spellings of "this run is the perimeter" would let the two
+/// disagree about which boundary counts.
+pub(super) fn on_area_boundary(segment: &Segment, area: &Rect) -> bool {
     let coordinate = quantize(segment.coordinate);
     match segment.orientation {
         Orientation::V => coordinate == quantize(area.x) || coordinate == quantize(area.right()),

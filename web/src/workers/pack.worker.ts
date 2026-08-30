@@ -5,7 +5,24 @@ import { createPackSearch, initKernel } from '../lib/geometry/kernel';
 import type { PackSearch } from '../lib/geometry/kernel';
 import type { PackRequest, PackResponse } from '../lib/types';
 
-const CHUNK_ITERATIONS = 8;
+/**
+ * How many progress updates one search reports, whatever its budget.
+ *
+ * The chunk used to be a flat eight restarts, which was a fraction of the budget
+ * when the budget was 200 and is a thousandth of it now. Every chunk costs a
+ * macrotask the browser clamps and a whole `PackResult` posted back, so a fixed
+ * chunk turns a bigger budget into scheduling rather than packing. A share of the
+ * budget keeps the progress bar moving at the same rate it always did.
+ */
+const PROGRESS_UPDATES = 25;
+
+/** The smallest chunk worth a round trip, for a budget too small to divide. */
+const MIN_CHUNK_ITERATIONS = 8;
+
+/** How many restarts to spend between progress reports for this search. */
+function chunkFor(search: PackSearch): number {
+  return Math.max(MIN_CHUNK_ITERATIONS, Math.ceil(search.total / PROGRESS_UPDATES));
+}
 
 const kernelReady = initKernel(wasmUrl);
 
@@ -33,7 +50,7 @@ function run(revision: number) {
   const { search } = current;
   let more: boolean;
   try {
-    more = search.step(CHUNK_ITERATIONS);
+    more = search.step(chunkFor(search));
   } catch {
     fail(revision);
     return;

@@ -43,6 +43,7 @@ use gridfinity_cad::project::rects::{
     Rect, Rotation, inflate_parts, parts_bounds, rects_overlap, rotate_parts, translate_parts,
     union_area,
 };
+use gridfinity_cad::project::tidy::tidiness;
 use gridfinity_cad::project::walls::{WallReport, layout_walls_reporting};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -867,13 +868,14 @@ fn plan_bins(spec: &Spec, grid: DrawerGrid, floor_fillet: f64) -> Result<Plan, S
         plans.push(plan);
     }
 
+    let drawer = Rect::new(
+        0.0,
+        0.0,
+        f64::from(grid.cols) * spec.pitch,
+        f64::from(grid.rows) * spec.pitch,
+    );
     let outer = pack_layout(PackInput {
-        area: Rect::new(
-            0.0,
-            0.0,
-            f64::from(grid.cols) * spec.pitch,
-            f64::from(grid.rows) * spec.pitch,
-        ),
+        area: drawer,
         objects: plans
             .iter()
             .map(|plan| PackObject {
@@ -950,6 +952,7 @@ fn plan_bins(spec: &Spec, grid: DrawerGrid, floor_fillet: f64) -> Result<Plan, S
 
     Ok(Plan {
         result: PackResult {
+            tidiness: tidiness(&placements, &drawer),
             placements,
             placed_by_object_id,
             iterations,

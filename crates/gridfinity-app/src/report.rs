@@ -13,6 +13,7 @@
 
 use crate::export::{Contents, Written};
 use crate::optimize::{FitMode, Run};
+use gridfinity_cad::project::tidy::score as layout_score;
 use gridfinity_cad::layout::{Axis, GridFootprint, Piece, SplitLine};
 use gridfinity_cad::printers::{BED_MARGIN, PrinterProfile, check_bed_fit};
 use gridfinity_cad::kernel::topo::Solid;
@@ -268,6 +269,7 @@ fn packing(run: &Run) {
             percent(claimed_area, area)
         ),
     );
+    tidiness(run);
     let margin = run.claim_margin;
     let mut any = false;
     for object in &run.spec.objects {
@@ -296,6 +298,31 @@ fn packing(run: &Run) {
     if !any && wanted > 0 {
         field("unplaced", "none -- everything asked for fits");
     }
+}
+
+/// How the layout the search settled on reads, as the score it was chosen for and
+/// the six terms behind it.
+///
+/// Every term is a fraction of its own worst case with 0 the tidiest, so they
+/// print as percentages and the score is their weighted sum. Read off the
+/// `PackResult`, which carries the winning pass's own reading: the number here
+/// is the number the search minimised, not a second opinion about the layout.
+fn tidiness(run: &Run) {
+    let t = &run.result.tidiness;
+    field(
+        "tidiness",
+        &format!(
+            "{:.3} (unshared lines {}, runs {}, leftover in pieces {}, slivers {}, \
+             objects apart {}, off centre {})",
+            layout_score(t),
+            percent(t.lines, 1.0),
+            percent(t.runs, 1.0),
+            percent(t.fragments, 1.0),
+            percent(t.slivers, 1.0),
+            percent(t.grouping, 1.0),
+            percent(t.balance, 1.0)
+        ),
+    );
 }
 
 /// Where every instance ended up: the compartment interior it was given, in the

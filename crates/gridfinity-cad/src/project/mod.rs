@@ -3,7 +3,8 @@
 //! compartments, out.
 //!
 //! The pipeline is `drawer` -> `pack` -> `walls`, over the plan geometry in
-//! `rects`. `drawer` decides how many cells the drawer holds and which rectangle
+//! `rects`, with `tidy` scoring how a finished layout reads so the search has
+//! something to prefer once everything asked for fits. `drawer` decides how many cells the drawer holds and which rectangle
 //! inside the resulting bin may be filled; `pack` places every object instance
 //! inside that rectangle as a claim inflated by its clearance and half a
 //! divider; `walls` turns the boundaries between those claims into ordinary
@@ -14,9 +15,11 @@
 pub mod drawer;
 pub mod pack;
 pub mod rects;
+pub mod tidy;
 pub mod walls;
 
 pub use drawer::{DrawerGrid, MAX_GRID, drawer_cells, drawer_grid, max_drawer_mm, min_drawer_mm, packing_area, packing_inset};
 pub use pack::{PackEffort, PackInput, PackObject, PackResult, PackSearch, Placement, pack_layout};
 pub use rects::{Rect, Rotation, parts_bounds, parts_connected, union_area};
+pub use tidy::{Tidiness, tidiness};
 pub use walls::{MIN_GENERATED_WALL_LENGTH, Point2, Wall, WallReport, layout_walls, layout_walls_reporting};
