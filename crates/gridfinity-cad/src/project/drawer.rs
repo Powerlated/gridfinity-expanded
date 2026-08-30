@@ -114,6 +114,41 @@ pub fn packing_area(grid: DrawerGrid, perimeter_thickness: f64, pitch: f64) -> R
     area
 }
 
+/// The cavity of a bin standing on `cells`, as the rectangles whose union it is:
+/// each cell's own square, drawn back by `inset` on every side whose neighbour is
+/// not a cell of the bin.
+///
+/// No inset on a shared side, so the squares abut across the interior and the
+/// union is one region rather than a grid of separate pockets. A side with no
+/// neighbour is a side where the bin's outline stands, and the perimeter wall
+/// plus its clearance -- which is what `inset` is -- stands inside it, so the
+/// union is exactly the space a compartment may occupy. For a full `cols x rows`
+/// rectangle of cells that union is `packing_area` itself, which the tests pin:
+/// the two must not drift, one being the other's rectangular case.
+pub fn cavity_region(cells: &[GridCell], pitch: f64, inset: f64) -> Vec<Rect> {
+    assert!(pitch > 0.0, "a grid pitch is a positive number of millimetres, not {pitch}");
+    assert!(
+        inset >= 0.0 && inset * 2.0 < pitch,
+        "a {inset} mm perimeter inset leaves no cavity in a {pitch} mm cell"
+    );
+    let held = |x: i32, y: i32| cells.contains(&GridCell { x, y });
+    cells
+        .iter()
+        .map(|cell| {
+            let west = if held(cell.x - 1, cell.y) { 0.0 } else { inset };
+            let east = if held(cell.x + 1, cell.y) { 0.0 } else { inset };
+            let south = if held(cell.x, cell.y - 1) { 0.0 } else { inset };
+            let north = if held(cell.x, cell.y + 1) { 0.0 } else { inset };
+            Rect::new(
+                f64::from(cell.x) * pitch + west,
+                f64::from(cell.y) * pitch + south,
+                pitch - west - east,
+                pitch - south - north,
+            )
+        })
+        .collect()
+}
+
 /// The grid spelled out as the bin's cell set, row by row from the origin.
 pub fn drawer_cells(grid: DrawerGrid) -> Vec<GridCell> {
     let mut cells = Vec::with_capacity((grid.cols * grid.rows) as usize);
@@ -129,6 +164,46 @@ pub fn drawer_cells(grid: DrawerGrid) -> Vec<GridCell> {
 mod tests {
     use super::*;
     use crate::gridfinity::GRID_PITCH;
+
+    /// A full rectangle of cells has `packing_area` for its cavity: every
+    /// interior side is shared and takes no inset, so the squares merge into the
+    /// one rectangle the packer is handed.
+    #[test]
+    fn a_rectangle_of_cells_is_the_packing_area() {
+        let grid = drawer_grid(300.0, 210.0, MAX_GRID, GRID_PITCH);
+        let region = cavity_region(&drawer_cells(grid), GRID_PITCH, packing_inset(1.2));
+        let area = packing_area(grid, 1.2, GRID_PITCH);
+        let bounds = super::super::rects::parts_bounds(&region);
+        assert!(
+            (bounds.x - area.x).abs() < 1e-9
+                && (bounds.y - area.y).abs() < 1e-9
+                && (bounds.width - area.width).abs() < 1e-9
+                && (bounds.depth - area.depth).abs() < 1e-9,
+            "the cavity of a full rectangle of cells spans {bounds:?}, not its packing area {area:?}"
+        );
+        let covered: f64 = super::super::rects::union_area(&region);
+        assert!(
+            (covered - area.area()).abs() < 1e-6,
+            "the cavity of a {} x {} cell bin is {covered} mm2 where its packing area is {} mm2",
+            grid.cols,
+            grid.rows,
+            area.area()
+        );
+    }
+
+    /// A cell with no neighbour on a side is drawn back from it by the whole
+    /// inset, and a cell that has one is not, which is what makes the two
+    /// squares of an arm one span rather than two pockets.
+    #[test]
+    fn a_shared_side_carries_no_inset() {
+        let cells = [GridCell { x: 0, y: 0 }, GridCell { x: 1, y: 0 }];
+        let region = cavity_region(&cells, GRID_PITCH, 1.45);
+        assert_eq!(region[0], Rect::new(1.45, 1.45, GRID_PITCH - 1.45, GRID_PITCH - 2.9));
+        assert_eq!(
+            region[1],
+            Rect::new(GRID_PITCH, 1.45, GRID_PITCH - 1.45, GRID_PITCH - 2.9)
+        );
+    }
 
     /// A drawer measured in cells of half the standard pitch: the same 400 mm
     /// holds twice as many.

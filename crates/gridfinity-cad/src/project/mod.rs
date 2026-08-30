@@ -7,19 +7,22 @@
 //! something to prefer once everything asked for fits. `drawer` decides how many cells the drawer holds and which rectangle
 //! inside the resulting bin may be filled; `pack` places every object instance
 //! inside that rectangle as a claim inflated by its clearance and half a
-//! divider; `walls` turns the boundaries between those claims into ordinary
-//! free-form inner walls. Nothing here touches the kernel -- the result is a
+//! divider; `settle` tidies the finished layout, absorbing leftover too narrow
+//! to be worth keeping and evening out the rest; `walls` turns the boundaries
+//! between those claims into ordinary free-form inner walls. Nothing here touches the kernel -- the result is a
 //! `Params` a caller assembles, and the drawer is one bin whose compartments are
 //! divided by `InnerWall`s like any other.
 
 pub mod drawer;
 pub mod pack;
 pub mod rects;
+pub mod settle;
 pub mod tidy;
 pub mod walls;
 
-pub use drawer::{DrawerGrid, MAX_GRID, drawer_cells, drawer_grid, max_drawer_mm, min_drawer_mm, packing_area, packing_inset};
+pub use drawer::{DrawerGrid, MAX_GRID, cavity_region, drawer_cells, drawer_grid, max_drawer_mm, min_drawer_mm, packing_area, packing_inset};
 pub use pack::{PackEffort, PackInput, PackObject, PackResult, PackSearch, Placement, pack_layout};
 pub use rects::{Rect, Rotation, parts_bounds, parts_connected, union_area};
+pub use settle::{Settle, Settled, settle};
 pub use tidy::{Tidiness, tidiness};
 pub use walls::{MIN_GENERATED_WALL_LENGTH, Point2, Wall, WallReport, layout_walls, layout_walls_reporting};

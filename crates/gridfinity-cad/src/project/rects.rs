@@ -148,6 +148,61 @@ pub fn rect_contains(outer: &Rect, inner: &Rect) -> bool {
         && inner.bottom() <= outer.bottom()
 }
 
+/// Whether every point of `inner` lies in the union of `cover`, touching allowed
+/// on any side.
+///
+/// A union rather than a single box, because the region a claim must stay inside
+/// is a bin's cavity and a bin's cells are a polyomino. The test is exact: the
+/// two lists' own edges cut `inner` into a lattice whose every cell lies wholly
+/// inside a member of `cover` or wholly outside all of them, so asking each
+/// cell's centre answers for the cell.
+pub fn rect_covered_by(inner: &Rect, cover: &[Rect]) -> bool {
+    if inner.width <= 0.0 || inner.depth <= 0.0 {
+        return true;
+    }
+    let cut = |lo: f64, hi: f64, edges: Vec<f64>| -> Vec<f64> {
+        let mut out: Vec<f64> = edges
+            .into_iter()
+            .map(quantize)
+            .filter(|v| *v > lo && *v < hi)
+            .collect();
+        out.push(lo);
+        out.push(hi);
+        out.sort_by(f64::total_cmp);
+        out.dedup();
+        out
+    };
+    let xs = cut(
+        quantize(inner.x),
+        inner.right(),
+        cover.iter().flat_map(|r| [r.x, r.right()]).collect(),
+    );
+    let ys = cut(
+        quantize(inner.y),
+        inner.bottom(),
+        cover.iter().flat_map(|r| [r.y, r.bottom()]).collect(),
+    );
+    assert!(
+        xs.len() >= 2 && ys.len() >= 2,
+        "a box of positive extent cuts into at least one lattice cell, but {inner:?} cut into none"
+    );
+    for row in 0..ys.len() - 1 {
+        for col in 0..xs.len() - 1 {
+            let mid = (
+                (xs[col] + xs[col + 1]) / 2.0,
+                (ys[row] + ys[row + 1]) / 2.0,
+            );
+            let held = cover.iter().any(|r| {
+                r.x <= mid.0 && mid.0 <= r.right() && r.y <= mid.1 && mid.1 <= r.bottom()
+            });
+            if !held {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// The smallest box containing every part, or a zero box for an empty part list.
 pub fn parts_bounds(parts: &[Rect]) -> Rect {
     if parts.is_empty() {

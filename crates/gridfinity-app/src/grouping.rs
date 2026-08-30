@@ -19,11 +19,12 @@ use crate::input::{Object, Spec};
 use crate::optimize::{cell_rect, claim_input};
 use gridfinity_cad::layout::{GridCell, GridFootprint, compartments};
 use gridfinity_cad::printers::compute_auto_split_lines;
-use gridfinity_cad::project::drawer::{DrawerGrid, packing_area, packing_inset};
+use gridfinity_cad::project::drawer::{DrawerGrid, cavity_region, packing_area, packing_inset};
 use gridfinity_cad::project::pack::{
     PackEffort, PackInput, PackObject, PackResult, Placement, pack_layout,
 };
 use gridfinity_cad::project::rects::{Rect, inflate_parts, rects_overlap, union_area};
+use gridfinity_cad::project::settle::{Settle, settle};
 use std::collections::BTreeMap;
 
 /// Every term of a grouping is priced in **cells**, and these are the prices.
@@ -100,6 +101,10 @@ pub struct GroupPlan {
     pub cells: Vec<GridCell>,
     pub placements: Vec<Placement>,
     pub iterations: usize,
+    /// What settling the bin's own layout took: free bands absorbed into the
+    /// compartments facing them, and slabs whose slack was evened out.
+    pub absorbed: usize,
+    pub evened: usize,
 }
 
 impl GroupPlan {
@@ -178,7 +183,12 @@ fn footprint_cells(
 }
 
 /// The smallest bin that holds every instance of every object of one group, and
-/// where those instances sit inside it.
+/// where those instances sit inside it, settled.
+///
+/// The layout is settled against the bin's own cavity *after* the footprint is
+/// trimmed, never before: `footprint_cells` drops the cells no claim reaches,
+/// and settling first would let a grown claim reach into a cell that was about
+/// to be dropped, costing an L-shaped object its L-shaped bin.
 ///
 /// The size search runs at `PackEffort::Quick` and the chosen size is then packed
 /// at `effort`, which cannot place fewer: `PackSearch::new` runs the same greedy
@@ -243,17 +253,28 @@ pub fn plan_group_bin(
     );
     let mut ids: Vec<String> = objects.iter().map(|o| o.pack.id.clone()).collect();
     ids.sort();
+    let cells = footprint_cells(
+        &result.placements,
+        cols,
+        rows,
+        spec.pitch,
+        packing_inset(spec.wall_thickness),
+    );
+    let cavity = cavity_region(&cells, spec.pitch, packing_inset(spec.wall_thickness));
+    let settled = settle(
+        &result.placements,
+        &cavity,
+        Settle {
+            absorb: spec.tidy_absorb,
+        },
+    );
     Ok(GroupPlan {
         objects: ids,
-        cells: footprint_cells(
-            &result.placements,
-            cols,
-            rows,
-            spec.pitch,
-            packing_inset(spec.wall_thickness),
-        ),
-        placements: result.placements,
+        cells,
+        placements: settled.placements,
         iterations: result.iterations,
+        absorbed: settled.absorbed,
+        evened: settled.evened,
     })
 }
 
@@ -511,7 +532,7 @@ fn evaluate(partition: &[Vec<String>], plans: &mut Plans) -> Option<Candidate> {
 }
 
 /// One partition with two of its groups merged, both groups' ids in one sorted
-/// key and the partition itself in a settled order, so the same merge of the
+/// key and the partition itself in its canonical order, so the same merge of the
 /// same partition is always the same list.
 fn merged(partition: &[Vec<String>], a: usize, b: usize) -> Vec<Vec<String>> {
     let mut key: Vec<String> = partition[a].iter().chain(&partition[b]).cloned().collect();
@@ -523,14 +544,14 @@ fn merged(partition: &[Vec<String>], a: usize, b: usize) -> Vec<Vec<String>> {
         .map(|(_, g)| g.clone())
         .collect();
     out.push(key);
-    settle(out)
+    canonical(out)
 }
 
 /// A partition in its canonical order: each group's ids sorted, the groups
 /// ordered by their first id. Two partitions of the same objects into the same
 /// groups are then the same value, which is what lets the cache and the search
 /// compare them at all.
-fn settle(mut partition: Vec<Vec<String>>) -> Vec<Vec<String>> {
+fn canonical(mut partition: Vec<Vec<String>>) -> Vec<Vec<String>> {
     for group in &mut partition {
         group.sort();
         assert!(
@@ -583,7 +604,7 @@ pub fn choose_groups(
     floor_fillet: f64,
 ) -> Result<Groups, String> {
     let mut plans = Plans::new(spec, grid, floor_fillet);
-    let singletons = settle(
+    let singletons = canonical(
         spec.objects
             .iter()
             .map(|o| vec![o.pack.id.clone()])
@@ -724,13 +745,13 @@ fn moves(partition: &[Vec<String>]) -> Vec<Vec<Vec<String>>> {
                 let mut next: Vec<Vec<String>> = partition.to_vec();
                 next[from].retain(|other| other != id);
                 next[to].push(id.clone());
-                out.push(settle(next));
+                out.push(canonical(next));
             }
             if group.len() > 1 {
                 let mut next: Vec<Vec<String>> = partition.to_vec();
                 next[from].retain(|other| other != id);
                 next.push(vec![id.clone()]);
-                out.push(settle(next));
+                out.push(canonical(next));
             }
         }
     }
@@ -743,7 +764,7 @@ fn moves(partition: &[Vec<String>]) -> Vec<Vec<Vec<String>>> {
                     next[b].retain(|other| other != two);
                     next[a].push(two.clone());
                     next[b].push(one.clone());
-                    out.push(settle(next));
+                    out.push(canonical(next));
                 }
             }
         }

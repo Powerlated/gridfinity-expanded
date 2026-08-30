@@ -150,10 +150,10 @@ pub fn layout_walls_reporting(
     for wall in &walls {
         for point in [wall.start, wall.end] {
             assert!(
-                point.x >= area.x - half
-                    && point.x <= area.right() + half
-                    && point.y >= area.y - half
-                    && point.y <= area.bottom() + half,
+                point.x >= quantize(area.x - half)
+                    && point.x <= quantize(area.right() + half)
+                    && point.y >= quantize(area.y - half)
+                    && point.y <= quantize(area.bottom() + half),
                 "generated divider endpoint {point:?} lies outside the packing area {area:?} \
                  grown by the half thickness {half} it is allowed to overhang"
             );

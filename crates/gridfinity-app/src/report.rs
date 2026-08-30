@@ -463,8 +463,8 @@ fn built_as(run: &Run, index: usize) -> String {
 }
 
 /// What became of the cavity: how much of it was hollowed into compartments, how
-/// much stands as material, and what happened to the dividers the packer derives
-/// between two claims.
+/// much stands as material, what settling the packed layout took, and what
+/// happened to the dividers the packer derives between two claims.
 fn dividers(run: &Run) {
     let pocket_area: f64 = run.pockets.iter().map(|k| k.width * k.depth).sum();
     let pitch = run.spec.pitch;
@@ -493,6 +493,17 @@ fn dividers(run: &Run) {
             mm2((interior - pocket_area).max(0.0)),
             percent(interior - pocket_area, interior)
         ),
+    );
+    field(
+        "settled",
+        &match (run.absorbed, run.evened) {
+            (0, 0) => "nothing to tidy -- the packer left no strip worth absorbing and none to even out"
+                .to_string(),
+            (absorbed, evened) => format!(
+                "{absorbed} strip(s) of leftover absorbed into the compartments facing them, at up to {} mm, and {evened} run(s) of slack evened between their two ends",
+                mm(run.spec.tidy_absorb)
+            ),
+        },
     );
     field(
         "walls",

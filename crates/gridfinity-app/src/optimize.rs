@@ -35,7 +35,7 @@ use gridfinity_cad::kernel::topo::Solid;
 use gridfinity_cad::layout::{GridCell, Piece, SplitLine, partition_cells};
 use gridfinity_cad::printers::{compute_auto_split_lines, compute_staggered_split_lines};
 use gridfinity_cad::project::drawer::{
-    DrawerGrid, MAX_GRID, drawer_cells, drawer_grid, packing_area,
+    DrawerGrid, MAX_GRID, cavity_region, drawer_cells, drawer_grid, packing_area, packing_inset,
 };
 use gridfinity_cad::project::pack::{
     PackEffort, PackInput, PackObject, PackResult, Placement, pack_layout,
@@ -43,6 +43,7 @@ use gridfinity_cad::project::pack::{
 use gridfinity_cad::project::rects::{
     Rect, Rotation, inflate_parts, parts_bounds, rotate_parts, translate_parts,
 };
+use gridfinity_cad::project::settle::{Settle, settle};
 use gridfinity_cad::project::tidy::tidiness;
 use gridfinity_cad::project::walls::{WallReport, layout_walls_reporting};
 use std::collections::BTreeMap;
@@ -199,6 +200,12 @@ pub struct Run {
     pub floor_fillet: f64,
     pub claim_margin: f64,
     pub wall_report: WallReport,
+    /// What settling the packed layout took: free bands of leftover absorbed
+    /// into the compartments facing them, and slabs whose slack was evened out
+    /// between their two ends. Zero and zero is a layout the packer already left
+    /// square.
+    pub absorbed: usize,
+    pub evened: usize,
     pub pockets: Vec<Pocket>,
     /// One entry per object that was given a bin of its own, in `params.bins`
     /// order. Empty in `walls` mode, where the drawer is the one bin.
@@ -599,6 +606,11 @@ fn baseplate_params(
 /// what became of the dividers the packer derives.
 struct Plan {
     result: PackResult,
+    /// What settling the layout took: free bands absorbed into the compartments
+    /// facing them, and slabs whose slack was evened out. Summed over the bins
+    /// in the modes that build several.
+    absorbed: usize,
+    evened: usize,
     grouping: Option<Grouping>,
     pockets: Vec<Pocket>,
     params: Params,
@@ -693,14 +705,27 @@ fn all_parts(params: &Params) -> Vec<Piece> {
 /// cavity stated as a pocket per placement, and the bin cut for the bed.
 fn plan_walls(spec: &Spec, cells: &[GridCell], area: Rect, floor_fillet: f64) -> Plan {
     let input = claim_input(spec, area, floor_fillet, spec.pack_objects(), spec.effort);
-    let result = pack_layout(input);
-    let (_, wall_report) =
+    let mut result = pack_layout(input);
+    let cavity = cavity_region(cells, spec.pitch, packing_inset(spec.wall_thickness));
+    let settled = settle(
+        &result.placements,
+        &cavity,
+        Settle {
+            absorb: spec.tidy_absorb,
+        },
+    );
+    result.placements = settled.placements;
+    result.tidiness = tidiness(&result.placements, &area);
+    let (walls, wall_report) =
         layout_walls_reporting(&result.placements, &area, spec.divider_thickness);
+    result.walls = walls;
     let pockets = drawer_pockets(&result.placements, spec.divider_thickness);
     let split_lines = compute_auto_split_lines(cells, spec.printer, spec.pitch);
     let params = drawer_params(spec, cells, &pockets, &split_lines);
     Plan {
         result,
+        absorbed: settled.absorbed,
+        evened: settled.evened,
         grouping: None,
         pockets,
         params,
@@ -859,6 +884,8 @@ fn lay_out_bins(spec: &Spec, grid: DrawerGrid, plans: &[GroupPlan]) -> Result<Pl
             iterations,
             walls: Vec::new(),
         },
+        absorbed: plans.iter().map(|p| p.absorbed).sum(),
+        evened: plans.iter().map(|p| p.evened).sum(),
         pockets,
         params: bins_params(spec, logical),
         wall_report: WallReport::default(),
@@ -1005,6 +1032,8 @@ fn fit(spec: Spec, mode: FitMode) -> Result<Run, String> {
 
     let Plan {
         result,
+        absorbed,
+        evened,
         grouping,
         pockets,
         params,
@@ -1072,6 +1101,8 @@ fn fit(spec: Spec, mode: FitMode) -> Result<Run, String> {
         floor_fillet,
         claim_margin,
         wall_report,
+        absorbed,
+        evened,
         pockets,
         bins,
         grouping,
@@ -1293,6 +1324,22 @@ mod tests {
     const SMALL: &str = "\
 [drawer]
 width = 84
+depth = 84
+
+[settings]
+effort = \"quick\"
+
+[[objects]]
+name = \"block\"
+quantity = 4
+size = [30, 30]
+";
+
+    /// The same four blocks in a drawer half again as wide: they claim two thirds
+    /// of it, so the column of leftover they cannot reach is far wider than the
+    /// widest strip settling absorbs and survives the pass as material.
+    const ROOMY: &str = "[drawer]
+width = 126
 depth = 84
 
 [settings]
@@ -1743,14 +1790,15 @@ baseplate = false");
     /// finished B-rep, so it is the solid that says so and not the packer's
     /// own bookkeeping.
     ///
-    /// The fixture has leftover to find -- four 30 mm blocks claiming 7.16 mm
-    /// of margin each in an 81.1 mm packing area leave the middle and the
-    /// corners over -- and the sweep asserts it found some before asserting it
-    /// is solid, since on a drawer packed full the check would pass vacuously.
+    /// The fixture has leftover to find -- four 30 mm blocks in a drawer half
+    /// again as wide as it is deep leave a column of it no compartment reaches,
+    /// wider than settling will absorb -- and the sweep asserts it found some
+    /// before asserting it is solid, since on a drawer packed full the check
+    /// would pass vacuously.
     #[test]
     fn the_space_no_object_was_packed_into_is_solid() {
-        let spec = input::parse(SMALL).expect("the fixture is a valid run");
-        let run = fit(spec, FitMode::Walls).expect("a two-cell drawer of four blocks builds");
+        let spec = input::parse(ROOMY).expect("the fixture is a valid run");
+        let run = fit(spec, FitMode::Walls).expect("a three-cell drawer of four blocks builds");
         let floors = compartment_floors(&run.pieces[0].solid);
 
         let claimed = |p: Vec2| {

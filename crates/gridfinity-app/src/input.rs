@@ -111,6 +111,7 @@ struct SettingsSpec {
     height_units: Option<u32>,
     wall_thickness: Option<Length>,
     fillet_radius: Option<Length>,
+    tidy_absorb: Option<Length>,
     magnets: Option<bool>,
     screws: Option<bool>,
     printer: Option<String>,
@@ -176,6 +177,12 @@ pub struct Spec {
     pub clearance: f64,
     pub wall_thickness: f64,
     pub fillet_radius: f64,
+    /// The widest strip of leftover space worth absorbing into the compartments
+    /// facing it, once a layout is packed. Half the run's own cell pitch unless
+    /// the file says otherwise -- leftover that could not hold half a cell's
+    /// worth of anything is not worth the material it costs -- and zero turns the
+    /// growth off, leaving the pass only evening the slack out.
+    pub tidy_absorb: f64,
     pub height_units: u32,
     pub magnets: bool,
     pub screws: bool,
@@ -394,6 +401,13 @@ pub fn parse(text: &str) -> Result<Spec, String> {
         });
     }
 
+    let tidy_absorb = settings.tidy_absorb.map_or(pitch / 2.0, Length::mm);
+    if tidy_absorb < 0.0 {
+        return Err(format!(
+            "settings.tidy_absorb is {tidy_absorb}, which is less than none"
+        ));
+    }
+
     Ok(Spec {
         drawer_width: file.drawer.width.mm(),
         drawer_depth: file.drawer.depth.mm(),
@@ -402,6 +416,7 @@ pub fn parse(text: &str) -> Result<Spec, String> {
         clearance,
         wall_thickness,
         fillet_radius,
+        tidy_absorb,
         height_units,
         magnets,
         screws,
@@ -451,6 +466,27 @@ baseplate = false
 "))
             .expect("baseplate is a setting");
         assert!(!spec.baseplate);
+    }
+
+    /// The widest strip of leftover worth absorbing is half the run's own cell
+    /// pitch unless the file names one, so a file on a finer grid absorbs
+    /// proportionally less without having to say so.
+    #[test]
+    fn takes_the_widest_strip_worth_absorbing_from_the_pitch() {
+        let spec = parse(MINIMAL).expect("the minimal file is a valid run");
+        assert!((spec.tidy_absorb - spec.pitch / 2.0).abs() < 1e-9);
+        let stated = parse(&format!("{MINIMAL}
+[settings]
+tidy_absorb = \"4 mm\"
+"))
+        .expect("tidy_absorb is a setting");
+        assert!((stated.tidy_absorb - 4.0).abs() < 1e-9);
+        let refused = parse(&format!("{MINIMAL}
+[settings]
+tidy_absorb = -1
+"))
+        .expect_err("a strip of negative width is not a strip");
+        assert!(refused.contains("tidy_absorb"), "{refused}");
     }
 
     #[test]
