@@ -325,6 +325,59 @@ pub struct View {
     /// of what there is to say about it; in `bins` mode a bin *is* an object, so
     /// its name is the only thing telling two grey boxes apart.
     pub bin_names: Vec<String>,
+    /// The file each piece of each bin would be written as: outer index into
+    /// `params.bins`, inner in piece order, empty for a bin with no cells.
+    ///
+    /// Carried rather than re-derived. The window partitions a bin with the very
+    /// same `partition_cells(&bin.cells, &bin.split_lines)` the exporter does,
+    /// so a piece index means one body on both sides -- but the *name* is built
+    /// in `gridfinity::pieces`, from a stem that is not the label (in `bins`
+    /// mode a body reads "AAA batteries + caliper box" and writes
+    /// `gridfinity-bin-1`), and a second copy of that rule in the viewer would
+    /// drift the first time either changed.
+    pub bin_files: Vec<Vec<String>>,
+    /// The same for the baseplate's own pieces, in its own piece order. Empty
+    /// for a run with no plate.
+    pub plate_files: Vec<String>,
+}
+
+/// The name every built piece would be written as, gathered for the viewer:
+/// one list per bin of `run.params.bins` in piece order, and the baseplate's
+/// own list beside it.
+///
+/// Read off the finished `BinPiece`s rather than rebuilt, which is what keeps
+/// the label and the file one string. `BinPiece::bin` indexes `params.bins` and
+/// `BinPiece::piece` is the index into that bin's own `partition_cells`, so
+/// slotting each name by the pair reproduces the exporter's order exactly; the
+/// assertion states that every slot was filled, which is the same as saying the
+/// two sides partitioned the bin the same way.
+fn piece_files(run: &Run) -> (Vec<Vec<String>>, Vec<String>) {
+    let mut bins: Vec<Vec<String>> = run
+        .params
+        .bins
+        .iter()
+        .map(|bin| vec![String::new(); partition_cells(&bin.cells, &bin.split_lines).len()])
+        .collect();
+    for piece in &run.pieces {
+        let slot = bins
+            .get_mut(piece.bin)
+            .and_then(|files| files.get_mut(piece.piece))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} is piece {} of bin {}, which the viewer's own partition of that bin does \
+                     not have",
+                    piece.name, piece.piece, piece.bin
+                )
+            });
+        *slot = piece.name.clone();
+    }
+    assert!(
+        bins.iter().flatten().all(|name| !name.is_empty()),
+        "a bin has a piece the export never named, so the viewer and the exporter partitioned it \
+         differently"
+    );
+    let plate = run.baseplate.iter().map(|p| p.name.clone()).collect();
+    (bins, plate)
 }
 
 /// How far outside its compartment a drawn object may measure before the fit is
@@ -1264,9 +1317,12 @@ pub fn run(args: &Args) -> Result<Option<View>, String> {
     run.export_time = started.elapsed();
 
     report::print(&run, &written);
+    let (bin_files, plate_files) = piece_files(&run);
     Ok(args.view.then(|| View {
         boxes: object_boxes(&run),
         bin_names: run.bins.iter().map(FittedBin::name).collect(),
+        bin_files,
+        plate_files,
         params: run.params,
         plate: run.plate_params,
     }))
@@ -2234,6 +2290,33 @@ max_size = [45, \"\"]
             loose_axis > 45.0 + 1.0,
             "without the limit the same compartment grows to {loose_axis} mm, so the test can see \
              the difference"
+        );
+    }
+
+    /// The names the viewer is handed are the exporter's own, slotted by bin and
+    /// piece -- so a label and the file it names cannot come from two different
+    /// rules, and the two partitions of a bin cannot drift apart without the
+    /// gather panicking.
+    #[test]
+    fn the_viewer_is_handed_the_names_the_export_writes() {
+        let spec = input::parse(LONG).expect("the fixture is a valid run");
+        let run = fit(spec, FitMode::Walls).expect("a seven-cell drawer builds");
+        assert!(!run.split_lines.is_empty(), "the fixture is a bin the bed makes us cut");
+
+        let (bins, plate) = piece_files(&run);
+        assert_eq!(bins.len(), run.params.bins.len(), "one list per bin, indexed by bin");
+        assert_eq!(
+            bins.iter().flatten().cloned().collect::<Vec<String>>(),
+            run.pieces.iter().map(|p| p.name.clone()).collect::<Vec<String>>(),
+            "every piece the export writes, in the order it writes them"
+        );
+        assert_eq!(
+            plate,
+            run.baseplate.iter().map(|p| p.name.clone()).collect::<Vec<String>>()
+        );
+        assert!(
+            bins.iter().flatten().all(|f| f.ends_with(".stl")),
+            "a piece is named by the file it would be written as"
         );
     }
 

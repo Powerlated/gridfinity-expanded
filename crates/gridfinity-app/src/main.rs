@@ -41,7 +41,7 @@ use explode::Explosion;
 use editor::Editor;
 use gridfinity_cad::gridfinity::{self, LogicalBin, Mode, Params};
 use gridfinity_cad::kernel::math::Vec3 as KernelVec3;
-use gridfinity_cad::layout::{GridCell, SplitLine};
+use gridfinity_cad::layout::{GridCell, SplitLine, partition_cells};
 use gridfinity_cad::printers::{DEFAULT_PRINTER, PrinterProfile};
 use gridfinity_cad::kernel::build::extrude;
 use glam::Vec3;
@@ -292,18 +292,69 @@ fn body_label(
     }
 }
 
+/// One body named as many times as it becomes files: a label over each piece the
+/// cells and `splits` partition into, reading `name` above that piece's own
+/// file, or a single label over the whole body where `files` is empty.
+///
+/// `partition_cells` here is the same call the exporter and `bin_vertices` make,
+/// so piece `i` is one body across all three and `files[i]` is that body's own
+/// name. The count is asserted rather than zipped over, because a short list
+/// would otherwise silently leave the last pieces unnamed.
+fn body_labels(
+    explosion: &Explosion,
+    cells: &[GridCell],
+    splits: &[SplitLine],
+    pitch: f64,
+    top: f64,
+    name: &str,
+    files: &[String],
+) -> Vec<wireframe::Label> {
+    if files.is_empty() {
+        return vec![body_label(explosion, cells, pitch, top, name.to_string(), LABEL_INK)];
+    }
+    let parts = partition_cells(cells, splits);
+    assert_eq!(
+        parts.len(),
+        files.len(),
+        "{name} is cut into {} piece(s) and was given {} file name(s), so the two partitioned it \
+         differently",
+        parts.len(),
+        files.len()
+    );
+    parts
+        .iter()
+        .zip(files)
+        .map(|(part, file)| {
+            body_label(explosion, &part.cells, pitch, top, format!("{name}\n{file}"), LABEL_INK)
+        })
+        .collect()
+}
+
 /// Every item in the scene named where it stands: each bin, the baseplate under
 /// it, and each object the packer placed.
 ///
-/// **One label per item, never per piece.** A bin cut into six for the bed is
-/// still one bin and is named once; an object crossing a cut is still one
-/// object, named once over the whole of it, and an object made of several boxes
-/// is named once over all of them. Each label rides the band its own point falls
-/// in, so it stands on the item rather than in a gap the explosion opened.
+/// **A body is named once per file it becomes.** A piece is what gets written,
+/// so a bin cut into six for the bed carries six labels, each over its own
+/// piece and each reading the body's name above the file that piece would be
+/// exported as -- which is the question the exploded view exists to answer, the
+/// pieces being laid out in front of a reader about to send one to a slicer.
+/// A body that becomes **no** file is named once over the whole of it, with no
+/// second line: that is the bin editor, which exports through a dialog and has
+/// no names to show, and it must not start reading "bin" six times.
+///
+/// An **object** is not exported and stays named once whatever it crosses: an
+/// object spanning a cut is one object, and one made of several boxes is named
+/// once over all of them.
+///
+/// Each label rides the band its own point falls in, so it stands on the piece
+/// rather than in a gap the explosion opened.
 ///
 /// A bin is named by `bin_names` where the fit gave it a name -- in `bins` mode
 /// a bin *is* an object, and "bin 3" says nothing the viewer wants -- and
-/// falls back to "bin" or "bin N" for a run that named none.
+/// falls back to "bin" or "bin N" for a run that named none. That name is not
+/// the file's stem: the same body reads "AAA batteries + caliper box" and
+/// writes `gridfinity-bin-1`, which is why `bin_files` is carried from the
+/// exporter rather than rebuilt here.
 ///
 /// An object is named in red where it does not clear the cavity -- the same
 /// thing the box's red rim says, in words. Object labels come first because
@@ -315,6 +366,8 @@ fn scene_labels(
     boxes: &[optimize::ObjectBox],
     plate: Option<&Params>,
     bin_names: &[String],
+    bin_files: &[Vec<String>],
+    plate_files: &[String],
 ) -> Vec<wireframe::Label> {
     let pitch = params.pitch;
     let bins: Vec<(usize, &LogicalBin)> = params
@@ -347,18 +400,19 @@ fn scene_labels(
         });
     }
     for (ord, (index, bin)) in bins.iter().enumerate() {
-        let text = match bin_names.get(*index) {
+        let name = match bin_names.get(*index) {
             Some(name) => name.clone(),
             None if bins.len() == 1 => "bin".to_string(),
             None => format!("bin {}", ord + 1),
         };
-        out.push(body_label(
+        out.extend(body_labels(
             &Explosion::of(bin, pitch),
             &bin.cells,
+            &bin.split_lines,
             pitch,
             params.total_height(),
-            text,
-            LABEL_INK,
+            &name,
+            bin_files.get(*index).map_or(&[][..], Vec::as_slice),
         ));
     }
     if let Some(plate) = plate {
@@ -372,13 +426,14 @@ fn scene_labels(
                     }
                 }
             }
-            out.push(body_label(
+            out.extend(body_labels(
                 &Explosion::new(&cells, &splits, plate.pitch),
                 &cells,
+                &splits,
                 plate.pitch,
                 gridfinity::PEG_HEIGHT,
-                "baseplate".to_string(),
-                LABEL_INK,
+                "baseplate",
+                plate_files,
             ));
         }
     }
@@ -557,6 +612,8 @@ struct App {
     quality: Quality,
     labels: Vec<wireframe::Label>,
     bin_names: Vec<String>,
+    bin_files: Vec<Vec<String>>,
+    plate_files: Vec<String>,
     object_boxes: Vec<optimize::ObjectBox>,
     show_object_boxes: bool,
     plate: Option<Params>,
@@ -584,13 +641,22 @@ impl App {
             Renderer::new(&gpu.device, &state.adapter)
                 .expect("the wgpu backend must build the viewport pipelines"),
         ));
-        let (params, object_boxes, plate, bin_names) = match initial {
-            Some(view) => (view.params, view.boxes, view.plate, view.bin_names),
-            None => (Params::default(), Vec::new(), None, Vec::new()),
+        let (params, object_boxes, plate, bin_names, bin_files, plate_files) = match initial {
+            Some(view) => (
+                view.params,
+                view.boxes,
+                view.plate,
+                view.bin_names,
+                view.bin_files,
+                view.plate_files,
+            ),
+            None => (Params::default(), Vec::new(), None, Vec::new(), Vec::new(), Vec::new()),
         };
         let mut app = App {
             show_object_boxes: !object_boxes.is_empty(),
             bin_names,
+            bin_files,
+            plate_files,
             object_boxes,
             show_plate: plate.is_some(),
             show_gaps: true,
@@ -659,7 +725,14 @@ impl App {
             let boxes: &[optimize::ObjectBox] =
                 if self.show_object_boxes { &self.object_boxes } else { &[] };
             let plate = if self.show_plate { self.plate.as_ref() } else { None };
-            self.labels.extend(scene_labels(&self.params, boxes, plate, &self.bin_names));
+            self.labels.extend(scene_labels(
+                &self.params,
+                boxes,
+                plate,
+                &self.bin_names,
+                &self.bin_files,
+                &self.plate_files,
+            ));
         }
 
         let mut r = self.renderer.lock().unwrap();
@@ -961,6 +1034,14 @@ impl App {
             });
     }
 
+    /// Every label of the scene painted over the viewport at the point it names,
+    /// one per `CELL`-sized square of the screen and the first to claim one
+    /// keeping it -- which is why `scene_labels` pushes objects before bodies.
+    ///
+    /// A label's text may carry a newline and a body's does: `Painter::text`
+    /// lays the lines out itself, centred on the same point. Two lines of the
+    /// 9 pt face stand about 22 px, inside one `CELL`, so the collision grid
+    /// still admits one label per square and needs no measuring of its own.
     fn paint_labels(&self, ui: &egui::Ui, rect: egui::Rect) {
         if self.labels.is_empty() {
             return;
@@ -1116,7 +1197,7 @@ mod tests {
             boxed("socket set", 0, KernelVec3::new(2.0, 2.0, 0.0), KernelVec3::new(30.0, 30.0, 5.0), true),
             boxed("tape measure", 1, KernelVec3::new(50.0, 2.0, 0.0), KernelVec3::new(80.0, 30.0, 400.0), false),
         ];
-        let labels = scene_labels(&params, &boxes, Some(&plate), &[]);
+        let labels = scene_labels(&params, &boxes, Some(&plate), &[], &[], &[]);
         let text: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(
             text,
@@ -1154,11 +1235,13 @@ mod tests {
         );
     }
 
-    /// A cut is not a new item. A bin split into six for the bed is one bin and
-    /// is named once, and an object crossing a cut -- or made of several boxes
-    /// -- is named once over the whole of it.
+    /// A body that becomes no file is named once however many pieces it is cut
+    /// into -- the bin editor, which exports through a dialog and has no file
+    /// names to show. And an **object** is named once whatever it crosses, in
+    /// this view and in every other: a cut is not a new object, and an object of
+    /// several boxes is one object.
     #[test]
-    fn a_split_item_is_labelled_once_not_once_per_piece() {
+    fn a_body_that_becomes_no_file_is_labelled_once_however_it_is_cut() {
         let cells: Vec<GridCell> = (0..4)
             .flat_map(|x| (0..2).map(move |y| GridCell { x, y }))
             .collect();
@@ -1178,17 +1261,105 @@ mod tests {
             boxed("bracket", 0, KernelVec3::new(10.0, 10.0, 0.0), KernelVec3::new(140.0, 30.0, 5.0), true),
             boxed("bracket", 0, KernelVec3::new(10.0, 30.0, 0.0), KernelVec3::new(40.0, 60.0, 5.0), true),
         ];
-        let labels = scene_labels(&params, &l_shaped, None, &[]);
+        let labels = scene_labels(&params, &l_shaped, None, &[], &[], &[]);
         let text: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(
             text,
             vec!["bracket", "bin"],
-            "six pieces and a two-box object crossing three cuts are still two items"
+            "six pieces that are written nowhere are one bin, and a two-box object crossing \
+             three cuts is one object"
         );
         assert!(
             (labels[0].at.x - 75.0).abs() < f64::from(SPLIT_APART_MM) + 1e-9,
             "the object is named over the whole of it, near the centre of its own boxes, not {}",
             labels[0].at.x
+        );
+    }
+
+    /// A piece is what gets written, so a body carries one label per file it
+    /// becomes: the body's name over that piece's own file name, each label on
+    /// its own piece rather than all six at the body's centre.
+    ///
+    /// This is what the exploded view is for -- the pieces are laid out and the
+    /// reader is about to send one of them to a slicer -- so the label has to
+    /// say which file each grey body is.
+    #[test]
+    fn a_body_is_named_once_per_file_it_becomes() {
+        let cells: Vec<GridCell> = (0..4).map(|x| GridCell { x, y: 0 }).collect();
+        let splits = [SplitLine { axis: Axis::X, index: 2 }];
+        let params = split_bin(&cells, &splits);
+        let files = vec![vec![
+            "gridfinity-bin-2-piece-1-of-2.stl".to_string(),
+            "gridfinity-bin-2-piece-2-of-2.stl".to_string(),
+        ]];
+        let labels = scene_labels(&params, &[], None, &["bin 2".to_string()], &files, &[]);
+        let text: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            text,
+            vec![
+                "bin 2\ngridfinity-bin-2-piece-1-of-2.stl",
+                "bin 2\ngridfinity-bin-2-piece-2-of-2.stl"
+            ],
+            "each piece says what body it is and what file it becomes"
+        );
+        assert!(
+            labels[0].at.x < labels[1].at.x,
+            "each label stands on its own piece, so the two are apart along the cut: {} and {}",
+            labels[0].at.x,
+            labels[1].at.x
+        );
+        assert!(
+            (labels[1].at.x - labels[0].at.x - 2.0 * gridfinity::GRID_PITCH
+                - f64::from(SPLIT_APART_MM))
+            .abs()
+                < 1e-9,
+            "and each rides its own exploded band, so they stand one gap further apart than the \
+             pieces themselves"
+        );
+
+        let whole = split_bin(&cells, &[]);
+        let one = scene_labels(
+            &whole,
+            &[],
+            None,
+            &["bin 2".to_string()],
+            &[vec!["gridfinity-bin-2.stl".to_string()]],
+            &[],
+        );
+        assert_eq!(
+            one.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            vec!["bin 2\ngridfinity-bin-2.stl"],
+            "an uncut body becomes one file and is named once"
+        );
+    }
+
+    /// The baseplate is written per piece like the bin, and cut on lines
+    /// staggered off the bin's, so each of its pieces stands somewhere the bin's
+    /// do not and is worth naming separately.
+    #[test]
+    fn the_baseplate_names_each_of_its_own_pieces() {
+        let cells: Vec<GridCell> = (0..3).map(|x| GridCell { x, y: 0 }).collect();
+        let params = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 2 }]);
+        let plate = Params {
+            mode: Mode::Baseplate,
+            ..split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }])
+        };
+        let plate_files = vec![
+            "gridfinity-baseplate-piece-1-of-2.stl".to_string(),
+            "gridfinity-baseplate-piece-2-of-2.stl".to_string(),
+        ];
+        let labels = scene_labels(&params, &[], Some(&plate), &[], &[], &plate_files);
+        let plate_text: Vec<&str> = labels
+            .iter()
+            .map(|l| l.text.as_str())
+            .filter(|t| t.starts_with("baseplate"))
+            .collect();
+        assert_eq!(
+            plate_text,
+            vec![
+                "baseplate\ngridfinity-baseplate-piece-1-of-2.stl",
+                "baseplate\ngridfinity-baseplate-piece-2-of-2.stl"
+            ]
         );
     }
 
@@ -1199,7 +1370,7 @@ mod tests {
         let cells: Vec<GridCell> = (0..3).map(|x| GridCell { x, y: 0 }).collect();
         let pitch = gridfinity::GRID_PITCH;
         let centred = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }]);
-        let label = scene_labels(&centred, &[], None, &[]);
+        let label = scene_labels(&centred, &[], None, &[], &[], &[]);
         assert_eq!(label.len(), 1);
         assert!(
             (label[0].at.x - (1.5 * pitch + f64::from(SPLIT_APART_MM) / 2.0)).abs() < 1e-9,
@@ -1208,7 +1379,7 @@ mod tests {
         );
 
         let other = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 2 }]);
-        let label = scene_labels(&other, &[], None, &[]);
+        let label = scene_labels(&other, &[], None, &[], &[], &[]);
         assert!(
             (label[0].at.x - (1.5 * pitch - f64::from(SPLIT_APART_MM) / 2.0)).abs() < 1e-9,
             "cut later and the same centre stands on the first band instead, not {}",
