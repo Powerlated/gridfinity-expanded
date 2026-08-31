@@ -29,7 +29,7 @@
 //! settled.
 
 use super::pack::Placement;
-use super::rects::{Rect, quantize, rect_contains, rect_covered_by, rects_overlap};
+use super::rects::{Rect, parts_bounds, quantize, rect_contains, rect_covered_by, rects_overlap};
 
 /// How far apart two millimetre values may be and still name the same length.
 /// Every coordinate here is quantised, so this only absorbs the sum of a slab's
@@ -62,6 +62,98 @@ impl Settled {
     /// so reads.
     pub fn moved(&self) -> bool {
         self.absorbed > 0 || self.evened > 0 || self.grown > 0
+    }
+}
+
+/// The most a placement's claim may measure on each axis, in millimetres, or
+/// `None` on an axis it is not held to. In the drawer's frame, not the object's:
+/// a caller holding a `Placement` has already turned the object, so it turns the
+/// limits with it.
+pub type Extents = [Option<f64>; 2];
+
+/// What clamping a settled layout took: the claims, and how many of them a limit
+/// actually pulled back in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Clamped {
+    pub placements: Vec<Placement>,
+    pub clamped: usize,
+}
+
+/// The layout with every claim pulled back to the extents its object asks to be
+/// held to, one `Extents` per placement in the order they are given.
+///
+/// This runs **after** `settle`, and undoes part of it on purpose. Settling
+/// grows a compartment into whatever leftover faces it, which is right for
+/// almost everything and wrong for an object that has to be held still: a
+/// battery in a compartment 30 mm wider than itself lies over at an angle and is
+/// no longer a battery you can pick up by the end. So an object may state the
+/// most its compartment is allowed to become, and the space given back becomes
+/// material like any other leftover the fit did not claim.
+///
+/// A claim is pulled back **about its own centre**, so what the compartment
+/// keeps is the middle of what it had and the object stays where the drawn box
+/// says it is. Every part of the placement is clipped to that window, which is
+/// what keeps a multi-box object's parts in the one compartment they were packed
+/// as. Nothing grows, nothing moves outside the cavity it already stood in, and
+/// no two claims can newly overlap, so the properties `settle` established
+/// survive the pass.
+///
+/// The limits are the *claim's*, not the object's: a caller states
+/// `max_size + 2 * margin`, the same arithmetic that turned the object's size
+/// into its claim in the first place.
+pub fn clamp(placements: &[Placement], extents: &[Extents]) -> Clamped {
+    assert_eq!(
+        placements.len(),
+        extents.len(),
+        "every placement is held to its own extents, so there is one per placement"
+    );
+    let mut out = placements.to_vec();
+    let mut clamped = 0;
+    for (placement, limit) in out.iter_mut().zip(extents) {
+        let mut pulled = false;
+        for axis in [Axis::X, Axis::Y] {
+            let Some(most) = limit[axis.index()] else {
+                continue;
+            };
+            assert!(
+                most > 0.0 && most.is_finite(),
+                "a compartment of {} is held to at most {most} mm, which is not an extent",
+                placement.object_id
+            );
+            let bounds = parts_bounds(&placement.parts);
+            let span = axis.hi(&bounds) - axis.lo(&bounds);
+            if span <= most + SAME_MM {
+                continue;
+            }
+            let lo = 0.5 * (axis.lo(&bounds) + axis.hi(&bounds) - most);
+            for part in &mut placement.parts {
+                let (a, b) = (axis.lo(part).max(lo), axis.hi(part).min(lo + most));
+                assert!(
+                    b > a,
+                    "clamping {} to {most} mm leaves one of its boxes nothing at all, so the \
+                     limit is smaller than the object it was stated for",
+                    placement.object_id
+                );
+                *part = axis.spanned(part, a, b);
+            }
+            pulled = true;
+        }
+        if pulled {
+            clamped += 1;
+        }
+    }
+    for (after, before) in out.iter().zip(placements) {
+        for (a, b) in after.parts.iter().zip(&before.parts) {
+            assert!(
+                a.width <= b.width + SAME_MM && a.depth <= b.depth + SAME_MM,
+                "clamping {} grew {b:?} to {a:?}",
+                after.object_id
+            );
+        }
+    }
+    Clamped {
+        placements: out,
+        clamped,
     }
 }
 
@@ -129,6 +221,14 @@ enum Axis {
 }
 
 impl Axis {
+    /// Which of a pair of per-axis values is this axis's, x first.
+    fn index(self) -> usize {
+        match self {
+            Axis::X => 0,
+            Axis::Y => 1,
+        }
+    }
+
     /// The rectangle's minimum coordinate on this axis.
     fn lo(self, r: &Rect) -> f64 {
         match self {
@@ -664,6 +764,56 @@ mod tests {
         );
         assert_eq!(part(&settled, 0), Rect::new(0.0, 0.0, 42.5, 100.0));
         assert_eq!(part(&settled, 1), Rect::new(42.5, 0.0, 57.5, 100.0));
+    }
+
+    /// A compartment held to an extent keeps the middle of what settling gave
+    /// it, and gives the rest back as material.
+    ///
+    /// The 100 mm bin is one claim's for the taking, so settling grows it to the
+    /// whole of it; holding it to 60 mm on x leaves it 60 mm centred, and the
+    /// 20 mm either side is material. The y axis is unheld and keeps everything.
+    #[test]
+    fn a_claim_held_to_an_extent_keeps_the_middle_of_what_it_grew_to() {
+        let settled = settle(&[claim("a", 20.0, 20.0, 30.0, 30.0)], &BIN, Settle { absorb: 40.0 });
+        assert_eq!(part(&settled, 0), Rect::new(0.0, 0.0, 100.0, 100.0));
+
+        let held = clamp(&settled.placements, &[[Some(60.0), None]]);
+        assert_eq!(held.clamped, 1);
+        assert_eq!(
+            held.placements[0].parts[0],
+            Rect::new(20.0, 0.0, 60.0, 100.0),
+            "60 mm of the 100 it had, centred, and the full depth it was not held to"
+        );
+    }
+
+    /// An extent no smaller than what the claim already measures changes nothing
+    /// and is not counted, so a report saying a compartment was pulled back means
+    /// one was.
+    #[test]
+    fn an_extent_wider_than_the_claim_pulls_nothing_back() {
+        let placements = [claim("a", 10.0, 10.0, 30.0, 30.0)];
+        let held = clamp(&placements, &[[Some(30.0), Some(80.0)]]);
+        assert_eq!(held.placements, placements);
+        assert_eq!(held.clamped, 0);
+    }
+
+    /// Every box of a multi-box object is clipped to the one window, so an L
+    /// held on one axis stays the one compartment it was packed as rather than
+    /// falling into two.
+    #[test]
+    fn holding_a_multi_box_claim_clips_every_box_to_the_one_window() {
+        let ell = Placement {
+            object_id: "ell".to_string(),
+            instance: 0,
+            rotation: Rotation::Deg0,
+            parts: vec![Rect::new(0.0, 0.0, 80.0, 20.0), Rect::new(0.0, 20.0, 20.0, 60.0)],
+        };
+        let held = clamp(&[ell], &[[Some(50.0), None]]);
+        assert_eq!(
+            held.placements[0].parts,
+            vec![Rect::new(15.0, 0.0, 50.0, 20.0), Rect::new(15.0, 20.0, 5.0, 60.0)],
+            "both boxes are cut to the 50 mm window centred on the 80 mm the object spans"
+        );
     }
 
     /// The case the band passes cannot see, and the reason the growth pass

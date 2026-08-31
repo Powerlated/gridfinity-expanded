@@ -27,6 +27,7 @@ magnets = false
 screws = false
 baseplate = true       # the grid the fitted bin drops into, cut on the bin's own lines
 printer = "Elegoo Centauri Carbon"
+tidy_absorb = "100mm"
 # bed = { width = 250, depth = 210 }   # state a bed instead of a profile
 
 [[objects]]
@@ -37,9 +38,16 @@ size = ["2.1 in", "9.2 in"]
 name = "caliper box"
 size = ["25 cm", "9 cm"]
 
+# `max_size` is the most this object's compartment may measure once the fit has
+# finished tidying it, per axis, with an empty string for no limit. Settling
+# grows a compartment into whatever leftover faces it, which would leave these
+# batteries room to lie over at an angle; held to their own width they stay
+# stood up. Stated in the object's own frame, so it follows the object round
+# whichever quarter turn the packer gives it.
 [[objects]]
 name = "AAA batteries"
-size = ["4.5 cm", "124 mm"]
+size =     ["4.5 cm", "124 mm"]
+max_size = ["4.5 cm", ""]
 
 [[objects]]
 name = "tape measure"

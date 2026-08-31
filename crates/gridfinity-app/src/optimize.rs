@@ -25,7 +25,7 @@
 
 use crate::export::{self, Format};
 use crate::grouping::{GroupPlan, Grouping, choose_groups, outer_pack, plan_group_bin};
-use crate::input::{self, Spec};
+use crate::input::{self, Object, Spec};
 use crate::report;
 use clap::{Parser, ValueEnum};
 use gridfinity_cad::gridfinity::{self, BinPiece, LogicalBin, Mode, Params, Pocket};
@@ -43,7 +43,7 @@ use gridfinity_cad::project::pack::{
 use gridfinity_cad::project::rects::{
     Rect, Rotation, inflate_parts, parts_bounds, rotate_parts, translate_parts,
 };
-use gridfinity_cad::project::settle::{Settle, settle};
+use gridfinity_cad::project::settle::{Extents, Settle, Settled, clamp, settle};
 use gridfinity_cad::project::tidy::tidiness;
 use gridfinity_cad::project::walls::{WallReport, layout_walls_reporting};
 use std::collections::BTreeMap;
@@ -208,6 +208,7 @@ pub struct Run {
     pub absorbed: usize,
     pub evened: usize,
     pub grown: usize,
+    pub clamped: usize,
     pub pockets: Vec<Pocket>,
     /// One entry per object that was given a bin of its own, in `params.bins`
     /// order. Empty in `walls` mode, where the drawer is the one bin.
@@ -651,6 +652,7 @@ struct Plan {
     absorbed: usize,
     evened: usize,
     grown: usize,
+    clamped: usize,
     grouping: Option<Grouping>,
     pockets: Vec<Pocket>,
     params: Params,
@@ -741,19 +743,82 @@ fn all_parts(params: &Params) -> Vec<Piece> {
         .collect()
 }
 
-/// The whole drawer as one bin: every object packed into the one cavity, that
-/// cavity stated as a pocket per placement, and the bin cut for the bed.
-fn plan_walls(spec: &Spec, cells: &[GridCell], area: Rect, floor_fillet: f64) -> Plan {
-    let input = claim_input(spec, area, floor_fillet, spec.pack_objects(), spec.effort);
-    let mut result = pack_layout(input);
-    let cavity = cavity_region(cells, spec.pitch, packing_inset(spec.wall_thickness));
+/// The claim each placement may grow to, in the **drawer's** frame: the object's
+/// `max_size` turned by the quarter turn the packer chose and grown by the
+/// margin that turned its size into a claim in the first place.
+///
+/// `None` on an axis the object is not held to. A quarter turn swaps the two,
+/// because `max_size` is stated about the object and a `Placement` has already
+/// been rotated -- the axis a battery must not roll along is the battery's, not
+/// the drawer's.
+pub(crate) fn claim_extents(
+    placements: &[Placement],
+    objects: &[Object],
+    margin: f64,
+) -> Vec<Extents> {
+    assert!(
+        margin >= 0.0,
+        "a claim stands {margin} mm outside its object, which is not a margin"
+    );
+    placements
+        .iter()
+        .map(|placement| {
+            let object = objects
+                .iter()
+                .find(|o| o.pack.id == placement.object_id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the packer placed {:?}, which is not one of the {} objects it was given",
+                        placement.object_id,
+                        objects.len()
+                    )
+                });
+            let [along, across] = object.max_size;
+            let turned = match placement.rotation {
+                Rotation::Deg90 | Rotation::Deg270 => [across, along],
+                Rotation::Deg0 | Rotation::Deg180 => [along, across],
+            };
+            turned.map(|most| most.map(|m| m + 2.0 * margin))
+        })
+        .collect()
+}
+
+/// A packed layout settled and then pulled back to the extents its objects ask
+/// to be held to, which is the one order those two happen in: settling grows a
+/// compartment into whatever leftover faces it, and `max_size` is how an object
+/// says how much of that growth it wants.
+pub(crate) fn settle_within(
+    placements: &[Placement],
+    cavity: &[Rect],
+    spec: &Spec,
+    margin: f64,
+) -> (Settled, usize) {
     let settled = settle(
-        &result.placements,
-        &cavity,
+        placements,
+        cavity,
         Settle {
             absorb: spec.tidy_absorb,
         },
     );
+    let extents = claim_extents(&settled.placements, &spec.objects, margin);
+    let held = clamp(&settled.placements, &extents);
+    (
+        Settled {
+            placements: held.placements,
+            ..settled
+        },
+        held.clamped,
+    )
+}
+
+/// The whole drawer as one bin: every object packed into the one cavity, that
+/// cavity stated as a pocket per placement, and the bin cut for the bed.
+fn plan_walls(spec: &Spec, cells: &[GridCell], area: Rect, floor_fillet: f64) -> Plan {
+    let input = claim_input(spec, area, floor_fillet, spec.pack_objects(), spec.effort);
+    let input_margin = input.margin();
+    let mut result = pack_layout(input);
+    let cavity = cavity_region(cells, spec.pitch, packing_inset(spec.wall_thickness));
+    let (settled, clamped) = settle_within(&result.placements, &cavity, spec, input_margin);
     result.placements = settled.placements;
     result.tidiness = tidiness(&result.placements, &area);
     let (walls, wall_report) =
@@ -767,6 +832,7 @@ fn plan_walls(spec: &Spec, cells: &[GridCell], area: Rect, floor_fillet: f64) ->
         absorbed: settled.absorbed,
         evened: settled.evened,
         grown: settled.grown,
+        clamped,
         grouping: None,
         pockets,
         params,
@@ -928,6 +994,7 @@ fn lay_out_bins(spec: &Spec, grid: DrawerGrid, plans: &[GroupPlan]) -> Result<Pl
         absorbed: plans.iter().map(|p| p.absorbed).sum(),
         evened: plans.iter().map(|p| p.evened).sum(),
         grown: plans.iter().map(|p| p.grown).sum(),
+        clamped: plans.iter().map(|p| p.clamped).sum(),
         pockets,
         params: bins_params(spec, logical),
         wall_report: WallReport::default(),
@@ -1077,6 +1144,7 @@ fn fit(spec: Spec, mode: FitMode) -> Result<Run, String> {
         absorbed,
         evened,
         grown,
+        clamped,
         grouping,
         pockets,
         params,
@@ -1147,6 +1215,7 @@ fn fit(spec: Spec, mode: FitMode) -> Result<Run, String> {
         absorbed,
         evened,
         grown,
+        clamped,
         pockets,
         bins,
         grouping,
@@ -2091,6 +2160,80 @@ size = [30, 20]
             plain[0].min.y,
             deflated[0].x,
             deflated[0].y
+        );
+    }
+
+    /// One long thin object in a drawer with room to spare, held to its own
+    /// width so its compartment cannot grow sideways. The packer turns it, which
+    /// is what the rotation of `max_size` is for.
+    const SNUG: &str = "[drawer]
+width = 200
+depth = 200
+
+[settings]
+effort = \"quick\"
+tidy_absorb = 100
+
+[[objects]]
+name = \"battery\"
+size = [45, 124]
+max_size = [45, \"\"]
+";
+
+    /// `max_size` is what an object says when growing its compartment would stop
+    /// the compartment holding it still.
+    ///
+    /// Settling grows a compartment into whatever leftover faces it, which for a
+    /// battery in a roomy drawer means a pocket it can lie over at an angle in.
+    /// Held to its own 45 mm width, the compartment comes back to 45 mm plus the
+    /// clearance and fillet the claim reserves -- and the axis left unstated
+    /// still takes everything settling gave it, because a battery that slides
+    /// along its own length is still a battery you can pick up by the end.
+    #[test]
+    fn an_object_held_to_a_max_size_keeps_its_compartment_snug() {
+        let held = fit(
+            input::parse(SNUG).expect("the fixture is a valid run"),
+            FitMode::Walls,
+        )
+        .expect("one object in a 200 mm drawer builds");
+        assert_eq!(held.clamped, 1, "the one compartment was pulled back");
+
+        let boxes = object_boxes(&held);
+        assert_eq!(boxes.len(), 1);
+        let compartment = parts_bounds(&inflate_parts(
+            &held.result.placements[0].parts,
+            -held.claim_margin,
+        ));
+        let placed = &held.result.placements[0];
+        let held_axis = match placed.rotation {
+            Rotation::Deg90 | Rotation::Deg270 => compartment.depth,
+            Rotation::Deg0 | Rotation::Deg180 => compartment.width,
+        };
+        assert!(
+            (held_axis - 45.0).abs() < 1e-6,
+            "the battery's compartment is {held_axis} mm across its own width, not the 45 mm it \
+             was held to -- rotation {:?}",
+            placed.rotation
+        );
+
+        let loose = fit(
+            input::parse(&SNUG.replace("max_size = [45, \"\"]", "")).expect("valid"),
+            FitMode::Walls,
+        )
+        .expect("the same drawer builds unheld");
+        assert_eq!(loose.clamped, 0);
+        let grew = parts_bounds(&inflate_parts(
+            &loose.result.placements[0].parts,
+            -loose.claim_margin,
+        ));
+        let loose_axis = match loose.result.placements[0].rotation {
+            Rotation::Deg90 | Rotation::Deg270 => grew.depth,
+            Rotation::Deg0 | Rotation::Deg180 => grew.width,
+        };
+        assert!(
+            loose_axis > 45.0 + 1.0,
+            "without the limit the same compartment grows to {loose_axis} mm, so the test can see \
+             the difference"
         );
     }
 

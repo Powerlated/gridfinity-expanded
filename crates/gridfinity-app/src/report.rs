@@ -505,8 +505,15 @@ fn dividers(run: &Run) {
             (absorbed, evened, grown) => format!(
                 "{absorbed} strip(s) of leftover absorbed into the compartments facing them, \
                  {grown} wall(s) grown into leftover no strip covered, {evened} run(s) of slack \
-                 evened between their two ends -- no wall moved more than {} mm",
-                mm(run.spec.tidy_absorb)
+                 evened between their two ends -- no wall moved more than {} mm{}",
+                mm(run.spec.tidy_absorb),
+                match run.clamped {
+                    0 => String::new(),
+                    n => format!(
+                        ", and {n} compartment(s) pulled back afterwards to the max_size their \
+                         object states"
+                    ),
+                }
             ),
         },
     );

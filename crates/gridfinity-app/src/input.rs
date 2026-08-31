@@ -19,7 +19,7 @@ use gridfinity_cad::gridfinity::{
 };
 use gridfinity_cad::printers::{DEFAULT_PRINTER, PRINTER_PROFILES, PrinterProfile};
 use gridfinity_cad::project::pack::{PackEffort, PackObject};
-use gridfinity_cad::project::rects::{Rect, parts_connected};
+use gridfinity_cad::project::rects::{Rect, parts_bounds, parts_connected};
 
 /// One of the units a measurement may name, as the millimetres it is worth. The
 /// empty unit is millimetres, so `"400"` and `400` are the same length.
@@ -84,6 +84,34 @@ impl<'de> serde::Deserialize<'de> for Length {
     }
 }
 
+/// A length the file may decline to state, as `max_size` does per axis: a number
+/// or a measured string is a limit, and an empty string is none.
+///
+/// An empty string rather than a missing entry, because `max_size` names both
+/// axes positionally -- `["4.5 cm", ""]` holds the width and lets the depth be
+/// whatever the fit gives it, and there is no way to say that with a shorter
+/// list.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Limit(Option<f64>);
+
+impl<'de> serde::Deserialize<'de> for Limit {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Stated {
+            Millimetres(f64),
+            Measured(String),
+        }
+        match Stated::deserialize(deserializer)? {
+            Stated::Millimetres(mm) => Ok(Limit(Some(mm))),
+            Stated::Measured(text) if text.trim().is_empty() => Ok(Limit(None)),
+            Stated::Measured(text) => text_to_mm(&text)
+                .map(|mm| Limit(Some(mm)))
+                .map_err(serde::de::Error::custom),
+        }
+    }
+}
+
 /// The drawer's inside measurements, in millimetres.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,8 +160,9 @@ struct BoxSpec {
     height: Option<Length>,
 }
 
-/// One thing to organise: a name, how many of it, and its footprint stated
-/// either as a single `size` or as an edge-connected list of `boxes`.
+/// One thing to organise: a name, how many of it, its footprint stated either
+/// as a single `size` or as an edge-connected list of `boxes`, and optionally
+/// the most its compartment may grow to.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ObjectSpec {
@@ -141,6 +170,7 @@ struct ObjectSpec {
     quantity: Option<u32>,
     size: Option<Vec<Length>>,
     boxes: Option<Vec<BoxSpec>>,
+    max_size: Option<Vec<Limit>>,
 }
 
 /// The file as written.
@@ -154,12 +184,20 @@ struct InputFile {
     objects: Vec<ObjectSpec>,
 }
 
-/// One validated object: what the packer needs, plus the tallest height the file
-/// declared for it, which drives no geometry but is reported against the cavity.
+/// One validated object: what the packer needs, the tallest height the file
+/// declared for it, which drives no geometry but is reported against the cavity,
+/// and the most its compartment may measure.
 #[derive(Debug)]
 pub struct Object {
     pub pack: PackObject,
     pub height: Option<f64>,
+    /// The most this object's compartment may measure on each axis of the
+    /// object's **own** frame, in millimetres, `None` on an axis it is not held
+    /// to. Stated as `max_size`; `settle` grows a compartment into whatever
+    /// leftover faces it, and an object that must not turn in its compartment --
+    /// a battery, a row of drill bits -- is one that wants that growth bounded.
+    /// Never smaller than the object itself, which `parse` refuses.
+    pub max_size: [Option<f64>; 2],
 }
 
 /// A validated run: the drawer, the bin's parameters, the printer to fit, and
@@ -260,6 +298,54 @@ fn size_to_parts(size: &[Length], whose: &str) -> Result<(Vec<Rect>, Option<f64>
         positive(h, "size height", whose)?;
     }
     Ok((vec![Rect::new(0.0, 0.0, width, depth)], height))
+}
+
+/// The `max_size` array as the two limits it states, against the object's own
+/// footprint: `[width, depth]`, each a length or an empty string for no limit.
+///
+/// A limit is what the compartment may measure, so it is refused below the
+/// object's own extent on that axis -- a compartment smaller than the thing in
+/// it is not a smaller compartment, it is a fit that does not hold. Stating the
+/// object's own size, as a battery tray does, is the tightest legal answer and
+/// means "grow this one no further".
+fn max_size_of(
+    max_size: Option<&[Limit]>,
+    parts: &[Rect],
+    whose: &str,
+) -> Result<[Option<f64>; 2], String> {
+    let Some(stated) = max_size else {
+        return Ok([None, None]);
+    };
+    let [width, depth] = match stated {
+        [w, d] => [w, d],
+        other => {
+            return Err(format!(
+                "{whose}: max_size is [width, depth], with an empty string for no limit, but has \
+                 {} entries",
+                other.len()
+            ));
+        }
+    };
+    let bounds = parts_bounds(parts);
+    let mut out = [None, None];
+    for (index, (limit, (axis, own))) in [width, depth]
+        .into_iter()
+        .zip([("width", bounds.width), ("depth", bounds.depth)])
+        .enumerate()
+    {
+        let Some(most) = limit.0 else {
+            continue;
+        };
+        positive(most, &format!("max_size {axis}"), whose)?;
+        if most + 1e-9 < own {
+            return Err(format!(
+                "{whose}: max_size {axis} is {most} mm, but the object is {own} mm across, so no \
+                 compartment that size holds it"
+            ));
+        }
+        out[index] = Some(most);
+    }
+    Ok(out)
 }
 
 /// The `boxes` list as a part list plus the tallest height any of them declares.
@@ -390,6 +476,7 @@ pub fn parse(text: &str) -> Result<Spec, String> {
                 "{whose}: its boxes do not touch along an edge, so it is more than one object"
             ));
         }
+        let max_size = max_size_of(spec.max_size.as_deref(), &parts, &whose)?;
         objects.push(Object {
             pack: PackObject {
                 id: spec.name.clone(),
@@ -398,6 +485,7 @@ pub fn parse(text: &str) -> Result<Spec, String> {
                 quantity,
             },
             height,
+            max_size,
         });
     }
 
@@ -432,6 +520,78 @@ mod tests {
     use super::*;
 
     const MINIMAL: &str = "[drawer]\nwidth = 400\ndepth = 300\n";
+
+    /// `max_size` states a limit per axis, and an empty string is how an axis
+    /// says it has none. Both are lengths like every other measurement, so a
+    /// unit may be named.
+    #[test]
+    fn reads_a_max_size_per_axis_with_an_empty_string_for_no_limit() {
+        let spec = parse(
+            "[drawer]
+width = 400
+depth = 300
+
+[[objects]]
+name = \"battery\"
+             size = [\"4.5 cm\", \"124 mm\"]
+max_size = [\"4.5 cm\", \"\"]
+",
+        )
+        .expect("a stated max_size is a valid run");
+        assert_eq!(spec.objects[0].max_size, [Some(45.0), None]);
+    }
+
+    /// An object with no `max_size` is held to nothing, which is what every file
+    /// written before the key existed says.
+    #[test]
+    fn an_object_that_states_no_max_size_is_held_to_nothing() {
+        let spec = parse(
+            "[drawer]
+width = 400
+depth = 300
+
+[[objects]]
+name = \"a\"
+size = [10, 10]
+",
+        )
+        .expect("the fixture is a valid run");
+        assert_eq!(spec.objects[0].max_size, [None, None]);
+    }
+
+    /// A limit under the object's own extent is refused rather than clamped up:
+    /// a compartment smaller than the thing in it is not a tighter fit, it is a
+    /// fit that does not hold, and the file is where that can still be said.
+    #[test]
+    fn a_max_size_smaller_than_the_object_is_refused() {
+        let err = parse(
+            "[drawer]
+width = 400
+depth = 300
+
+[[objects]]
+name = \"a\"
+             size = [50, 20]
+max_size = [40, \"\"]
+",
+        )
+        .expect_err("40 mm does not hold a 50 mm object");
+        assert!(err.contains("max_size width"), "the error names the axis: {err}");
+
+        let short = parse(
+            "[drawer]
+width = 400
+depth = 300
+
+[[objects]]
+name = \"a\"
+             size = [50, 20]
+max_size = [60]
+",
+        )
+        .expect_err("max_size names both axes");
+        assert!(short.contains("max_size is [width, depth]"), "{short}");
+    }
 
     #[test]
     fn fills_every_setting_the_file_leaves_out() {

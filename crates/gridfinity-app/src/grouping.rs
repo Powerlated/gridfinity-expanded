@@ -16,7 +16,7 @@
 //! one grouping.
 
 use crate::input::{Object, Spec};
-use crate::optimize::{cell_rect, claim_input};
+use crate::optimize::{cell_rect, claim_input, settle_within};
 use gridfinity_cad::layout::{GridCell, GridFootprint, compartments};
 use gridfinity_cad::printers::compute_auto_split_lines;
 use gridfinity_cad::project::drawer::{DrawerGrid, cavity_region, packing_area, packing_inset};
@@ -24,7 +24,7 @@ use gridfinity_cad::project::pack::{
     PackEffort, PackInput, PackObject, PackResult, Placement, pack_layout,
 };
 use gridfinity_cad::project::rects::{Rect, inflate_parts, rects_overlap, union_area};
-use gridfinity_cad::project::settle::{Settle, settle};
+
 use std::collections::BTreeMap;
 
 /// Every term of a grouping is priced in **cells**, and these are the prices.
@@ -107,6 +107,7 @@ pub struct GroupPlan {
     pub absorbed: usize,
     pub evened: usize,
     pub grown: usize,
+    pub clamped: usize,
 }
 
 impl GroupPlan {
@@ -263,13 +264,7 @@ pub fn plan_group_bin(
         packing_inset(spec.wall_thickness),
     );
     let cavity = cavity_region(&cells, spec.pitch, packing_inset(spec.wall_thickness));
-    let settled = settle(
-        &result.placements,
-        &cavity,
-        Settle {
-            absorb: spec.tidy_absorb,
-        },
-    );
+    let (settled, clamped) = settle_within(&result.placements, &cavity, spec, margin);
     Ok(GroupPlan {
         objects: ids,
         cells,
@@ -278,6 +273,7 @@ pub fn plan_group_bin(
         absorbed: settled.absorbed,
         evened: settled.evened,
         grown: settled.grown,
+        clamped,
     })
 }
 
