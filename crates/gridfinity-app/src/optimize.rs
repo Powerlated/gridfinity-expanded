@@ -201,11 +201,13 @@ pub struct Run {
     pub claim_margin: f64,
     pub wall_report: WallReport,
     /// What settling the packed layout took: free bands of leftover absorbed
-    /// into the compartments facing them, and slabs whose slack was evened out
+    /// into the compartments facing them, claim walls grown into the leftover no
+    /// band reached, and slabs whose slack was evened out
     /// between their two ends. Zero and zero is a layout the packer already left
     /// square.
     pub absorbed: usize,
     pub evened: usize,
+    pub grown: usize,
     pub pockets: Vec<Pocket>,
     /// One entry per object that was given a bin of its own, in `params.bins`
     /// order. Empty in `walls` mode, where the drawer is the one bin.
@@ -324,6 +326,11 @@ pub struct View {
     pub bin_names: Vec<String>,
 }
 
+/// How far outside its compartment a drawn object may measure before the fit is
+/// wrong rather than merely rounded: `Rect::right` and `Rect::bottom` quantise,
+/// so a claim and the object inside it agree only to that quantum.
+const BOX_IN_COMPARTMENT_MM: f64 = 1e-6;
+
 /// Every placed instance's boxes, lifted from the packer's millimetre rectangles
 /// into the bin's own coordinates: each part rectangle standing on the cavity
 /// floor, rising by the height its object declared, or filling the cavity when
@@ -334,8 +341,20 @@ pub struct View {
 /// the half divider that stands on the claim boundary -- so it reaches to the
 /// divider centrelines and to the edge of the packing area by construction.
 /// Drawing it is drawing a box that laps every wall the layout has, which is a
-/// picture of the reservation and not of the object; `inflate_parts` by the
-/// negative margin is what puts the object back.
+/// picture of the reservation and not of the object.
+///
+/// **And deflating the claim is not enough either, because `settle` grows it.**
+/// Absorbing a strip of leftover into a compartment widens the claim after the
+/// packer is done with it, so `claim - claim_margin` is the *compartment*, not
+/// the object: on `examples/ikea-alex-drawer-1.toml`, whose `tidy_absorb` is
+/// 100 mm, that draws a tape measure as the whole end of the drawer. The object
+/// is its own declared boxes, `rotate_parts` by the quarter turn the packer
+/// chose, and those are what is drawn -- **centred in the compartment**, since
+/// the compartment is the only thing that says where the object is and the
+/// object is free to sit anywhere in it. A layout that settled nothing draws
+/// exactly what deflating the claim drew, which is what
+/// `an_object_is_drawn_at_its_own_size_however_much_its_compartment_grew` holds
+/// both halves of.
 ///
 /// `packing_area` is already in the bin's coordinates, so nothing else needs a
 /// transform -- the rotation the packer chose is baked into the rectangles
@@ -370,13 +389,32 @@ fn object_boxes(run: &Run) -> Vec<ObjectBox> {
                 )
             });
         let height = object.height.unwrap_or(depth);
-        let parts = inflate_parts(&placement.parts, -margin);
+        let compartment = parts_bounds(&inflate_parts(&placement.parts, -margin));
+        let turned = rotate_parts(&object.pack.parts, placement.rotation);
+        let own = parts_bounds(&turned);
         assert!(
-            parts.len() == placement.parts.len(),
-            "deflating a claim by the margin it was grown by returns the object's own boxes, \
-             but {} boxes came back from {}",
-            parts.len(),
+            turned.len() == placement.parts.len(),
+            "an instance of {} is {} box(es), so its claim is {} and not {}",
+            object.pack.name,
+            turned.len(),
+            turned.len(),
             placement.parts.len()
+        );
+        assert!(
+            own.width <= compartment.width + BOX_IN_COMPARTMENT_MM
+                && own.depth <= compartment.depth + BOX_IN_COMPARTMENT_MM,
+            "{} measures {} x {} mm and its compartment {} x {} mm, so the object does not go in \
+             the space the fit reserved for it",
+            object.pack.name,
+            own.width,
+            own.depth,
+            compartment.width,
+            compartment.depth
+        );
+        let parts = translate_parts(
+            &turned,
+            compartment.x + 0.5 * (compartment.width - own.width) - own.x,
+            compartment.y + 0.5 * (compartment.depth - own.depth) - own.y,
         );
         for part in &parts {
             out.push(ObjectBox {
@@ -607,10 +645,12 @@ fn baseplate_params(
 struct Plan {
     result: PackResult,
     /// What settling the layout took: free bands absorbed into the compartments
-    /// facing them, and slabs whose slack was evened out. Summed over the bins
+    /// facing them, walls grown into what no band reached, and slabs whose slack
+    /// was evened out. Summed over the bins
     /// in the modes that build several.
     absorbed: usize,
     evened: usize,
+    grown: usize,
     grouping: Option<Grouping>,
     pockets: Vec<Pocket>,
     params: Params,
@@ -726,6 +766,7 @@ fn plan_walls(spec: &Spec, cells: &[GridCell], area: Rect, floor_fillet: f64) ->
         result,
         absorbed: settled.absorbed,
         evened: settled.evened,
+        grown: settled.grown,
         grouping: None,
         pockets,
         params,
@@ -886,6 +927,7 @@ fn lay_out_bins(spec: &Spec, grid: DrawerGrid, plans: &[GroupPlan]) -> Result<Pl
         },
         absorbed: plans.iter().map(|p| p.absorbed).sum(),
         evened: plans.iter().map(|p| p.evened).sum(),
+        grown: plans.iter().map(|p| p.grown).sum(),
         pockets,
         params: bins_params(spec, logical),
         wall_report: WallReport::default(),
@@ -1034,6 +1076,7 @@ fn fit(spec: Spec, mode: FitMode) -> Result<Run, String> {
         result,
         absorbed,
         evened,
+        grown,
         grouping,
         pockets,
         params,
@@ -1103,6 +1146,7 @@ fn fit(spec: Spec, mode: FitMode) -> Result<Run, String> {
         wall_report,
         absorbed,
         evened,
+        grown,
         pockets,
         bins,
         grouping,
@@ -1797,7 +1841,8 @@ baseplate = false");
     /// would pass vacuously.
     #[test]
     fn the_space_no_object_was_packed_into_is_solid() {
-        let spec = input::parse(ROOMY).expect("the fixture is a valid run");
+        let spec = input::parse(&ROOMY.replace("effort = \"quick\"", "effort = \"quick\"\ntidy_absorb = 0"))
+            .expect("the fixture is a valid run");
         let run = fit(spec, FitMode::Walls).expect("a three-cell drawer of four blocks builds");
         let floors = compartment_floors(&run.pieces[0].solid);
 
@@ -1965,6 +2010,89 @@ boxes = [
   { x = 0, y = 40, width = 40, depth = 60 },
 ]
 ";
+
+    /// One 30 x 20 mm object in a two-cell drawer, twice: once with the settling
+    /// that grows its claim to the whole cavity and once with none at all. The two are the
+    /// halves of what a drawn object is -- its own size, wherever its
+    /// compartment ended up.
+    const ROOMY_ONE: &str = "[drawer]
+width = 100
+depth = 100
+
+[settings]
+effort = \"quick\"
+tidy_absorb = 100
+
+[[objects]]
+name = \"widget\"
+size = [30, 20]
+";
+
+    /// A drawn object is the object, not the compartment the fit gave it.
+    ///
+    /// `settle` absorbs leftover into a claim after the packer is done with it,
+    /// so `claim - claim_margin` is the compartment and can be many times the
+    /// object -- at `tidy_absorb = 100` this one's compartment is the better
+    /// part of the drawer. The box must still measure 30 x 20 mm, and must still
+    /// stand inside that compartment.
+    ///
+    /// The second half is the regression guard in the other direction: with
+    /// nothing absorbed the compartment *is* the object, and the box must be
+    /// exactly where deflating the claim always put it.
+    #[test]
+    fn an_object_is_drawn_at_its_own_size_however_much_its_compartment_grew() {
+        let settled = fit(
+            input::parse(ROOMY_ONE).expect("the fixture is a valid run"),
+            FitMode::Walls,
+        )
+        .expect("one small object in a 100 mm drawer builds");
+        assert!(settled.absorbed > 0, "the fixture is meant to settle its one claim");
+
+        let boxes = object_boxes(&settled);
+        assert_eq!(boxes.len(), 1);
+        let b = &boxes[0];
+        let (w, d) = (b.max.x - b.min.x, b.max.y - b.min.y);
+        assert!(
+            (w - 30.0).abs() < 1e-9 && (d - 20.0).abs() < 1e-9,
+            "the widget is drawn {w} x {d} mm, not the 30 x 20 mm it was declared as"
+        );
+        let claim = parts_bounds(&settled.result.placements[0].parts);
+        let compartment = parts_bounds(&inflate_parts(&[claim], -settled.claim_margin));
+        assert!(
+            compartment.width > w + 1.0 && compartment.depth > d + 1.0,
+            "settling did not grow this compartment, so the test cannot see the defect"
+        );
+        assert!(
+            b.min.x >= compartment.x - 1e-9
+                && b.min.y >= compartment.y - 1e-9
+                && b.max.x <= compartment.right() + 1e-9
+                && b.max.y <= compartment.bottom() + 1e-9,
+            "the widget is drawn outside the compartment the fit gave it"
+        );
+
+        let unsettled = fit(
+            input::parse(&ROOMY_ONE.replace("tidy_absorb = 100", "tidy_absorb = 0"))
+                .expect("the fixture is a valid run"),
+            FitMode::Walls,
+        )
+        .expect("the same drawer builds without settling");
+        assert_eq!(unsettled.absorbed, 0, "nothing is absorbed at tidy_absorb = 0");
+        let plain = object_boxes(&unsettled);
+        let deflated = inflate_parts(
+            &unsettled.result.placements[0].parts,
+            -unsettled.claim_margin,
+        );
+        assert!(
+            (plain[0].min.x - deflated[0].x).abs() < 1e-9
+                && (plain[0].min.y - deflated[0].y).abs() < 1e-9,
+            "with nothing absorbed the object is exactly the deflated claim, but it is drawn at \
+             ({}, {}) against ({}, {})",
+            plain[0].min.x,
+            plain[0].min.y,
+            deflated[0].x,
+            deflated[0].y
+        );
+    }
 
     /// Every cell of every bin, so two bins can be asked whether they stand in
     /// the same place.

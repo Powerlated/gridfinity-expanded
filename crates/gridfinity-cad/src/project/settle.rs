@@ -19,9 +19,14 @@
 //! two operations on each axis and then recurses into the blocks the surviving
 //! bands leave, which partitions the claims and so terminates.
 //!
-//! What it therefore cannot reach is leftover that is not a full band of its
-//! slab -- an L-shaped pocket between three claims stays exactly as the packer
-//! left it. Reshaping that needs a move whose safety is not the band argument.
+//! What the band passes cannot reach is leftover that is not a full band of
+//! any slab -- the L between three claims, which is most of what a real
+//! two-dimensional packing leaves. So a third pass *grows* each claim face by
+//! face into the space directly in front of it, which is a different safety
+//! argument and a weaker one: not that the move cannot change which claims
+//! touch which, but simply that the ground taken is ground the cavity covers
+//! and no other claim stands on. It runs last, over what the two band passes
+//! settled.
 
 use super::pack::Placement;
 use super::rects::{Rect, quantize, rect_contains, rect_covered_by, rects_overlap};
@@ -41,20 +46,76 @@ pub struct Settle {
 }
 
 /// A settled layout and what settling it took: the claims in the order they were
-/// given, how many free bands were absorbed, and how many slabs had the slack at
-/// their two ends evened out.
+/// given, how many free bands were absorbed, how many slabs had the slack at
+/// their two ends evened out, and how many claim faces were grown into leftover
+/// no band reached.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settled {
     pub placements: Vec<Placement>,
     pub absorbed: usize,
     pub evened: usize,
+    pub grown: usize,
 }
 
 impl Settled {
     /// Whether the pass changed the layout at all, which is what a report saying
     /// so reads.
     pub fn moved(&self) -> bool {
-        self.absorbed > 0 || self.evened > 0
+        self.absorbed > 0 || self.evened > 0 || self.grown > 0
+    }
+}
+
+/// The four sides a claim can be pushed out on, in the order `grow` tries them.
+const FACES: [Face; 4] = [Face::MinX, Face::MaxX, Face::MinY, Face::MaxY];
+
+/// One side of a claim, as the three questions growing it asks: what the claim
+/// becomes when that side moves out by a distance, how far that side is from
+/// another rectangle's facing side, and how far it is from the far side of a
+/// cavity rectangle it might grow into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Face {
+    MinX,
+    MaxX,
+    MinY,
+    MaxY,
+}
+
+impl Face {
+    /// The claim with this side moved out by `d`, the other three unmoved.
+    fn grown(self, r: &Rect, d: f64) -> Rect {
+        match self {
+            Face::MinX => Rect::new(r.x - d, r.y, r.width + d, r.depth),
+            Face::MaxX => Rect::new(r.x, r.y, r.width + d, r.depth),
+            Face::MinY => Rect::new(r.x, r.y - d, r.width, r.depth + d),
+            Face::MaxY => Rect::new(r.x, r.y, r.width, r.depth + d),
+        }
+    }
+
+    /// How far this side of `r` stands from the side of `other` that faces it,
+    /// or 0 where `other` is behind it. A candidate distance, not a bound: a
+    /// rectangle that does not stand in front of this face at all still names
+    /// the distance at which it would be met, and `grow_face` rejects it by
+    /// testing the grown claim rather than by reasoning about which is which.
+    fn gap(self, r: &Rect, other: &Rect) -> f64 {
+        let d = match self {
+            Face::MinX => quantize(r.x) - other.right(),
+            Face::MaxX => quantize(other.x) - r.right(),
+            Face::MinY => quantize(r.y) - other.bottom(),
+            Face::MaxY => quantize(other.y) - r.bottom(),
+        };
+        d.max(0.0)
+    }
+
+    /// How far this side of `r` would move to land on the far side of `cover`,
+    /// which is where a claim growing into a cavity rectangle stops.
+    fn reach(self, r: &Rect, cover: &Rect) -> f64 {
+        let d = match self {
+            Face::MinX => quantize(r.x) - quantize(cover.x),
+            Face::MaxX => cover.right() - r.right(),
+            Face::MinY => quantize(r.y) - quantize(cover.y),
+            Face::MaxY => cover.bottom() - r.bottom(),
+        };
+        d.max(0.0)
     }
 }
 
@@ -113,6 +174,7 @@ struct Relax<'a> {
     absorb: f64,
     absorbed: usize,
     evened: usize,
+    grown: usize,
 }
 
 /// The layout with every free band of every slab absorbed where it is no wider
@@ -152,10 +214,12 @@ pub fn settle(placements: &[Placement], region: &[Rect], opts: Settle) -> Settle
         absorb: opts.absorb,
         absorbed: 0,
         evened: 0,
+        grown: 0,
     };
     if !items.is_empty() {
         let slab = cavity_bounds(&relax.parts, &items, region);
         relax.settle_slab(slab, &items);
+        relax.grow();
     }
     relax.check(&before);
 
@@ -176,6 +240,7 @@ pub fn settle(placements: &[Placement], region: &[Rect], opts: Settle) -> Settle
         placements: out,
         absorbed: relax.absorbed,
         evened: relax.evened,
+        grown: relax.grown,
     }
 }
 
@@ -234,6 +299,88 @@ impl Relax<'_> {
                 }
             }
         }
+    }
+
+    /// Every claim grown into the leftover directly in front of each of its four
+    /// faces, to a fixed point, no face moving more than `absorb`.
+    ///
+    /// This is the move the band passes cannot make. A free band is a strong
+    /// thing to have and most layouts do not have one: bin 1 of
+    /// `examples/ikea-alex-drawer-1.toml` holds four objects in a proper
+    /// two-dimensional packing where **every** row and column of the bin is
+    /// covered by some claim, so `settle_slab` finds nothing to do and the 32 mm
+    /// beside the swiss army knife stays air. Face by face it is reachable: the
+    /// knife's `+x` face has nothing in front of it for the whole of its own
+    /// depth.
+    ///
+    /// The safety argument is direct rather than structural. Growing one face
+    /// sweeps the rectangle between that face and the first thing in front of
+    /// it, and a distance is taken only if the grown claim is still covered by
+    /// the cavity and still overlaps no claim of another placement -- so the
+    /// three properties `check` states hold move by move, not merely at the end.
+    /// Two parts of *one* placement may overlap and legitimately do, which is
+    /// why `owner` is consulted rather than the part index.
+    ///
+    /// Deterministic, and **one pass**: faces are tried in part order and in the
+    /// fixed order given by `FACES`, so where two claims want the same ground the
+    /// earlier part takes it, and each face is offered its move exactly once so
+    /// `absorb` bounds how far a wall travels rather than how far it travels per
+    /// round. A second round could find nothing anyway -- a claim only ever
+    /// grows, so what blocks a face is never afterwards out of the way.
+    fn grow(&mut self) {
+        if self.absorb <= 0.0 {
+            return;
+        }
+        for index in 0..self.parts.len() {
+            for face in FACES {
+                if self.grow_face(index, face) {
+                    self.grown += 1;
+                }
+            }
+        }
+    }
+
+    /// One face of one claim pushed out as far as the cavity and the other
+    /// placements allow, capped at `absorb`; whether it moved at all.
+    ///
+    /// The distance is chosen from the finite set of distances at which anything
+    /// changes -- every cavity rectangle's far edge and every foreign claim's
+    /// near edge, plus the cap -- so the face lands exactly on whatever stops it
+    /// rather than a bisection's guess at where that is. Candidates are tried
+    /// longest first and the first admissible one is taken, which is the largest
+    /// by construction.
+    fn grow_face(&mut self, index: usize, face: Face) -> bool {
+        let part = self.parts[index];
+        let mut steps: Vec<f64> = vec![self.absorb];
+        for r in self.region {
+            steps.push(face.reach(&part, r));
+        }
+        for other in 0..self.parts.len() {
+            if self.owner[other] != self.owner[index] {
+                steps.push(face.gap(&part, &self.parts[other]));
+            }
+        }
+        steps.retain(|d| *d > SAME_MM && *d <= self.absorb + SAME_MM);
+        steps.sort_by(f64::total_cmp);
+        steps.dedup();
+        for step in steps.into_iter().rev() {
+            let grown = face.grown(&part, step);
+            if !rect_covered_by(&grown, self.region) {
+                continue;
+            }
+            if (0..self.parts.len()).any(|other| {
+                self.owner[other] != self.owner[index] && rects_overlap(&grown, &self.parts[other])
+            }) {
+                continue;
+            }
+            assert!(
+                grown.width >= part.width - SAME_MM && grown.depth >= part.depth - SAME_MM,
+                "growing {part:?} by {step} mm returned the smaller {grown:?}"
+            );
+            self.parts[index] = grown;
+            return true;
+        }
+        false
     }
 
     /// The lines one axis of a slab is cut on: the slab's own two edges, and
@@ -456,7 +603,7 @@ fn line_index(lines: &[f64], value: f64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::rects::Rotation;
+    use super::super::rects::{Rotation, union_area};
 
     const BIN: [Rect; 1] = [Rect {
         x: 0.0,
@@ -490,14 +637,16 @@ mod tests {
         assert_eq!(settled.absorbed, 4, "one band at each end of each axis");
     }
 
-    /// The same bin with nothing worth absorbing: the compartment keeps its size
-    /// and the leftover is split evenly between the two ends of each axis, which
-    /// is the compartment standing centred in its bin.
+    /// The same bin with no band worth absorbing whole: the 5 mm ring is wider
+    /// than `absorb`, so the band pass leaves it and evens it into 5 mm at each
+    /// end -- and then the growth pass pushes each of the four walls out by the
+    /// 2 mm a wall may move, leaving 3 mm all round. The compartment is still
+    /// centred, which is what the evening was for.
     #[test]
-    fn a_compartment_too_small_to_grow_is_centred_instead() {
+    fn a_band_too_wide_to_absorb_is_centred_and_then_taken_a_wall_at_a_time() {
         let settled = settle(&[claim("a", 0.0, 0.0, 90.0, 90.0)], &BIN, Settle { absorb: 2.0 });
-        assert_eq!(part(&settled, 0), Rect::new(5.0, 5.0, 90.0, 90.0));
-        assert_eq!((settled.absorbed, settled.evened), (0, 2));
+        assert_eq!(part(&settled, 0), Rect::new(3.0, 3.0, 94.0, 94.0));
+        assert_eq!((settled.absorbed, settled.evened, settled.grown), (0, 2, 4));
     }
 
     /// A sliver against the bin wall and a narrow gap between two compartments
@@ -517,9 +666,50 @@ mod tests {
         assert_eq!(part(&settled, 1), Rect::new(42.5, 0.0, 57.5, 100.0));
     }
 
-    /// Leftover wide enough to be worth keeping is kept, and a layout already
-    /// flush against both ends of both axes has nothing to even, so the pass
-    /// returns it untouched.
+    /// The case the band passes cannot see, and the reason the growth pass
+    /// exists. Three claims interlock so that **every** row and column of the
+    /// bin is covered by one of them -- `a` across the top, `b` and `c` side by
+    /// side below -- so there is no free band anywhere, at any level of the
+    /// recursion, and `settle_slab` correctly finds nothing to do. The 20 mm
+    /// beside `a` is still leftover, and it is reachable one wall at a time.
+    ///
+    /// This is bin 1 of `examples/ikea-alex-drawer-1.toml` in miniature: four
+    /// objects packed two-dimensionally, 32 mm of air beside the swiss army
+    /// knife, and a band pass that reports nothing absorbed.
+    #[test]
+    fn leftover_that_is_no_bands_at_all_is_still_taken_face_by_face() {
+        let placements = [
+            claim("a", 0.0, 0.0, 80.0, 40.0),
+            claim("b", 0.0, 40.0, 50.0, 60.0),
+            claim("c", 50.0, 40.0, 50.0, 60.0),
+        ];
+        let banded = settle(&placements, &BIN, Settle { absorb: 0.0 });
+        assert_eq!(
+            banded.absorbed, 0,
+            "no row or column of this bin is free, so the band pass has nothing to absorb"
+        );
+        assert_eq!(banded.placements, placements, "and it moves nothing");
+
+        let settled = settle(&placements, &BIN, Settle { absorb: 25.0 });
+        assert_eq!(
+            part(&settled, 0),
+            Rect::new(0.0, 0.0, 100.0, 40.0),
+            "a takes the 20 mm beside it, which no band of any slab covers"
+        );
+        assert_eq!(part(&settled, 1), Rect::new(0.0, 40.0, 50.0, 60.0));
+        assert_eq!(part(&settled, 2), Rect::new(50.0, 40.0, 50.0, 60.0));
+        assert_eq!(
+            union_area(&[part(&settled, 0), part(&settled, 1), part(&settled, 2)]),
+            BIN[0].area(),
+            "the three compartments now cover the bin exactly"
+        );
+    }
+
+    /// Leftover wider than the two walls facing it may move stays material: the
+    /// 20 mm strip between these two claims gives 5 mm to each and keeps 10, and
+    /// at `absorb` 0 it keeps all of it. `absorb` is one lever with one meaning
+    /// -- how far a compartment wall may be pushed out into leftover -- and both
+    /// passes are held to it.
     #[test]
     fn leftover_worth_keeping_is_left_where_it_is() {
         let placements = [
@@ -527,8 +717,17 @@ mod tests {
             claim("b", 60.0, 0.0, 40.0, 100.0),
         ];
         let settled = settle(&placements, &BIN, Settle { absorb: 5.0 });
-        assert_eq!(settled.placements, placements);
-        assert!(!settled.moved());
+        assert_eq!(
+            (part(&settled, 0), part(&settled, 1)),
+            (
+                Rect::new(0.0, 0.0, 45.0, 100.0),
+                Rect::new(55.0, 0.0, 45.0, 100.0)
+            ),
+            "each wall takes the 5 mm it may and 10 mm of the 20 mm strip survives"
+        );
+        let tighter = settle(&placements, &BIN, Settle { absorb: 0.0 });
+        assert_eq!(tighter.placements, placements);
+        assert!(!tighter.moved(), "and at absorb 0 nothing moves at all");
     }
 
     /// A bin whose cells are an L is settled without leaving the L. The
@@ -547,8 +746,13 @@ mod tests {
         let settled = settle(&placements, &region, Settle { absorb: 40.0 });
         assert_eq!(
             part(&settled, 0),
-            Rect::new(1.45, 1.45, 81.1, 20.0),
-            "the arm is 81.1 mm of cavity across and the compartment may have all of it"
+            Rect::new(1.45, 1.45, 81.1, 39.1),
+            "the compartment takes the whole 81.1 mm arm across and stops at the notch, 39.1 mm \
+             down, rather than reaching into the cell the bin does not have"
+        );
+        assert!(
+            rect_covered_by(&part(&settled, 0), &region),
+            "a grown compartment stands in the cavity, notch and all"
         );
     }
 

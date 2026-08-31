@@ -12,7 +12,9 @@
 //! the leftover space is exactly the cells no claim covers.
 
 use super::pack::Placement;
-use super::rects::{Rect, Segment, boundary_segments, merge_segments, quantize};
+use super::rects::{
+    Rect, Segment, boundary_segments, merge_segments, parts_bounds, quantize, union_area,
+};
 use super::walls::on_area_boundary;
 use crate::layout::Orientation;
 use std::collections::{BTreeMap, BTreeSet};
@@ -278,37 +280,35 @@ fn boundary(placements: &[Placement], area: &Rect) -> (f64, f64) {
 /// How far the instances of each object stand apart, as the area their bounding
 /// boxes enclose but no claim of theirs covers, over `area`.
 ///
-/// The claims of a layout never overlap -- `pack_once` asserts it as it places
-/// them -- so the area an object's instances cover is the sum of their parts'
-/// areas and needs no union. Twelve sockets in a block enclose exactly what they
-/// cover and score 0; twelve scattered across the drawer enclose most of it.
+/// The area covered is a **union**, not a sum. Two claims of two placements
+/// never overlap -- `pack_once` asserts it as it places them -- but the two
+/// parts of *one* placement do by construction, each being a box of one object
+/// grown by the claim margin, and `settle`'s growth pass widens that overlap
+/// further. Summing counted the shared ground twice and made a plain L score as
+/// though its instances were spread apart. Twelve sockets in a block enclose
+/// exactly what they cover and score 0; twelve scattered across the drawer
+/// enclose most of it.
 ///
 /// An object whose instances tile their own bounding box exactly reaches that 0
 /// through a subtraction of two numbers computed different ways -- a quantised
-/// box's extents against a sum of quantised areas -- so it can land a few ulps
-/// below it. The clamp is that and only that: the assertion above still fails on
-/// a *real* excess, which would mean two claims of one object overlapping.
+/// box's extents against a quantised union -- so it can land a few ulps below
+/// it, which is what the clamp is for.
 fn grouping(placements: &[Placement], area: &Rect) -> f64 {
-    let mut boxes: BTreeMap<&str, (Rect, f64)> = BTreeMap::new();
+    let mut boxes: BTreeMap<&str, Vec<Rect>> = BTreeMap::new();
     for placement in placements {
-        for part in &placement.parts {
-            let entry = boxes
-                .entry(placement.object_id.as_str())
-                .or_insert((*part, 0.0));
-            let (lo_x, lo_y) = (entry.0.x.min(part.x), entry.0.y.min(part.y));
-            let (hi_x, hi_y) = (
-                entry.0.right().max(part.right()),
-                entry.0.bottom().max(part.bottom()),
-            );
-            entry.0 = Rect::new(lo_x, lo_y, hi_x - lo_x, hi_y - lo_y);
-            entry.1 += part.area();
-        }
+        boxes
+            .entry(placement.object_id.as_str())
+            .or_default()
+            .extend(placement.parts.iter().copied());
     }
     let mut apart = 0.0;
-    for (id, (bounds, covered)) in &boxes {
+    for (id, parts) in &boxes {
+        let bounds = parts_bounds(parts);
+        let covered = union_area(parts);
         assert!(
-            bounds.area() + 1e-6 >= *covered,
-            "{id}'s claims cover {covered} mm2 inside a {} mm2 bounding box, so two of them overlap",
+            bounds.area() + 1e-6 >= covered,
+            "{id}'s claims cover {covered} mm2 inside a {} mm2 bounding box, which does not \
+             contain them",
             bounds.area()
         );
         apart += (bounds.area() - covered).max(0.0);

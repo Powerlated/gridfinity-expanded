@@ -16,7 +16,7 @@ use crate::grouping::score as grouping_score;
 use crate::optimize::{Built, Run};
 use gridfinity_cad::project::tidy::score as layout_score;
 use gridfinity_cad::layout::{Axis, GridFootprint, Piece, SplitLine};
-use gridfinity_cad::printers::{BED_MARGIN, PrinterProfile, check_bed_fit};
+use gridfinity_cad::printers::{BED_MARGIN, BedFitResult, PrinterProfile, check_bed_fit};
 use gridfinity_cad::kernel::topo::Solid;
 use gridfinity_cad::project::rects::{Rect, inflate_parts, parts_bounds, union_area};
 use std::time::Duration;
@@ -496,11 +496,16 @@ fn dividers(run: &Run) {
     );
     field(
         "settled",
-        &match (run.absorbed, run.evened) {
-            (0, 0) => "nothing to tidy -- the packer left no strip worth absorbing and none to even out"
-                .to_string(),
-            (absorbed, evened) => format!(
-                "{absorbed} strip(s) of leftover absorbed into the compartments facing them, at up to {} mm, and {evened} run(s) of slack evened between their two ends",
+        &match (run.absorbed, run.evened, run.grown) {
+            (0, 0, 0) => {
+                "nothing to tidy -- no strip worth absorbing, no slack to even out, and no \
+                 compartment wall with room in front of it"
+                    .to_string()
+            }
+            (absorbed, evened, grown) => format!(
+                "{absorbed} strip(s) of leftover absorbed into the compartments facing them, \
+                 {grown} wall(s) grown into leftover no strip covered, {evened} run(s) of slack \
+                 evened between their two ends -- no wall moved more than {} mm",
                 mm(run.spec.tidy_absorb)
             ),
         },
@@ -566,13 +571,20 @@ fn printing(run: &Run) {
     heading("Printing");
     field(
         "printer",
-        &format!(
-            "{} ({} x {} mm bed, {} mm margin each side)",
-            printer.name,
-            printer.bed_width,
-            printer.bed_depth,
-            mm(f64::from(BED_MARGIN))
-        ),
+        &if BED_MARGIN > 0.0 {
+            format!(
+                "{} ({} x {} mm bed, {} mm margin each side)",
+                printer.name,
+                printer.bed_width,
+                printer.bed_depth,
+                mm(BED_MARGIN)
+            )
+        } else {
+            format!(
+                "{} ({} x {} mm bed, used whole)",
+                printer.name, printer.bed_width, printer.bed_depth
+            )
+        },
     );
     let (label, whole) = match run.built {
         Built::Walls => {
@@ -687,8 +699,22 @@ fn interlock(run: &Run) -> String {
         .to_string()
 }
 
+/// How a piece is laid on the bed, in a phrase, or that it does not go on at
+/// all. The angle is named because a piece that needs one needs it typed into
+/// the slicer, and a row saying only "at an angle" leaves the reader to work out
+/// which.
+fn placement(fit: &BedFitResult) -> String {
+    match (fit.fits, fit.rotated, fit.tilt_deg) {
+        (false, _, _) => "DOES NOT FIT".to_string(),
+        (_, true, _) => "fits, turned on the bed".to_string(),
+        (_, _, Some(t)) => format!("fits, laid at {t:.1} degrees"),
+        _ => "fits".to_string(),
+    }
+}
+
 /// One row of the Printing table: what a piece is called, the cells it covers,
-/// and whether the body built over them fits the bed. Each body reads its cells
+/// and whether the body built over them fits the bed, and how it has to be laid
+/// down to. Each body reads its cells
 /// off its own partition, because the plate is cut on lines staggered off the
 /// bin's and so covers different cells; the millimetres are measured off each
 /// piece's own solid, because neither body is its cells -- a bin is inset from
@@ -705,11 +731,7 @@ fn piece_row(name: &str, part: &Piece, solid: &Solid, printer: PrinterProfile) {
         footprint.1,
         fit.bin_width,
         fit.bin_depth,
-        match (fit.fits, fit.rotated) {
-            (true, true) => "fits, turned on the bed",
-            (true, false) => "fits",
-            (false, _) => "DOES NOT FIT",
-        }
+        placement(&fit)
     ));
 }
 

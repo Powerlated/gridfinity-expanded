@@ -102,9 +102,11 @@ pub struct GroupPlan {
     pub placements: Vec<Placement>,
     pub iterations: usize,
     /// What settling the bin's own layout took: free bands absorbed into the
-    /// compartments facing them, and slabs whose slack was evened out.
+    /// compartments facing them, walls grown into the leftover no band reached,
+    /// and slabs whose slack was evened out.
     pub absorbed: usize,
     pub evened: usize,
+    pub grown: usize,
 }
 
 impl GroupPlan {
@@ -275,6 +277,7 @@ pub fn plan_group_bin(
         iterations: result.iterations,
         absorbed: settled.absorbed,
         evened: settled.evened,
+        grown: settled.grown,
     })
 }
 

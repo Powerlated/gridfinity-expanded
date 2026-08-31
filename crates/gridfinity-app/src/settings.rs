@@ -167,7 +167,11 @@ fn printer(app: &mut App, ui: &mut egui::Ui) -> bool {
             format!(
                 "Bin {} fits whole: {w:.0} × {d:.0} mm{}.",
                 active + 1,
-                if fit.rotated { ", rotated" } else { "" }
+                match (fit.rotated, fit.tilt_deg) {
+                    (true, _) => ", rotated".to_string(),
+                    (_, Some(t)) => format!(", laid at {t:.1}°"),
+                    _ => String::new(),
+                }
             )
         } else {
             format!("Bin {} ({w:.0} × {d:.0} mm) exceeds the bed. Cut it.", active + 1)
