@@ -6,7 +6,7 @@ import type { Rect } from '../types';
  * These are the measurements the SVG canvases and panels take while a user is
  * drawing an object, all of them synchronous because they run inside React
  * render. The optimizer that consumes the same shapes lives in the Rust kernel
- * (`crates/gridfinity-cad/src/project/`) and is reached through the wasm
+ * (`crates/gridfinity-project/src/`) and is reached through the wasm
  * `PackSearch`; nothing here packs, rotates, or derives dividers.
  *
  * Coordinates are millimetres in the drawer plane, quantized to `QUANTUM` so a

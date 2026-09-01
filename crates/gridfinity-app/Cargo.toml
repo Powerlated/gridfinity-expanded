@@ -10,7 +10,9 @@ name = "gridfinity-app"
 path = "src/main.rs"
 
 [dependencies]
-gridfinity-cad = { path = "../gridfinity-cad" }
+gridfinity-brep = { path = "../gridfinity-brep" }
+gridfinity-model = { path = "../gridfinity-model" }
+gridfinity-project = { path = "../gridfinity-project" }
 gridfinity-render = { path = "../gridfinity-render" }
 eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
 egui = "0.35"

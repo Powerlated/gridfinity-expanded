@@ -28,24 +28,26 @@ use crate::grouping::{GroupPlan, Grouping, choose_groups, outer_pack, plan_group
 use crate::input::{self, Object, Spec};
 use crate::report;
 use clap::{Parser, ValueEnum};
-use gridfinity_cad::gridfinity::{self, BinPiece, LogicalBin, Mode, Params, Pocket};
-use gridfinity_cad::kernel::math::Vec3;
-use gridfinity_cad::kernel::program::BlendReport;
-use gridfinity_cad::kernel::topo::Solid;
-use gridfinity_cad::layout::{GridCell, Piece, SplitLine, partition_cells};
-use gridfinity_cad::printers::{compute_auto_split_lines, compute_staggered_split_lines};
-use gridfinity_cad::project::drawer::{
+use gridfinity_model::gridfinity::{self, BinPiece, LogicalBin, Mode, Params, Pocket};
+use gridfinity_brep::math::Vec3;
+use gridfinity_brep::program::BlendReport;
+use gridfinity_brep::topo::Solid;
+use gridfinity_model::layout::{GridCell, Piece, SplitLine, partition_cells};
+use gridfinity_model::printers::{compute_auto_split_lines, compute_staggered_split_lines};
+use gridfinity_project::drawer::{
     DrawerGrid, MAX_GRID, cavity_region, drawer_cells, drawer_grid, packing_area, packing_inset,
 };
-use gridfinity_cad::project::pack::{
+use gridfinity_project::pack::{
     PackEffort, PackInput, PackObject, PackResult, Placement, pack_layout,
 };
-use gridfinity_cad::project::rects::{
+use gridfinity_project::rects::{
     Rect, Rotation, inflate_parts, parts_bounds, rotate_parts, translate_parts,
 };
-use gridfinity_cad::project::settle::{Extents, Settle, Settled, clamp, settle};
-use gridfinity_cad::project::tidy::tidiness;
-use gridfinity_cad::project::walls::{WallReport, layout_walls_reporting};
+use gridfinity_project::settle::{Extents, Settle, Settled, clamp, settle};
+use gridfinity_project::tidy::tidiness;
+use gridfinity_project::walls::{WallReport, layout_walls_reporting};
+use gridfinity_brep::round::MIN_ARC_R;
+use gridfinity_model::subbin::{SubbinSpec, build_subbin, buildable_interior_corner};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -216,6 +218,9 @@ pub struct Run {
     /// How the objects were grouped into bins, for a run that grouped them.
     /// `None` in every mode but `hybrid`, which is the only one that chooses.
     pub grouping: Option<Grouping>,
+    /// One insert per placed instance of an object that asked for one, in
+    /// placement order. Empty for a file that asks for none.
+    pub subbins: Vec<BuiltSubbin>,
     pub params: Params,
     pub plate_params: Option<Params>,
     pub split_lines: Vec<SplitLine>,
@@ -232,13 +237,41 @@ pub struct Run {
     pub export_time: Duration,
 }
 
+/// One body a run wrote or would write: the file it is named as, and the solid
+/// it is.
+///
+/// The writers and the Soundness section read this rather than a `BinPiece`,
+/// because an insert is neither a piece of a bin nor a piece of a baseplate --
+/// it has no cells and no partition -- and everything downstream of the build
+/// wants only the two things every body has.
+pub struct Body<'a> {
+    pub name: &'a str,
+    pub solid: &'a Solid,
+}
+
 impl Run {
     /// Everything this run built, in the order it is written: the bin's pieces,
-    /// then the baseplate's, which are empty when the file asked for none. The
-    /// export and the report both read this rather than either list alone, so a
-    /// file that is written is a file the soundness section accounts for.
-    pub fn all_pieces(&self) -> Vec<&BinPiece> {
-        self.pieces.iter().chain(self.baseplate.iter()).collect()
+    /// then the baseplate's, then the inserts, each of the last two empty when
+    /// the file asked for none. The export and the report both read this rather
+    /// than any one list alone, so a file that is written is a file the
+    /// soundness section accounts for.
+    pub fn all_pieces(&self) -> Vec<Body<'_>> {
+        fn bodies(pieces: &[BinPiece]) -> Vec<Body<'_>> {
+            pieces
+                .iter()
+                .map(|p| Body {
+                    name: &p.name,
+                    solid: &p.solid,
+                })
+                .collect()
+        }
+        let mut out = bodies(&self.pieces);
+        out.extend(bodies(&self.baseplate));
+        out.extend(self.subbins.iter().map(|s| Body {
+            name: &s.name,
+            solid: &s.solid,
+        }));
+        out
     }
 
     /// Whether the stack holds itself together: every seam of the bin is spanned
@@ -339,6 +372,20 @@ pub struct View {
     /// The same for the baseplate's own pieces, in its own piece order. Empty
     /// for a run with no plate.
     pub plate_files: Vec<String>,
+    /// Every insert the fit built, as the declaration that rebuilds it. It
+    /// travels as a spec rather than as geometry for the same reason the plate
+    /// travels as its own `Params`: the window rebuilds what the export wrote.
+    pub subbins: Vec<PlacedSubbin>,
+}
+
+/// One insert as the window is given it: what to call it, the file it would be
+/// written as, the declaration that rebuilds it, and which of `params.bins` it
+/// stands in -- which is the bin whose seams it opens with.
+pub struct PlacedSubbin {
+    pub label: String,
+    pub file: String,
+    pub bin: usize,
+    pub spec: SubbinSpec,
 }
 
 /// The name every built piece would be written as, gathered for the viewer:
@@ -397,6 +444,11 @@ const BOX_IN_COMPARTMENT_MM: f64 = 1e-6;
 /// Drawing it is drawing a box that laps every wall the layout has, which is a
 /// picture of the reservation and not of the object.
 ///
+/// **An object given an insert is drawn standing in the insert**, not on the
+/// compartment floor: the space holding it is the insert's own interior, and it
+/// is lifted by the insert's floor. Everything else about the drawing is the
+/// same, which is what keeps the two cases one function.
+///
 /// **And deflating the claim is not enough either, because `settle` grows it.**
 /// Absorbing a strip of leftover into a compartment widens the claim after the
 /// packer is done with it, so `claim - claim_margin` is the *compartment*, not
@@ -419,15 +471,6 @@ fn object_boxes(run: &Run) -> Vec<ObjectBox> {
     let depth = run.spec.cavity_depth();
     let floor = gridfinity::BASE_TOTAL_HEIGHT + gridfinity::FLOOR_THICKNESS;
     let margin = run.claim_margin;
-    let bin_of = |object_id: &str| -> usize {
-        if run.bins.is_empty() {
-            return 0;
-        }
-        run.bins
-            .iter()
-            .position(|b| b.objects.iter().any(|id| id == object_id))
-            .unwrap_or_else(|| panic!("{object_id} was packed into a bin the fit does not carry"))
-    };
     let mut out = Vec::new();
     for (instance, placement) in run.result.placements.iter().enumerate() {
         let object = run
@@ -442,12 +485,29 @@ fn object_boxes(run: &Run) -> Vec<ObjectBox> {
                     run.spec.objects.len()
                 )
             });
-        let height = object.height.unwrap_or(depth);
-        let compartment = parts_bounds(&inflate_parts(&placement.parts, -margin));
-        let turned = rotate_parts(&object.pack.parts, placement.rotation);
+        let insert = run.subbins.iter().find(|s| s.instance == instance);
+        let (holds, stands_on, clears) = match insert {
+            Some(sub) => (
+                Rect::new(
+                    sub.spec.x + sub.spec.walls().0,
+                    sub.spec.y + sub.spec.walls().1,
+                    sub.spec.interior_width,
+                    sub.spec.interior_depth,
+                ),
+                sub.spec.z + sub.spec.floor,
+                sub.spec.interior_height,
+            ),
+            None => (
+                parts_bounds(&inflate_parts(&placement.parts, -margin)),
+                floor,
+                depth,
+            ),
+        };
+        let height = object.height.unwrap_or(clears);
+        let turned = rotate_parts(&object.footprint, placement.rotation);
         let own = parts_bounds(&turned);
         assert!(
-            turned.len() == placement.parts.len(),
+            insert.is_some() || turned.len() == placement.parts.len(),
             "an instance of {} is {} box(es), so its claim is {} and not {}",
             object.pack.name,
             turned.len(),
@@ -455,33 +515,176 @@ fn object_boxes(run: &Run) -> Vec<ObjectBox> {
             placement.parts.len()
         );
         assert!(
-            own.width <= compartment.width + BOX_IN_COMPARTMENT_MM
-                && own.depth <= compartment.depth + BOX_IN_COMPARTMENT_MM,
-            "{} measures {} x {} mm and its compartment {} x {} mm, so the object does not go in \
-             the space the fit reserved for it",
+            own.width <= holds.width + BOX_IN_COMPARTMENT_MM
+                && own.depth <= holds.depth + BOX_IN_COMPARTMENT_MM,
+            "{} measures {} x {} mm and the space holding it {} x {} mm, so the object does not \
+             go in the space the fit reserved for it",
             object.pack.name,
             own.width,
             own.depth,
-            compartment.width,
-            compartment.depth
+            holds.width,
+            holds.depth
         );
         let parts = translate_parts(
             &turned,
-            compartment.x + 0.5 * (compartment.width - own.width) - own.x,
-            compartment.y + 0.5 * (compartment.depth - own.depth) - own.y,
+            holds.x + 0.5 * (holds.width - own.width) - own.x,
+            holds.y + 0.5 * (holds.depth - own.depth) - own.y,
         );
         for part in &parts {
             out.push(ObjectBox {
                 name: object.pack.name.clone(),
                 instance,
-                bin: bin_of(&placement.object_id),
-                min: Vec3::new(part.x, part.y, floor),
-                max: Vec3::new(part.right(), part.bottom(), floor + height),
-                fits: height <= depth,
+                bin: bin_of(&run.bins, &placement.object_id),
+                min: Vec3::new(part.x, part.y, stands_on),
+                max: Vec3::new(part.right(), part.bottom(), stands_on + height),
+                fits: height <= clears,
             });
         }
     }
     out
+}
+
+/// One insert, built and standing where it belongs: what it holds, which bin it
+/// stands in, the declaration that reproduces it, and the solid itself.
+///
+/// The spec travels beside the solid for the same reason the baseplate's
+/// `Params` does -- `--view` rebuilds from the declaration the export wrote
+/// from, rather than being handed geometry -- and the report reads its
+/// measurements off it rather than re-deriving them from the placement.
+pub struct BuiltSubbin {
+    pub name: String,
+    pub object: String,
+    pub instance: usize,
+    pub bin: usize,
+    pub spec: SubbinSpec,
+    pub solid: Solid,
+}
+
+/// Every placed instance of an object that asked for a subbin, as the insert it
+/// asks for, built in the drawer's own millimetres.
+///
+/// The compartment is the placement's claim inset by half a divider -- the same
+/// pocket `drawer_pockets` states -- and the insert is that pocket inset by
+/// `subbin_clearance` on every side, so it stands that gap inside the
+/// compartment at every height and its bottom chamfer clears the floor blend.
+/// That gap is a part fitting a part and is not `clearance`, which is the room
+/// an object is given inside its compartment.
+/// An axis the file pinned keeps exactly the interior it stated; an axis it left
+/// open takes whatever settling grew the compartment to, less the two walls.
+/// Height comes from the file or fills the compartment.
+///
+/// One path for every `--mode`, because a `Placement` is in drawer millimetres
+/// in all four of them.
+fn build_subbins(
+    spec: &Spec,
+    result: &PackResult,
+    bins: &[FittedBin],
+    floor_fillet: f64,
+) -> Result<Vec<BuiltSubbin>, String> {
+    let wall = spec.subbin_wall_thickness;
+    let floor_z = gridfinity::BASE_TOTAL_HEIGHT + gridfinity::FLOOR_THICKNESS;
+    let inset = spec.divider_thickness / 2.0 + spec.subbin_clearance;
+    let mut out: Vec<BuiltSubbin> = Vec::new();
+    for (instance, placement) in result.placements.iter().enumerate() {
+        let object = spec
+            .objects
+            .iter()
+            .find(|o| o.pack.id == placement.object_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the packer placed {:?}, which is not one of the {} objects it was given",
+                    placement.object_id,
+                    spec.objects.len()
+                )
+            });
+        let Some(subbin) = object.subbin else {
+            continue;
+        };
+        assert_eq!(
+            placement.parts.len(),
+            1,
+            "{} asks for an insert, so it is one box and its claim is one rectangle",
+            object.pack.name
+        );
+        let claim = placement.parts[0];
+        let outer = Rect::new(
+            claim.x + inset,
+            claim.y + inset,
+            claim.width - 2.0 * inset,
+            claim.depth - 2.0 * inset,
+        );
+        let [along, across] = [subbin.interior[0], subbin.interior[1]];
+        let pinned = match placement.rotation {
+            Rotation::Deg90 | Rotation::Deg270 => [across, along],
+            Rotation::Deg0 | Rotation::Deg180 => [along, across],
+        };
+        let interior = [
+            pinned[0].unwrap_or(outer.width - 2.0 * wall),
+            pinned[1].unwrap_or(outer.depth - 2.0 * wall),
+        ];
+        for (axis, outer, interior) in [
+            ("width", outer.width, interior[0]),
+            ("depth", outer.depth, interior[1]),
+        ] {
+            assert!(
+                outer - interior >= 2.0 * wall - 1e-6,
+                "{}'s compartment is {outer} mm in {axis} around a {interior} mm interior, which \
+                 leaves less than the {wall} mm wall the insert is built with",
+                object.pack.name
+            );
+        }
+        let chamfer = floor_fillet;
+        let corner_r = spec.fillet_radius.max(chamfer + MIN_ARC_R);
+        let built = SubbinSpec {
+            x: outer.x,
+            y: outer.y,
+            z: floor_z,
+            outer_width: outer.width,
+            outer_depth: outer.depth,
+            interior_width: interior[0],
+            interior_depth: interior[1],
+            interior_height: subbin.interior[2]
+                .unwrap_or_else(|| (spec.cavity_depth() - wall).max(wall)),
+            interior_corner_r: buildable_interior_corner(
+                corner_r - wall,
+                interior[0],
+                interior[1],
+            ),
+            floor: wall.max(chamfer),
+            corner_r,
+            chamfer,
+        };
+        let solid = build_subbin(&built)
+            .map_err(|e| format!("the insert for {}: {e}", object.pack.name))?;
+        out.push(BuiltSubbin {
+            name: String::new(),
+            object: object.pack.name.clone(),
+            instance,
+            bin: bin_of(bins, &placement.object_id),
+            spec: built,
+            solid,
+        });
+    }
+    let total = out.len();
+    for (i, subbin) in out.iter_mut().enumerate() {
+        subbin.name = if total == 1 {
+            "gridfinity-subbin.stl".to_string()
+        } else {
+            format!("gridfinity-subbin-{}-of-{total}.stl", i + 1)
+        };
+    }
+    Ok(out)
+}
+
+/// Which of a run's bins an object stands in: the one holding it, and 0 for a
+/// `walls` run, where the drawer is the one bin.
+fn bin_of(bins: &[FittedBin], object_id: &str) -> usize {
+    if bins.is_empty() {
+        return 0;
+    }
+    bins.iter()
+        .position(|b| b.objects.iter().any(|id| id == object_id))
+        .unwrap_or_else(|| panic!("{object_id} was packed into a bin the fit does not carry"))
 }
 
 /// What one built piece is made of, and what the audit had to say that was not
@@ -501,23 +704,23 @@ pub struct PieceSoundness {
 }
 
 /// What each built piece is made of, in the order the model built them.
-fn soundness_of(pieces: &[&BinPiece]) -> Vec<PieceSoundness> {
+fn soundness_of(pieces: &[Body<'_>]) -> Vec<PieceSoundness> {
     pieces
         .iter()
         .map(|piece| {
-            let solid: &Solid = &piece.solid;
+            let solid: &Solid = piece.solid;
             assert!(
                 solid.orphan_vertices().is_empty() && solid.orphan_edges().is_empty(),
                 "{} reached the report with geometry nothing names, which the carve gate refuses",
                 piece.name
             );
             PieceSoundness {
-                name: piece.name.clone(),
+                name: piece.name.to_string(),
                 shells: solid.shells().len(),
                 faces: solid.faces.len(),
                 edges: solid.edges.len(),
                 verts: solid.verts.len(),
-                warnings: gridfinity_cad::audit(solid).warnings().count(),
+                warnings: gridfinity_model::audit(solid).warnings().count(),
             }
         })
         .collect()
@@ -1238,6 +1441,7 @@ fn fit(spec: Spec, mode: FitMode) -> Result<Run, String> {
         Some(plate) => gridfinity::try_build_pieces(plate)?,
         None => Vec::new(),
     };
+    let subbins = build_subbins(&spec, &result, &bins, floor_fillet)?;
     let build_time = started.elapsed();
     assert_eq!(
         pieces.len(),
@@ -1272,6 +1476,7 @@ fn fit(spec: Spec, mode: FitMode) -> Result<Run, String> {
         pockets,
         bins,
         grouping,
+        subbins,
         params,
         plate_params,
         split_lines,
@@ -1318,8 +1523,19 @@ pub fn run(args: &Args) -> Result<Option<View>, String> {
 
     report::print(&run, &written);
     let (bin_files, plate_files) = piece_files(&run);
+    let subbins = run
+        .subbins
+        .iter()
+        .map(|s| PlacedSubbin {
+            label: s.object.clone(),
+            file: s.name.clone(),
+            bin: s.bin,
+            spec: s.spec,
+        })
+        .collect();
     Ok(args.view.then(|| View {
         boxes: object_boxes(&run),
+        subbins,
         bin_names: run.bins.iter().map(FittedBin::name).collect(),
         bin_files,
         plate_files,
@@ -1331,10 +1547,10 @@ pub fn run(args: &Args) -> Result<Option<View>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gridfinity_cad::kernel::geom::Surface;
-    use gridfinity_cad::layout::{Axis, GridFootprint, compartments};
-    use gridfinity_cad::kernel::math::Vec2;
-    use gridfinity_cad::kernel::sketch::point_in_polygon;
+    use gridfinity_brep::geom::Surface;
+    use gridfinity_model::layout::{Axis, GridFootprint, compartments};
+    use gridfinity_brep::math::Vec2;
+    use gridfinity_brep::sketch::point_in_polygon;
 
     /// The command line `clap` would see, parsed as `Args`, or the message it
     /// refuses with. The leading `optimize` is the subcommand's own name, which
@@ -2152,6 +2368,131 @@ tidy_absorb = 100
 name = \"widget\"
 size = [30, 20]
 ";
+
+    /// One object in a roomy drawer, asking for an insert pinned on width and
+    /// left open on depth, with settling free to grow the compartment as far as
+    /// it likes.
+    const INSERTED: &str = "[drawer]
+width = 200
+depth = 200
+
+[settings]
+effort = \"quick\"
+tidy_absorb = 100
+
+[[objects]]
+name = \"battery\"
+size =   [40, 60]
+subbin = [40, \"\", 12]
+";
+
+    /// The pinned axis comes out at exactly the interior the file states, the
+    /// open one fills whatever the compartment grew to, and the insert stands
+    /// its own clearance inside that compartment on both.
+    ///
+    /// This is the whole of what a subbin promises, stated against the built
+    /// geometry: the interior is read off the solid's own declaration, the
+    /// compartment off the settled claim, and the two are compared rather than
+    /// re-derived from one another.
+    #[test]
+    fn an_insert_is_the_interior_it_states_inside_the_compartment_it_stands_in() {
+        let run = fit(
+            input::parse(INSERTED).expect("the fixture is a valid run"),
+            FitMode::Walls,
+        )
+        .expect("one object with an insert builds");
+
+        assert_eq!(run.subbins.len(), 1, "one placed instance is one insert");
+        let insert = &run.subbins[0];
+        let spec = insert.spec;
+        let wall = run.spec.subbin_wall_thickness;
+        assert!(
+            (spec.interior_width - 40.0).abs() < 1e-9,
+            "the file pins the width at 40 mm, but the insert came out {} mm",
+            spec.interior_width
+        );
+        assert!(
+            (spec.interior_height - 12.0).abs() < 1e-9,
+            "the file pins the height at 12 mm, but the insert came out {} mm",
+            spec.interior_height
+        );
+        assert!(
+            (spec.outer_width - (spec.interior_width + 2.0 * wall)).abs() < 1e-9
+                && (spec.outer_depth - (spec.interior_depth + 2.0 * wall)).abs() < 1e-9,
+            "a pinned axis leaves the walls their stated {wall} mm, but the insert is {} x {} mm \
+             around {} x {} mm",
+            spec.outer_width,
+            spec.outer_depth,
+            spec.interior_width,
+            spec.interior_depth
+        );
+
+        let compartment = parts_bounds(&inflate_parts(
+            &run.result.placements[0].parts,
+            -run.spec.divider_thickness / 2.0,
+        ));
+        assert!(
+            spec.interior_depth > 61.0,
+            "settling did not grow this compartment past the 60 mm object, so the test cannot see \
+             whether the open axis follows it -- the insert's interior is {} mm deep",
+            spec.interior_depth
+        );
+        for (axis, outer, pocket) in [
+            ("width", spec.outer_width, compartment.width),
+            ("depth", spec.outer_depth, compartment.depth),
+        ] {
+            assert!(
+                (pocket - outer - 2.0 * run.spec.subbin_clearance).abs() < 1e-9,
+                "the insert is {outer} mm in {axis} inside a {pocket} mm compartment, which is not \
+                 the {} mm clearance it is meant to stand inside",
+                run.spec.subbin_clearance
+            );
+        }
+        assert!(
+            (spec.chamfer - run.floor_fillet).abs() < 1e-9 && spec.floor >= spec.chamfer,
+            "the insert's chamfer is the compartment's own floor blend, standing in a floor at \
+             least as thick"
+        );
+
+        let written: Vec<&str> = run.all_pieces().iter().map(|b| b.name).collect();
+        assert!(
+            written.contains(&insert.name.as_str()),
+            "the insert is a body the run writes and the Soundness section accounts for, but              {written:?} does not name {}",
+            insert.name
+        );
+        assert_eq!(run.soundness.len(), written.len());
+    }
+
+    /// The object stands in its insert, not on the compartment floor: centred in
+    /// the interior and lifted by the insert's own floor.
+    #[test]
+    fn an_object_with_an_insert_is_drawn_standing_in_it() {
+        let run = fit(
+            input::parse(INSERTED).expect("the fixture is a valid run"),
+            FitMode::Walls,
+        )
+        .expect("one object with an insert builds");
+        let spec = run.subbins[0].spec;
+        let boxes = object_boxes(&run);
+        assert_eq!(boxes.len(), 1);
+        let b = &boxes[0];
+        assert!(
+            (b.min.z - (spec.z + spec.floor)).abs() < 1e-9,
+            "the battery stands at z = {} rather than on the insert floor at {}",
+            b.min.z,
+            spec.z + spec.floor
+        );
+        let (w, d) = (b.max.x - b.min.x, b.max.y - b.min.y);
+        assert!(
+            (w - 40.0).abs() < 1e-9 && (d - 60.0).abs() < 1e-9,
+            "the battery is drawn {w} x {d} mm, not the 40 x 60 mm it was declared as"
+        );
+        assert!(
+            b.min.x >= spec.x + spec.walls().0 - 1e-9
+                && b.max.x <= spec.x + spec.outer_width - spec.walls().0 + 1e-9,
+            "the battery is drawn outside the interior that holds it"
+        );
+    }
 
     /// A drawn object is the object, not the compartment the fit gave it.
     ///

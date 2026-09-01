@@ -11,9 +11,9 @@
 //! the same expression it drew with.
 
 use eframe::egui::{self, CornerRadius, Frame, Margin, RichText, Stroke};
-use gridfinity_cad::gridfinity::{LogicalBin, Params};
-use gridfinity_cad::layout::GridFootprint;
-use gridfinity_cad::printers::{BedFitResult, PrinterProfile, check_bed_fit};
+use gridfinity_model::gridfinity::{LogicalBin, Params};
+use gridfinity_model::layout::GridFootprint;
+use gridfinity_model::printers::{BedFitResult, PrinterProfile, check_bed_fit};
 
 use crate::App;
 use crate::editor::{Tab, bin_color};

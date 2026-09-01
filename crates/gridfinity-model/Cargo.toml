@@ -1,0 +1,22 @@
+[package]
+name = "gridfinity-model"
+description = "The parametric Gridfinity model -- bins, baseplates, sub-bin inserts and the grid/printer vocabulary they are stated in"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Derives Serialize/Deserialize on the parameter types, shaped to match the
+# TypeScript reference's `BinConfig` JSON. Off by default so the native GUI
+# build stays lean; the wasm crate turns it on.
+serde = ["dep:serde"]
+
+[dependencies]
+gridfinity-brep = { path = "../gridfinity-brep" }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+mimalloc = "0.1"
+rayon = "1"
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }

@@ -16,9 +16,9 @@
 //! visibly laps a seam of the other. `of` is the bin's way in, `new` the plain
 //! cells-and-lines one the plate takes.
 
-use gridfinity_cad::gridfinity::LogicalBin;
-use gridfinity_cad::kernel::math::Vec3 as KernelVec3;
-use gridfinity_cad::layout::{GridCell, Piece, SplitLine, partition_cells};
+use gridfinity_model::gridfinity::LogicalBin;
+use gridfinity_brep::math::Vec3 as KernelVec3;
+use gridfinity_model::layout::{GridCell, Piece, SplitLine, partition_cells};
 use glam::Vec3;
 
 /// How far apart adjacent pieces of a split bin stand in the preview, in
@@ -222,8 +222,8 @@ impl Explosion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gridfinity_cad::gridfinity::GRID_PITCH;
-    use gridfinity_cad::layout::{Axis, GridCell, SplitLine};
+    use gridfinity_model::gridfinity::GRID_PITCH;
+    use gridfinity_model::layout::{Axis, GridCell, SplitLine};
 
     fn bin(width: i32, depth: i32, splits: &[SplitLine]) -> LogicalBin {
         LogicalBin {

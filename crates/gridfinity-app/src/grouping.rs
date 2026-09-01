@@ -17,13 +17,13 @@
 
 use crate::input::{Object, Spec};
 use crate::optimize::{cell_rect, claim_input, settle_within};
-use gridfinity_cad::layout::{GridCell, GridFootprint, compartments};
-use gridfinity_cad::printers::compute_auto_split_lines;
-use gridfinity_cad::project::drawer::{DrawerGrid, cavity_region, packing_area, packing_inset};
-use gridfinity_cad::project::pack::{
+use gridfinity_model::layout::{GridCell, GridFootprint, compartments};
+use gridfinity_model::printers::compute_auto_split_lines;
+use gridfinity_project::drawer::{DrawerGrid, cavity_region, packing_area, packing_inset};
+use gridfinity_project::pack::{
     PackEffort, PackInput, PackObject, PackResult, Placement, pack_layout,
 };
-use gridfinity_cad::project::rects::{Rect, inflate_parts, rects_overlap, union_area};
+use gridfinity_project::rects::{Rect, inflate_parts, rects_overlap, union_area};
 
 use std::collections::BTreeMap;
 
@@ -776,8 +776,8 @@ fn moves(partition: &[Vec<String>]) -> Vec<Vec<Vec<String>>> {
 mod tests {
     use super::*;
     use crate::input;
-    use gridfinity_cad::gridfinity::GRID_PITCH;
-    use gridfinity_cad::project::drawer::{MAX_GRID, drawer_grid};
+    use gridfinity_model::gridfinity::GRID_PITCH;
+    use gridfinity_project::drawer::{MAX_GRID, drawer_grid};
 
     /// Four objects small enough that all four claims fit inside one cell's
     /// packing area: 12 mm blocks claim 19.16 mm square at these settings, and

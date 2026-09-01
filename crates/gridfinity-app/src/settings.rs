@@ -12,9 +12,9 @@
 //! themselves and are not part of that answer.
 
 use eframe::egui::{self, RichText};
-use gridfinity_cad::gridfinity::{self, BinSlope, Mode, SlopeDir};
-use gridfinity_cad::printers::{PRINTER_PROFILES, check_bed_fit};
-use gridfinity_cad::layout::GridFootprint;
+use gridfinity_model::gridfinity::{self, BinSlope, Mode, SlopeDir};
+use gridfinity_model::printers::{PRINTER_PROFILES, check_bed_fit};
+use gridfinity_model::layout::GridFootprint;
 
 use crate::App;
 use crate::theme;
@@ -179,7 +179,7 @@ fn printer(app: &mut App, ui: &mut egui::Ui) -> bool {
     );
     if !fit.fits && ui.button("Auto-cut to fit").clicked() {
         bin.split_lines =
-            gridfinity_cad::printers::compute_auto_split_lines(&bin.cells, printer, pitch);
+            gridfinity_model::printers::compute_auto_split_lines(&bin.cells, printer, pitch);
         changed = true;
     }
     changed
@@ -219,6 +219,21 @@ fn display(app: &mut App, ui: &mut egui::Ui) {
             .changed()
         {
             app.show_object_boxes = show;
+            app.dirty = true;
+        }
+    }
+    if !app.subbins.is_empty() {
+        let mut show = app.show_subbins;
+        if ui
+            .checkbox(&mut show, format!("Sub-bins ({})", app.subbins.len()))
+            .on_hover_text(
+                "The inserts the fit built: separately printed open-top boxes standing \
+                 in their compartments, each holding one object at exactly the interior \
+                 its file states.",
+            )
+            .changed()
+        {
+            app.show_subbins = show;
             app.dirty = true;
         }
     }

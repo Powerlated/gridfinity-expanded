@@ -6,11 +6,11 @@
 //! in it reads the solid it is drawn beside; every entry point takes the geometry
 //! and the colour to draw it in.
 
-use gridfinity_cad::kernel::math::Vec3;
-use gridfinity_cad::kernel::build::ring_on_plane;
-use gridfinity_cad::kernel::geom::Curve;
-use gridfinity_cad::kernel::sketch::Seg;
-use gridfinity_cad::kernel::topo::{Builder, Solid};
+use gridfinity_brep::math::Vec3;
+use gridfinity_brep::build::ring_on_plane;
+use gridfinity_brep::geom::Curve;
+use gridfinity_brep::sketch::Seg;
+use gridfinity_brep::topo::{Builder, Solid};
 
 pub const SKETCH_BLACK: [f32; 3] = [0.05, 0.05, 0.06];
 pub const EDGE_ORANGE: [f32; 3] = [1.0, 0.45, 0.05];
@@ -117,8 +117,8 @@ fn seg_kind(s: &Seg) -> &'static str {
 mod tests {
     use super::*;
     use gridfinity_render::LINE_STRIDE;
-    use gridfinity_cad::kernel::build::extrude;
-    use gridfinity_cad::kernel::sketch::Sketch;
+    use gridfinity_brep::build::extrude;
+    use gridfinity_brep::sketch::Sketch;
 
     fn verts(wf: &Wireframe) -> usize {
         assert_eq!(wf.lines.len() % LINE_STRIDE, 0, "buffer must be whole vertices");

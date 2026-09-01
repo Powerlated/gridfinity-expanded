@@ -3,7 +3,9 @@ resolver = "3"
 default-members = ["crates/gridfinity-app"]
 members = [
     "crates/gridfinity-app",
-    "crates/gridfinity-cad",
+    "crates/gridfinity-brep",
+    "crates/gridfinity-model",
+    "crates/gridfinity-project",
     "crates/gridfinity-render",
     "crates/gridfinity-wasm",
 ]

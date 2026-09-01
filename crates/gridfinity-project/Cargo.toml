@@ -1,0 +1,20 @@
+[package]
+name = "gridfinity-project"
+description = "The drawer fitter: measuring a drawer's grid, packing objects into it, settling the result and deriving the dividers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+serde = ["dep:serde", "gridfinity-model/serde"]
+
+[dependencies]
+gridfinity-model = { path = "../gridfinity-model" }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+# `tests/asserts.rs` reads this crate's own source as an AST rather than as
+# text, so "is this an assertion" is a question about the syntax tree and not
+# about what a regex can see through a string literal or a comment.
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }

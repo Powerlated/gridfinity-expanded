@@ -16,9 +16,9 @@
 //! output names, and whether an output can hold the format that was named.
 
 use clap::ValueEnum;
-use gridfinity_cad::gridfinity::BinPiece;
-use gridfinity_cad::kernel::topo::Solid;
-use gridfinity_cad::{tessellate, to_xt_text};
+use crate::optimize::Body;
+use gridfinity_brep::topo::Solid;
+use gridfinity_model::{tessellate, to_xt_text};
 use std::path::{Path, PathBuf};
 
 /// How finely a piece is sampled on the way to triangles. The same resolution
@@ -127,7 +127,7 @@ pub struct Written {
 /// Every piece is tessellated before any file is written, so a piece the
 /// tessellator refuses -- `tessellate` asserts its own mesh is watertight --
 /// leaves the directory as it found it rather than half a set of parts.
-pub fn write_stl_dir(dir: &Path, pieces: &[&BinPiece]) -> Result<Vec<Written>, String> {
+pub fn write_stl_dir(dir: &Path, pieces: &[Body<'_>]) -> Result<Vec<Written>, String> {
     assert!(
         !pieces.is_empty(),
         "an export with no pieces reached the writer, which has nothing to write"
@@ -135,8 +135,8 @@ pub fn write_stl_dir(dir: &Path, pieces: &[&BinPiece]) -> Result<Vec<Written>, S
     let files: Vec<(PathBuf, Vec<u8>, usize)> = pieces
         .iter()
         .map(|piece| {
-            let mesh = tessellate(&piece.solid, EXPORT_RES).to_mesh();
-            (dir.join(&piece.name), mesh.to_stl_binary(), mesh.tri_count())
+            let mesh = tessellate(piece.solid, EXPORT_RES).to_mesh();
+            (dir.join(piece.name), mesh.to_stl_binary(), mesh.tri_count())
         })
         .collect();
     std::fs::create_dir_all(dir)
@@ -156,12 +156,12 @@ pub fn write_stl_dir(dir: &Path, pieces: &[&BinPiece]) -> Result<Vec<Written>, S
 
 /// Every piece written into one Parasolid transmit file as its own body, in the
 /// order the model built them.
-pub fn write_xt(path: &Path, pieces: &[&BinPiece]) -> Result<Written, String> {
+pub fn write_xt(path: &Path, pieces: &[Body<'_>]) -> Result<Written, String> {
     assert!(
         !pieces.is_empty(),
         "an export with no pieces reached the writer, which has nothing to write"
     );
-    let bodies: Vec<&Solid> = pieces.iter().map(|p| &p.solid).collect();
+    let bodies: Vec<&Solid> = pieces.iter().map(|p| p.solid).collect();
     let text = to_xt_text(&bodies)?;
     std::fs::write(path, text.as_bytes())
         .map_err(|e| format!("could not write {}: {e}", path.display()))?;

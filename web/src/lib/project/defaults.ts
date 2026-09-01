@@ -4,7 +4,7 @@ import type { PackEffort, Project, ProjectObject } from '../types';
 /**
  * How many perturbed instance orders each effort tier tries, for the panel that
  * labels the tiers with it. Mirrors `PackEffort::restarts` in
- * `crates/gridfinity-cad/src/project/pack.rs`, which is the budget actually
+ * `crates/gridfinity-project/src/pack.rs`, which is the budget actually
  * spent; this table only names it.
  */
 export const PACK_RESTARTS: Record<PackEffort, number> = {

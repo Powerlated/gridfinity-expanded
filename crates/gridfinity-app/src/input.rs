@@ -13,13 +13,13 @@
 //! a string carrying a unit, so a drawer measured with an imperial tape is
 //! written as it was measured rather than converted by hand.
 
-use gridfinity_cad::gridfinity::{
-    BASE_TOTAL_HEIGHT, FLOOR_THICKNESS, GRID_PITCH, HEIGHT_PER_UNIT, MIN_FASTENER_GRID_PITCH,
-    MIN_GRID_PITCH, buildable_floor_fillet,
+use gridfinity_model::gridfinity::{
+    BASE_TOTAL_HEIGHT, FLOOR_THICKNESS, GRID_PITCH, HALF_TOL, HEIGHT_PER_UNIT,
+    MIN_FASTENER_GRID_PITCH, MIN_GRID_PITCH, buildable_floor_fillet,
 };
-use gridfinity_cad::printers::{DEFAULT_PRINTER, PRINTER_PROFILES, PrinterProfile};
-use gridfinity_cad::project::pack::{PackEffort, PackObject};
-use gridfinity_cad::project::rects::{Rect, parts_bounds, parts_connected};
+use gridfinity_model::printers::{DEFAULT_PRINTER, PRINTER_PROFILES, PrinterProfile};
+use gridfinity_project::pack::{PackEffort, PackObject};
+use gridfinity_project::rects::{Rect, parts_bounds, parts_connected};
 
 /// One of the units a measurement may name, as the millimetres it is worth. The
 /// empty unit is millimetres, so `"400"` and `400` are the same length.
@@ -138,6 +138,8 @@ struct SettingsSpec {
     effort: Option<String>,
     height_units: Option<u32>,
     wall_thickness: Option<Length>,
+    subbin_wall_thickness: Option<Length>,
+    subbin_clearance: Option<Length>,
     fillet_radius: Option<Length>,
     tidy_absorb: Option<Length>,
     magnets: Option<bool>,
@@ -171,6 +173,7 @@ struct ObjectSpec {
     size: Option<Vec<Length>>,
     boxes: Option<Vec<BoxSpec>>,
     max_size: Option<Vec<Limit>>,
+    subbin: Option<Vec<Limit>>,
 }
 
 /// The file as written.
@@ -184,12 +187,37 @@ struct InputFile {
     objects: Vec<ObjectSpec>,
 }
 
-/// One validated object: what the packer needs, the tallest height the file
-/// declared for it, which drives no geometry but is reported against the cavity,
-/// and the most its compartment may measure.
+/// The insert an object asks to be given, as the file states it.
+///
+/// A subbin is a separately printed open-top box that drops into the object's
+/// compartment: the object stands in the insert rather than on the compartment
+/// floor, and the insert's interior is a strictly bounded square-cornered box,
+/// so an axis the file pins holds the object at exactly that measurement.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Subbin {
+    /// The interior the file asks for, in the object's own frame: width, depth
+    /// and height, each `None` on an axis it leaves to the fit. An unstated
+    /// width or depth is the object's own, grown by whatever settling gives the
+    /// compartment; an unstated height fills the compartment.
+    pub interior: [Option<f64>; 3],
+}
+
+/// One validated object: what the packer needs, the object as declared, the
+/// insert it asks for, the tallest height the file declared for it, which drives
+/// no geometry but is reported against the cavity, and the most its compartment
+/// may measure.
 #[derive(Debug)]
 pub struct Object {
     pub pack: PackObject,
+    /// The object as the file declares it, in its own frame. `pack.parts` is
+    /// what the packer is given, which is the same rectangles for an ordinary
+    /// object and the **insert's** footprint for one that asks for a subbin --
+    /// the object itself is what a report prints and what `--view` draws.
+    pub footprint: Vec<Rect>,
+    /// The insert this object is to be given, when it asks for one. Its outer
+    /// box is already what `pack.parts` states, so nothing but the geometry and
+    /// the report reads this.
+    pub subbin: Option<Subbin>,
     pub height: Option<f64>,
     /// The most this object's compartment may measure on each axis of the
     /// object's **own** frame, in millimetres, `None` on an axis it is not held
@@ -214,6 +242,19 @@ pub struct Spec {
     pub divider_thickness: f64,
     pub clearance: f64,
     pub wall_thickness: f64,
+    /// How thick the wall and floor of an insert are. `wall_thickness` unless
+    /// the file names another: an insert is a smaller, lighter part than the bin
+    /// it drops into, so it is worth being able to give it thinner material
+    /// without thinning the drawer.
+    pub subbin_wall_thickness: f64,
+    /// The gap between an insert and the compartment it drops into, per side.
+    ///
+    /// **Not `clearance`**, which is the room an *object* is given inside its
+    /// compartment -- a hand tool wants millimetres of it, and a printed part
+    /// dropping into a printed pocket does not. `HALF_TOL` unless the file names
+    /// another, which is the same gap the Gridfinity standard leaves between a
+    /// bin and the baseplate it sits in.
+    pub subbin_clearance: f64,
     pub fillet_radius: f64,
     /// The widest strip of leftover space worth absorbing into the compartments
     /// facing it, once a layout is packed. Half the run's own cell pitch unless
@@ -233,16 +274,42 @@ pub struct Spec {
     pub objects: Vec<Object>,
 }
 
+/// The overall height in millimetres of a bin of `height_units`, base included.
+fn total_height_of(height_units: u32) -> f64 {
+    BASE_TOTAL_HEIGHT + HEIGHT_PER_UNIT * f64::from(height_units.max(1))
+}
+
+/// How deep a compartment of a bin of `height_units` is: everything above the
+/// base and its floor.
+fn cavity_depth_of(height_units: u32) -> f64 {
+    total_height_of(height_units) - BASE_TOTAL_HEIGHT - FLOOR_THICKNESS
+}
+
+/// The floor fillet the model will actually blend a bin of these settings with:
+/// the requested radius after the clamps its cavity's depth and corner impose.
+///
+/// Stated apart from `Spec` because `parse` needs it while it is still building
+/// the object list -- an object asking for a subbin is packed against the
+/// fillet the model will build, not the one the file asked for -- and two
+/// derivations of it would disagree the moment either moved.
+fn built_floor_fillet_of(fillet_radius: f64, height_units: u32) -> f64 {
+    buildable_floor_fillet(
+        fillet_radius,
+        cavity_depth_of(height_units),
+        fillet_radius.max(0.0),
+        false,
+    )
+}
+
 impl Spec {
     /// The bin's overall height in millimetres, base included.
     pub fn total_height(&self) -> f64 {
-        f64::from(BASE_TOTAL_HEIGHT)
-            + f64::from(HEIGHT_PER_UNIT) * f64::from(self.height_units.max(1))
+        total_height_of(self.height_units)
     }
 
     /// How deep a compartment is: everything above the base and its floor.
     pub fn cavity_depth(&self) -> f64 {
-        self.total_height() - f64::from(BASE_TOTAL_HEIGHT) - f64::from(FLOOR_THICKNESS)
+        cavity_depth_of(self.height_units)
     }
 
     /// The floor fillet the model will actually blend this bin's compartments
@@ -256,12 +323,7 @@ impl Spec {
     /// wall, so it is what an object standing on that floor has to be held clear
     /// of before its own clearance.
     pub fn built_floor_fillet(&self) -> f64 {
-        buildable_floor_fillet(
-            self.fillet_radius,
-            self.cavity_depth(),
-            self.fillet_radius.max(0.0),
-            false,
-        )
+        built_floor_fillet_of(self.fillet_radius, self.height_units)
     }
 
     /// The objects the packer is asked to place.
@@ -346,6 +408,140 @@ fn max_size_of(
         out[index] = Some(most);
     }
     Ok(out)
+}
+
+/// The `subbin` array as the interior it asks for: `[width, depth, height]`,
+/// each a length or an empty string for an axis left to the fit.
+///
+/// `None` for an object that asks for no insert, which is every object written
+/// before the key existed.
+fn subbin_of(stated: Option<&[Limit]>, whose: &str) -> Result<Option<Subbin>, String> {
+    let Some(stated) = stated else {
+        return Ok(None);
+    };
+    let [width, depth, height] = match stated {
+        [w, d, h] => [w, d, h],
+        other => {
+            return Err(format!(
+                "{whose}: subbin is [width, depth, height] of the insert's interior, with an \
+                 empty string for an axis the fit decides, but has {} entries",
+                other.len()
+            ));
+        }
+    };
+    let mut interior = [None; 3];
+    for (index, (limit, axis)) in [width, depth, height]
+        .into_iter()
+        .zip(["subbin width", "subbin depth", "subbin height"])
+        .enumerate()
+    {
+        if let Some(measure) = limit.0 {
+            positive(measure, axis, whose)?;
+            interior[index] = Some(measure);
+        }
+    }
+    Ok(Some(Subbin { interior }))
+}
+
+/// What the packer is given for an object that asks for a subbin, and the limit
+/// its compartment is held to: the insert's outer box less twice the floor
+/// fillet, and that same number on every axis the interior is pinned to.
+///
+/// **The deflation is the whole of why an insert fits snugly.** A claim reserves
+/// `clearance + floor_fillet + divider / 2` because an object rests on the
+/// compartment floor and the blend takes `floor_fillet` of that floor from every
+/// wall. An object in an insert rests on neither: the insert stands on the floor
+/// and its bottom chamfer clears the blend, and the gap around it is a part
+/// fitting a part rather than a tool sitting in a compartment. So both are
+/// handed back and the insert's own clearance put in their place -- `deflate` is
+/// `clearance + floor_fillet - subbin_clearance`, and what is packed shrinks by
+/// twice it:
+///
+/// ```text
+/// footprint = interior + 2 * wall - 2 * deflate
+/// pocket    = footprint + 2 * (clearance + fillet)
+///           = interior + 2 * wall + 2 * subbin_clearance
+/// outer     = pocket - 2 * subbin_clearance = interior + 2 * wall
+/// ```
+///
+/// so the insert stands `subbin_clearance` inside the compartment at every height
+/// and its walls come out exactly `wall` thick. On an axis the file leaves open
+/// the same arithmetic runs backwards and the insert takes whatever settling
+/// grew the compartment to.
+///
+/// For an object with an insert **every stated limit is about the interior**:
+/// `max_size` on an axis the subbin leaves open caps that interior, and stating
+/// both on one axis is refused rather than silently resolved.
+fn subbin_footprint(
+    subbin: &Subbin,
+    parts: &[Rect],
+    max_size: Option<&[Limit]>,
+    wall: f64,
+    deflate: f64,
+    whose: &str,
+) -> Result<(Vec<Rect>, [Option<f64>; 2]), String> {
+    assert!(
+        wall > 0.0,
+        "an insert is built with {wall} mm walls, which is not a body"
+    );
+    if parts.len() != 1 {
+        return Err(format!(
+            "{whose}: an insert is one rectangular box, so an object of {} boxes cannot be given \
+             one",
+            parts.len()
+        ));
+    }
+    let capped = match max_size {
+        Some([w, d]) => [w.0, d.0],
+        Some(other) => {
+            return Err(format!(
+                "{whose}: max_size is [width, depth], with an empty string for no limit, but has \
+                 {} entries",
+                other.len()
+            ));
+        }
+        None => [None, None],
+    };
+    let own = parts_bounds(parts);
+    let mut extent = [0.0; 2];
+    let mut limits = [None; 2];
+    for (index, (axis, own)) in [("width", own.width), ("depth", own.depth)].into_iter().enumerate()
+    {
+        let pinned = subbin.interior[index];
+        if let Some(interior) = pinned
+            && interior + 1e-9 < own
+        {
+            return Err(format!(
+                "{whose}: subbin {axis} is {interior} mm, but the object is {own} mm across, so \
+                 no insert that size holds it"
+            ));
+        }
+        if pinned.is_some() && capped[index].is_some() {
+            return Err(format!(
+                "{whose}: subbin and max_size both state the {axis}, which is one measurement -- \
+                 the insert's interior -- stated twice"
+            ));
+        }
+        if let Some(cap) = capped[index]
+            && cap + 1e-9 < own
+        {
+            return Err(format!(
+                "{whose}: max_size {axis} is {cap} mm, but the object is {own} mm across, so no \
+                 insert that size holds it"
+            ));
+        }
+        let footprint = |interior: f64| interior + 2.0 * wall - 2.0 * deflate;
+        extent[index] = footprint(pinned.unwrap_or(own));
+        if extent[index] <= 0.0 {
+            return Err(format!(
+                "{whose}: an insert {} mm across inside {wall} mm walls gives back more than it \
+                 claims, {deflate} mm of it a side, so there is nothing left to pack",
+                pinned.unwrap_or(own)
+            ));
+        }
+        limits[index] = pinned.or(capped[index]).map(footprint);
+    }
+    Ok((vec![Rect::new(0.0, 0.0, extent[0], extent[1])], limits))
 }
 
 /// The `boxes` list as a part list plus the tallest height any of them declares.
@@ -434,20 +630,35 @@ pub fn parse(text: &str) -> Result<Spec, String> {
     let pitch = settings.grid_size.map_or(GRID_PITCH, Length::mm);
     if pitch < MIN_GRID_PITCH {
         return Err(format!(
-            "settings.grid_size is {pitch} mm, and a Gridfinity cell cannot be built below              {MIN_GRID_PITCH} mm -- its peg profile does not close"
+            "settings.grid_size is {pitch} mm, and a Gridfinity cell cannot be built below \
+             {MIN_GRID_PITCH} mm -- its peg profile does not close"
         ));
     }
     let magnets = settings.magnets.unwrap_or(false);
     let screws = settings.screws.unwrap_or(false);
     if (magnets || screws) && pitch <= MIN_FASTENER_GRID_PITCH {
         return Err(format!(
-            "settings.grid_size is {pitch} mm, and a cell carries magnets or screws only above              {MIN_FASTENER_GRID_PITCH} mm -- the four bores of a smaller cell run into one another"
+            "settings.grid_size is {pitch} mm, and a cell carries magnets or screws only above \
+             {MIN_FASTENER_GRID_PITCH} mm -- the four bores of a smaller cell run into one another"
         ));
     }
     let height_units = settings.height_units.unwrap_or(3);
     if height_units == 0 {
         return Err("settings.height_units is 0, so the bin has no cavity".to_string());
     }
+
+    let subbin_wall_thickness = positive(
+        settings.subbin_wall_thickness.map_or(wall_thickness, Length::mm),
+        "settings.subbin_wall_thickness",
+        "settings",
+    )?;
+    let subbin_clearance = settings.subbin_clearance.map_or(HALF_TOL, Length::mm);
+    if subbin_clearance < 0.0 {
+        return Err(format!(
+            "settings.subbin_clearance is {subbin_clearance}, which is less than none"
+        ));
+    }
+    let floor_fillet = built_floor_fillet_of(fillet_radius, height_units);
 
     let mut objects: Vec<Object> = Vec::with_capacity(file.objects.len());
     for spec in &file.objects {
@@ -476,14 +687,27 @@ pub fn parse(text: &str) -> Result<Spec, String> {
                 "{whose}: its boxes do not touch along an edge, so it is more than one object"
             ));
         }
-        let max_size = max_size_of(spec.max_size.as_deref(), &parts, &whose)?;
+        let subbin = subbin_of(spec.subbin.as_deref(), &whose)?;
+        let (packed, max_size) = match &subbin {
+            Some(sub) => subbin_footprint(
+                sub,
+                &parts,
+                spec.max_size.as_deref(),
+                subbin_wall_thickness,
+                clearance + floor_fillet - subbin_clearance,
+                &whose,
+            )?,
+            None => (parts.clone(), max_size_of(spec.max_size.as_deref(), &parts, &whose)?),
+        };
         objects.push(Object {
             pack: PackObject {
                 id: spec.name.clone(),
                 name: spec.name.clone(),
-                parts,
+                parts: packed,
                 quantity,
             },
+            footprint: parts,
+            subbin,
             height,
             max_size,
         });
@@ -503,6 +727,8 @@ pub fn parse(text: &str) -> Result<Spec, String> {
         divider_thickness,
         clearance,
         wall_thickness,
+        subbin_wall_thickness,
+        subbin_clearance,
         fillet_radius,
         tidy_absorb,
         height_units,
@@ -539,6 +765,119 @@ max_size = [\"4.5 cm\", \"\"]
         )
         .expect("a stated max_size is a valid run");
         assert_eq!(spec.objects[0].max_size, [Some(45.0), None]);
+    }
+
+    /// `subbin` states the insert's interior on three axes, an empty string
+    /// leaving one to the fit, and what the packer is given is that interior
+    /// grown by two walls, handed back the floor fillet its chamfer replaces and
+    /// the object clearance it does not want, and given its own gap instead.
+    #[test]
+    fn reads_a_subbin_as_the_interior_it_states() {
+        let spec = parse(
+            "[drawer]
+width = 400
+depth = 300
+
+[[objects]]
+name = \"battery\"
+size =   [\"4.5 cm\", \"124 mm\"]
+subbin = [\"4.5cm\", \"\", \"3cm\"]
+",
+        )
+        .expect("a stated subbin is a valid run");
+        let object = &spec.objects[0];
+        assert_eq!(
+            object.subbin,
+            Some(Subbin {
+                interior: [Some(45.0), None, Some(30.0)]
+            })
+        );
+        assert_eq!(object.footprint, vec![Rect::new(0.0, 0.0, 45.0, 124.0)]);
+
+        let wall = spec.subbin_wall_thickness;
+        let deflate = spec.clearance + spec.built_floor_fillet() - spec.subbin_clearance;
+        let packed = parts_bounds(&object.pack.parts);
+        let want = |interior: f64| interior + 2.0 * wall - 2.0 * deflate;
+        assert!(
+            (packed.width - want(45.0)).abs() < 1e-9
+                && (packed.depth - want(124.0)).abs() < 1e-9,
+            "the insert's outer box less what it gives back is {} x {}, but {} x {} was \
+             packed",
+            want(45.0),
+            want(124.0),
+            packed.width,
+            packed.depth
+        );
+        assert_eq!(
+            object.max_size,
+            [Some(want(45.0)), None],
+            "a pinned axis holds the compartment and an open one grows"
+        );
+    }
+
+    /// Every way a `subbin` says nothing buildable is a named error against the
+    /// object that asked, not a silently resolved reading.
+    #[test]
+    fn a_subbin_that_states_no_insert_is_refused() {
+        let bad = |object: &str| {
+            parse(&format!("[drawer]
+width = 400
+depth = 300
+
+{object}"))
+                .expect_err("the fixture is meant to be refused")
+        };
+        let err = bad("[[objects]]
+name = \"a\"
+size = [50, 20]
+subbin = [40, \"\", 10]
+");
+        assert!(err.contains("subbin width"), "{err}");
+
+        let err = bad(
+            "[[objects]]
+name = \"a\"
+size = [50, 20]
+max_size = [60, \"\"]
+             subbin = [55, \"\", 10]
+",
+        );
+        assert!(err.contains("stated twice"), "{err}");
+
+        let err = bad(
+            "[[objects]]
+name = \"a\"
+boxes = [{ x = 0, y = 0, width = 10, depth = 10 },              { x = 10, y = 0, width = 10, depth = 10 }]
+subbin = [\"\", \"\", 10]
+",
+        );
+        assert!(err.contains("one rectangular box"), "{err}");
+
+        let err = bad("[[objects]]
+name = \"a\"
+size = [50, 20]
+subbin = [50, 20]
+");
+        assert!(err.contains("[width, depth, height]"), "{err}");
+    }
+
+    /// An object that asks for no insert is packed as exactly what it declares,
+    /// which is what every file written before the key existed says.
+    #[test]
+    fn an_object_that_asks_for_no_subbin_is_packed_as_itself() {
+        let spec = parse(
+            "[drawer]
+width = 400
+depth = 300
+
+[[objects]]
+name = \"a\"
+size = [10, 20]
+",
+        )
+        .expect("the fixture is a valid run");
+        assert_eq!(spec.objects[0].subbin, None);
+        assert_eq!(spec.objects[0].pack.parts, spec.objects[0].footprint);
     }
 
     /// An object with no `max_size` is held to nothing, which is what every file
@@ -600,6 +939,12 @@ max_size = [60]
         assert_eq!(spec.height_units, 3);
         assert_eq!(spec.printer.name, DEFAULT_PRINTER.name);
         assert!(spec.baseplate, "a drawer bin gets the grid it sits in unless asked not to");
+        assert_eq!(spec.subbin_wall_thickness, spec.wall_thickness);
+        assert_eq!(
+            spec.subbin_clearance, HALF_TOL,
+            "an insert drops into its compartment on the gap the standard leaves between a bin \
+             and its baseplate, not on the room an object is given"
+        );
         assert!(spec.objects.is_empty());
     }
 

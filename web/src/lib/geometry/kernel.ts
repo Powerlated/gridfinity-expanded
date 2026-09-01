@@ -90,7 +90,7 @@ export function exportParasolid(_kernel: GeometryKernel, bins: BinParameters[]):
  * Starts a drawer packing search over `input`, with its first greedy pass
  * already run so `result()` is meaningful before any `step`.
  *
- * The optimizer itself lives in `crates/gridfinity-cad/src/project/`; this is
+ * The optimizer itself lives in `crates/gridfinity-project/src/`; this is
  * only the handle. The kernel handle is threaded through so callers cannot
  * start a search before `initKernel()` has resolved.
  */

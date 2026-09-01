@@ -1,11 +1,11 @@
 
 use eframe::egui::{self, Color32, RichText, Sense};
-use gridfinity_cad::kernel::math::Vec3;
-use gridfinity_cad::kernel::perf;
-use gridfinity_cad::kernel::program::{Op, Program, run};
-use gridfinity_cad::kernel::sketch::Seg;
-use gridfinity_cad::kernel::topo::Solid;
-use gridfinity_cad::{Params, gridfinity};
+use gridfinity_brep::math::Vec3;
+use gridfinity_brep::perf;
+use gridfinity_brep::program::{Op, Program, run};
+use gridfinity_brep::sketch::Seg;
+use gridfinity_brep::topo::Solid;
+use gridfinity_model::{Params, gridfinity};
 use std::collections::HashMap;
 
 enum Status {
@@ -468,8 +468,8 @@ impl std::fmt::Display for Count {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gridfinity_cad::gridfinity::{BinSlope, LogicalBin, Mode, SlopeDir};
-    use gridfinity_cad::layout::{internal_edges, perimeter_edges};
+    use gridfinity_model::gridfinity::{BinSlope, LogicalBin, Mode, SlopeDir};
+    use gridfinity_model::layout::{internal_edges, perimeter_edges};
     use crate::catch;
 
     struct Rng(u64);

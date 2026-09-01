@@ -13,8 +13,8 @@
 //! wall will be drawn at. Everything it edits lives in the `Params` passed in.
 
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
-use gridfinity_cad::gridfinity::{InnerWall, Params};
-use gridfinity_cad::layout::{
+use gridfinity_model::gridfinity::{InnerWall, Params};
+use gridfinity_model::layout::{
     Axis, EdgeClass, GridCell, GridEdge, Orientation, SplitLine, classify_edge, perimeter_edges,
 };
 

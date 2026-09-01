@@ -1,9 +1,10 @@
 //! What an `optimize` run tells the user about itself.
 //!
-//! `print` writes the whole report to stdout in eleven sections -- the drawer it
+//! `print` writes the whole report to stdout in twelve sections -- the drawer it
 //! resolved, the objects it was given, how the packing went, where each instance
 //! landed, the bin each object was given (in `bins` mode, where there is one per
-//! object), what became of the cavity, what became of the rounding, how the
+//! object), the inserts it built for the objects that asked for one, what became
+//! of the cavity, what became of the rounding, how the
 //! bodies had to be split for the printer and how their seams interlock, what
 //! each built piece is made of, the files written, and the warnings. Nothing here decides
 //! anything: every number is read back off the finished `Run`, so the report
@@ -14,11 +15,11 @@
 use crate::export::{Contents, Written};
 use crate::grouping::score as grouping_score;
 use crate::optimize::{Built, Run};
-use gridfinity_cad::project::tidy::score as layout_score;
-use gridfinity_cad::layout::{Axis, GridFootprint, Piece, SplitLine};
-use gridfinity_cad::printers::{BED_MARGIN, BedFitResult, PrinterProfile, check_bed_fit};
-use gridfinity_cad::kernel::topo::Solid;
-use gridfinity_cad::project::rects::{Rect, inflate_parts, parts_bounds, union_area};
+use gridfinity_project::tidy::score as layout_score;
+use gridfinity_model::layout::{Axis, GridFootprint, Piece, SplitLine};
+use gridfinity_model::printers::{BED_MARGIN, BedFitResult, PrinterProfile, check_bed_fit};
+use gridfinity_brep::topo::Solid;
+use gridfinity_project::rects::{Rect, inflate_parts, parts_bounds, union_area};
 use std::time::Duration;
 
 /// How wide the label column of a `field` line is.
@@ -100,6 +101,7 @@ pub fn print(run: &Run, written: &[Written]) {
     packing(run);
     placements(run);
     bins(run);
+    subbins(run);
     dividers(run);
     rounding(run);
     printing(run);
@@ -194,6 +196,10 @@ fn fitted_as(run: &Run) -> String {
 
 /// One row per object: how many were wanted, how many were placed, how big its
 /// claim is, and which quarter turns the packer used.
+///
+/// The claim is what the packer worked with -- for an object given an insert
+/// that is the insert's outer box less the fillet it hands back -- while the
+/// area is the object's own, as the file declares it.
 fn objects(run: &Run) {
     heading("Objects");
     if run.spec.objects.is_empty() {
@@ -237,7 +243,7 @@ fn objects(run: &Run) {
             object.pack.quantity,
             placed,
             format!("{} x {}", mm(claim.width), mm(claim.depth)),
-            mm2(union_area(&object.pack.parts)),
+            mm2(union_area(&object.footprint)),
             turns
         ));
     }
@@ -257,6 +263,10 @@ fn claim_bounds(parts: &[Rect], margin: f64) -> Rect {
 
 /// How the search went: the budget it spent, how much of what was asked for it
 /// placed, how much of the area that covers, and what it could not place.
+///
+/// The object area is the objects' own; the claimed area is what was packed, so
+/// the gap between them is clearance, reserved fillet, dividers and the walls of
+/// any insert.
 fn packing(run: &Run) {
     let wanted: u32 = run.spec.objects.iter().map(|o| o.pack.quantity).sum();
     let placed = run.result.placements.len() as u32;
@@ -266,7 +276,7 @@ fn packing(run: &Run) {
         .placements
         .iter()
         .filter_map(|p| run.spec.objects.iter().find(|o| o.pack.id == p.object_id))
-        .map(|o| union_area(&o.pack.parts))
+        .map(|o| union_area(&o.footprint))
         .sum();
     let claimed_area: f64 = run
         .result
@@ -462,6 +472,54 @@ fn built_as(run: &Run, index: usize) -> String {
     }
 }
 
+/// The inserts the run built, one row each: what each holds, the interior it
+/// came out at, the outer box that interior sits in, and the file it is written
+/// as. Nothing for a file that asked for none.
+///
+/// Read off each built insert's own `SubbinSpec`, which is the declaration the
+/// geometry was built from, so the measurements printed are the measurements cut.
+fn subbins(run: &Run) {
+    if run.subbins.is_empty() {
+        return;
+    }
+    heading("Sub-bins");
+    field(
+        "walls",
+        &format!(
+            "{} mm walls, one thickness the whole way round -- the interior turns the \
+             outer corner less the wall -- on a floor at least as thick as the {} mm \
+             chamfer that clears the compartment's blend, standing {} mm inside it",
+            mm(run.spec.subbin_wall_thickness),
+            mm(run.floor_fillet),
+            format!("{:.2}", run.spec.subbin_clearance)
+        ),
+    );
+    row(&format!(
+        "{:<28}{:>22}{:>22}  {}",
+        "holds", "interior mm", "outer mm", "built as"
+    ));
+    for insert in &run.subbins {
+        let spec = &insert.spec;
+        row(&format!(
+            "{:<28}{:>22}{:>22}  {}",
+            insert.object,
+            format!(
+                "{} x {} x {}",
+                mm(spec.interior_width),
+                mm(spec.interior_depth),
+                mm(spec.interior_height)
+            ),
+            format!(
+                "{} x {} x {}",
+                mm(spec.outer_width),
+                mm(spec.outer_depth),
+                mm(spec.height())
+            ),
+            insert.name
+        ));
+    }
+}
+
 /// What became of the cavity: how much of it was hollowed into compartments, how
 /// much stands as material, what settling the packed layout took, and what
 /// happened to the dividers the packer derives between two claims.
@@ -510,8 +568,8 @@ fn dividers(run: &Run) {
                 match run.clamped {
                     0 => String::new(),
                     n => format!(
-                        ", and {n} compartment(s) pulled back afterwards to the max_size their \
-                         object states"
+                        ", and {n} compartment(s) pulled back afterwards to the size their \
+                         object states, as a max_size or as a subbin"
                     ),
                 }
             ),
@@ -658,6 +716,9 @@ fn printing(run: &Run) {
             piece_row(&piece.name, part, &piece.solid, printer);
         }
     }
+    for insert in &run.subbins {
+        body_row(&insert.name, &insert.solid, printer);
+    }
 }
 
 /// A set of split lines as the Printing section spells it: how many there are
@@ -736,6 +797,24 @@ fn piece_row(name: &str, part: &Piece, solid: &Solid, printer: PrinterProfile) {
         name,
         footprint.0,
         footprint.1,
+        fit.bin_width,
+        fit.bin_depth,
+        placement(&fit)
+    ));
+}
+
+/// One row of the Printing table for a body that stands on no cells: its own
+/// footprint measured off the finished solid, and how it lies on the bed.
+///
+/// An insert is cut for nothing -- it is a small box printed whole -- so where a
+/// piece's row names the cells it covers, this one names what it is instead.
+fn body_row(name: &str, solid: &Solid, printer: PrinterProfile) {
+    let (width, depth) = footprint_mm(solid);
+    let fit = printer.bed_fit_mm(width, depth);
+    row(&format!(
+        "  {:<38}{:>13}  {} x {} mm  {}",
+        name,
+        "insert",
         fit.bin_width,
         fit.bin_depth,
         placement(&fit)
@@ -844,6 +923,29 @@ fn warnings(run: &Run) {
                 object.pack.name,
                 mm(height),
                 mm(depth)
+            ));
+        }
+    }
+    for insert in &run.subbins {
+        let proud = insert.spec.height() - depth;
+        if proud > 1e-9 {
+            lines.push(format!(
+                "{} holds {} and stands {} mm proud of the {} mm compartment it drops into -- \
+                 raise settings.height_units to sink it",
+                insert.name,
+                insert.object,
+                mm(proud),
+                mm(depth)
+            ));
+        }
+        let (width, insert_depth) = footprint_mm(&insert.solid);
+        if !run.spec.printer.bed_fit_mm(width, insert_depth).fits {
+            lines.push(format!(
+                "{} measures {} x {} mm and does not fit the bed -- an insert is printed whole \
+                 and is never cut, so state a smaller subbin",
+                insert.name,
+                mm(width),
+                mm(insert_depth)
             ));
         }
     }

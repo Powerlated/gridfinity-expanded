@@ -1387,7 +1387,9 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "glam",
- "gridfinity-cad",
+ "gridfinity-brep",
+ "gridfinity-model",
+ "gridfinity-project",
  "gridfinity-render",
  "mimalloc",
  "rfd",
@@ -1397,13 +1399,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "gridfinity-cad"
+name = "gridfinity-brep"
 version = "0.1.0"
 dependencies = [
  "glam",
  "mimalloc",
  "proc-macro2",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "gridfinity-model"
+version = "0.1.0"
+dependencies = [
+ "gridfinity-brep",
+ "mimalloc",
+ "proc-macro2",
  "rayon",
+ "serde",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "gridfinity-project"
+version = "0.1.0"
+dependencies = [
+ "gridfinity-model",
+ "proc-macro2",
  "serde",
  "syn 2.0.119",
 ]
@@ -1424,7 +1446,8 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "glam",
- "gridfinity-cad",
+ "gridfinity-model",
+ "gridfinity-project",
  "gridfinity-render",
  "js-sys",
  "serde",

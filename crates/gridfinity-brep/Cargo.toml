@@ -1,0 +1,21 @@
+[package]
+name = "gridfinity-brep"
+description = "Minimalistic analytic-surface B-rep CAD kernel: sketches, solids, booleans, blends, tessellation and Parasolid XT transmit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam = "0.29"
+
+# The benchmarks and `perf_report` must see the allocator the shipping binary
+# uses, or they measure a bottleneck production does not have. Not a real
+# dependency: the library never picks an allocator for its dependents, and wasm
+# cannot build this one.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+mimalloc = "0.1"
+# `tests/asserts.rs` reads this crate's own source as an AST rather than as
+# text, so "is this an assertion" is a question about the syntax tree and not
+# about what a regex can see through a string literal or a comment.
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }

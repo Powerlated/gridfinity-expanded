@@ -34,20 +34,21 @@ use clap::{Parser, Subcommand};
 use eframe::egui;
 
 #[global_allocator]
-static ALLOC: gridfinity_cad::kernel::perf::CountingAlloc<mimalloc::MiMalloc> =
-    gridfinity_cad::kernel::perf::CountingAlloc::new(mimalloc::MiMalloc);
+static ALLOC: gridfinity_brep::perf::CountingAlloc<mimalloc::MiMalloc> =
+    gridfinity_brep::perf::CountingAlloc::new(mimalloc::MiMalloc);
 use debugger::Debugger;
 use explode::Explosion;
 use editor::Editor;
-use gridfinity_cad::gridfinity::{self, LogicalBin, Mode, Params};
-use gridfinity_cad::kernel::math::Vec3 as KernelVec3;
-use gridfinity_cad::layout::{GridCell, SplitLine, partition_cells};
-use gridfinity_cad::printers::{DEFAULT_PRINTER, PrinterProfile};
-use gridfinity_cad::kernel::build::extrude;
+use gridfinity_model::gridfinity::{self, LogicalBin, Mode, Params};
+use gridfinity_brep::math::Vec3 as KernelVec3;
+use gridfinity_model::layout::{GridCell, SplitLine, partition_cells};
+use gridfinity_model::printers::{DEFAULT_PRINTER, PrinterProfile};
+use gridfinity_brep::build::extrude;
 use glam::Vec3;
-use gridfinity_cad::kernel::sketch::Sketch;
-use gridfinity_cad::kernel::topo::Solid;
-use gridfinity_cad::{tessellate, tessellate_shell};
+use gridfinity_brep::sketch::Sketch;
+use gridfinity_brep::topo::Solid;
+use gridfinity_model::subbin::build_subbin;
+use gridfinity_model::{tessellate, tessellate_shell};
 use std::sync::{Arc, Mutex};
 use viewport::{Camera, CameraExt, Gpu, Quality, Renderer};
 
@@ -76,12 +77,16 @@ pub const LABEL_BAD: [f32; 3] = [0.75, 0.1, 0.05];
 /// is visible for what it is.
 pub const PLATE_GREY: u32 = 0x8c8f94;
 
+/// The colour of an insert standing in a compartment: a warm amber, so a body
+/// that is neither the bin nor the plate nor an object reads as its own part.
+pub const SUBBIN_AMBER: u32 = 0xd9a441;
+
 struct BinError {
     bin: usize,
     msg: String,
 }
 
-fn shaded(tess: &gridfinity_cad::Tessellation, rgb: u32, bad: bool) -> Vec<f32> {
+fn shaded(tess: &gridfinity_model::Tessellation, rgb: u32, bad: bool) -> Vec<f32> {
     let mut out = Vec::new();
     gridfinity_render::append_smooth_shaded(
         &mut out,
@@ -93,7 +98,7 @@ fn shaded(tess: &gridfinity_cad::Tessellation, rgb: u32, bad: bool) -> Vec<f32> 
     out
 }
 
-fn flagged(tess: &gridfinity_cad::Tessellation, bad: bool) -> Vec<f32> {
+fn flagged(tess: &gridfinity_model::Tessellation, bad: bool) -> Vec<f32> {
     shaded(tess, DEBUG_BASE_COLOR, bad)
 }
 
@@ -330,8 +335,63 @@ fn body_labels(
         .collect()
 }
 
+/// The inserts as solid bodies in the drawer's own millimetre coordinates, each
+/// displaced with the piece of its bin that it stands on.
+///
+/// Built from the same `SubbinSpec` the export built from, so the window shows
+/// the body the file holds. An insert is never cut, so it moves whole: it takes
+/// the shift of the band its own centre falls in, which is the band of the piece
+/// it would be lifted out with.
+fn subbin_vertices(
+    subbins: &[optimize::PlacedSubbin],
+    params: &Params,
+    gaps: bool,
+) -> (Vec<f32>, Vec<BinError>) {
+    let mut out = Vec::new();
+    let mut errors = Vec::new();
+    for insert in subbins {
+        match catch(|| build_subbin(&insert.spec)) {
+            Ok(solid) => {
+                let mut verts = shaded(&tessellate(&solid, PREVIEW_RES), SUBBIN_AMBER, false);
+                displace(&mut verts, subbin_shift(insert, params, gaps));
+                out.extend(verts);
+            }
+            Err(msg) => errors.push(BinError {
+                bin: insert.bin,
+                msg,
+            }),
+        }
+    }
+    (out, errors)
+}
+
+/// Where an insert is drawn relative to where it is built: nowhere at all with
+/// the gaps closed, and lifted clear of the bin's rim with them open.
+///
+/// **An insert takes no band displacement**, which is the one thing separating
+/// it from an object box. A compartment may straddle a cut -- the AAA batteries
+/// of `examples/ikea-alex-drawer-1.toml` span the seam of their own bin -- and
+/// there the two halves of the compartment open by `SPLIT_APART_MM` while the
+/// insert, being one printed body, cannot. Giving it the band its centre falls
+/// in put it half a gap into one half of a compartment that had just been pulled
+/// apart around it, which reads as a part that does not fit. Lifting it out
+/// instead is what the gaps mean for a body that is *assembled* rather than cut:
+/// with them closed it sits exactly in its compartment, which is the view that
+/// answers whether it fits, and with them open it stands above the compartment
+/// it belongs to.
+fn subbin_shift(insert: &optimize::PlacedSubbin, params: &Params, gaps: bool) -> Vec3 {
+    if !gaps {
+        return Vec3::ZERO;
+    }
+    let clear = params.total_height() - insert.spec.z + f64::from(explode::SPLIT_APART_MM);
+    Vec3::new(0.0, 0.0, clear.max(0.0) as f32)
+}
+
 /// Every item in the scene named where it stands: each bin, the baseplate under
-/// it, and each object the packer placed.
+/// it, each insert standing in a compartment, and each object the packer placed.
+///
+/// An insert is one body and one file, so it is named once, over its own top,
+/// with its file name under it -- the two-line form every exported body carries.
 ///
 /// **A body is named once per file it becomes.** A piece is what gets written,
 /// so a bin cut into six for the bed carries six labels, each over its own
@@ -363,7 +423,9 @@ fn body_labels(
 /// the thing the viewer cannot identify by looking.
 fn scene_labels(
     params: &Params,
+    gaps: bool,
     boxes: &[optimize::ObjectBox],
+    subbins: &[optimize::PlacedSubbin],
     plate: Option<&Params>,
     bin_names: &[String],
     bin_files: &[Vec<String>],
@@ -392,11 +454,24 @@ fn scene_labels(
             continue;
         };
         let (x, y) = ((min.x + max.x) / 2.0, (min.y + max.y) / 2.0);
-        let shift = Explosion::of(bin, pitch).shift_at(x, y);
+        let shift = explode(Explosion::of(bin, pitch), gaps).shift_at(x, y);
         out.push(wireframe::Label {
             at: KernelVec3::new(x + f64::from(shift.x), y + f64::from(shift.y), max.z),
             text: b.name.clone(),
             color: if b.fits { LABEL_INK } else { LABEL_BAD },
+        });
+    }
+    for insert in subbins {
+        let (x, y) = (
+            insert.spec.x + insert.spec.outer_width / 2.0,
+            insert.spec.y + insert.spec.outer_depth / 2.0,
+        );
+        let shift = subbin_shift(insert, params, gaps);
+        out.push(wireframe::Label {
+            at: KernelVec3::new(x, y, insert.spec.top() + f64::from(shift.z)),
+            text: format!("{}
+{}", insert.label, insert.file),
+            color: LABEL_INK,
         });
     }
     for (ord, (index, bin)) in bins.iter().enumerate() {
@@ -406,7 +481,7 @@ fn scene_labels(
             None => format!("bin {}", ord + 1),
         };
         out.extend(body_labels(
-            &Explosion::of(bin, pitch),
+            &explode(Explosion::of(bin, pitch), gaps),
             &bin.cells,
             &bin.split_lines,
             pitch,
@@ -427,7 +502,7 @@ fn scene_labels(
                 }
             }
             out.extend(body_labels(
-                &Explosion::new(&cells, &splits, plate.pitch),
+                &explode(Explosion::new(&cells, &splits, plate.pitch), gaps),
                 &cells,
                 &splits,
                 plate.pitch,
@@ -616,6 +691,8 @@ struct App {
     plate_files: Vec<String>,
     object_boxes: Vec<optimize::ObjectBox>,
     show_object_boxes: bool,
+    subbins: Vec<optimize::PlacedSubbin>,
+    show_subbins: bool,
     plate: Option<Params>,
     show_plate: bool,
     show_gaps: bool,
@@ -641,19 +718,31 @@ impl App {
             Renderer::new(&gpu.device, &state.adapter)
                 .expect("the wgpu backend must build the viewport pipelines"),
         ));
-        let (params, object_boxes, plate, bin_names, bin_files, plate_files) = match initial {
-            Some(view) => (
-                view.params,
-                view.boxes,
-                view.plate,
-                view.bin_names,
-                view.bin_files,
-                view.plate_files,
-            ),
-            None => (Params::default(), Vec::new(), None, Vec::new(), Vec::new(), Vec::new()),
-        };
+        let (params, object_boxes, subbins, plate, bin_names, bin_files, plate_files) =
+            match initial {
+                Some(view) => (
+                    view.params,
+                    view.boxes,
+                    view.subbins,
+                    view.plate,
+                    view.bin_names,
+                    view.bin_files,
+                    view.plate_files,
+                ),
+                None => (
+                    Params::default(),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            };
         let mut app = App {
             show_object_boxes: !object_boxes.is_empty(),
+            show_subbins: !subbins.is_empty(),
+            subbins,
             bin_names,
             bin_files,
             plate_files,
@@ -708,6 +797,12 @@ impl App {
         if self.show_object_boxes && !self.params.bins.is_empty() {
             verts.extend(object_box_vertices(&self.object_boxes, &self.params, self.show_gaps));
         }
+        if dbg_solid.is_none() && self.show_subbins {
+            let (insert_verts, insert_errors) =
+                subbin_vertices(&self.subbins, &self.params, self.show_gaps);
+            verts.extend(insert_verts);
+            self.errors.extend(insert_errors);
+        }
         if dbg_solid.is_none() && self.show_plate {
             if let Some(plate) = &self.plate {
                 let (plate_verts, plate_errors) = build_scene(plate, self.show_gaps);
@@ -727,7 +822,9 @@ impl App {
             let plate = if self.show_plate { self.plate.as_ref() } else { None };
             self.labels.extend(scene_labels(
                 &self.params,
+                self.show_gaps,
                 boxes,
+                if self.show_subbins { &self.subbins } else { &[] },
                 plate,
                 &self.bin_names,
                 &self.bin_files,
@@ -1076,8 +1173,8 @@ impl App {
 mod tests {
     use super::*;
     use crate::explode::SPLIT_APART_MM;
-    use gridfinity_cad::kernel::math::Vec3 as KernelVec3;
-    use gridfinity_cad::layout::{Axis, GridCell, SplitLine};
+    use gridfinity_brep::math::Vec3 as KernelVec3;
+    use gridfinity_model::layout::{Axis, GridCell, SplitLine};
 
     /// A builder that refuses everything, so the failure path is exercised
     /// without asking the kernel for a bin it cannot make.
@@ -1151,6 +1248,79 @@ mod tests {
         }
     }
 
+    /// An insert is one printed body, so the gaps lift it out of its compartment
+    /// rather than moving it with a band.
+    ///
+    /// The regression this pins is a compartment that **straddles a cut**, which
+    /// the AAA batteries of `examples/ikea-alex-drawer-1.toml` did: the two
+    /// halves of the compartment open by `SPLIT_APART_MM` while the insert,
+    /// being uncut, can only take one band's shift -- so it read as a part
+    /// standing half a gap into a compartment that had been pulled apart around
+    /// it. The displacement is along +Z and nothing else, and it is zero with
+    /// the gaps closed, which is the view that answers whether the insert fits.
+    #[test]
+    fn an_insert_is_lifted_out_rather_than_moved_with_a_band() {
+        let cells: Vec<GridCell> = (0..4)
+            .flat_map(|x| (0..4).map(move |y| GridCell { x, y }))
+            .collect();
+        let params = split_bin(&cells, &[SplitLine { axis: Axis::Y, index: 2 }]);
+        let insert = optimize::PlacedSubbin {
+            label: "battery".to_string(),
+            file: "gridfinity-subbin.stl".to_string(),
+            bin: 0,
+            spec: gridfinity_model::subbin::SubbinSpec {
+                x: 20.0,
+                y: 40.0,
+                z: 8.2,
+                outer_width: 40.0,
+                outer_depth: 80.0,
+                interior_width: 37.6,
+                interior_depth: 77.6,
+                interior_height: 10.0,
+                floor: 2.5,
+                corner_r: 2.6,
+                interior_corner_r: 2.5,
+                chamfer: 2.5,
+            },
+        };
+        assert!(
+            insert.spec.y < 84.0 && insert.spec.y + insert.spec.outer_depth > 84.0,
+            "the fixture insert must straddle the cut at y = 2 cells, or it cannot see the defect"
+        );
+
+        let closed = subbin_shift(&insert, &params, false);
+        assert_eq!(
+            closed,
+            Vec3::ZERO,
+            "with the gaps closed an insert sits exactly in its compartment"
+        );
+        let open = subbin_shift(&insert, &params, true);
+        assert!(
+            open.x == 0.0 && open.y == 0.0,
+            "an insert takes no band displacement, but it moved ({}, {}) across the bin",
+            open.x,
+            open.y
+        );
+        assert!(
+            (open.z - (params.total_height() - insert.spec.z + f64::from(SPLIT_APART_MM)) as f32)
+                .abs()
+                < 1e-6,
+            "an insert is lifted clear of the bin's rim, but it rose {} mm",
+            open.z
+        );
+
+        let labels = scene_labels(&params, true, &[], &[insert], None, &[], &[], &[]);
+        let label = labels
+            .iter()
+            .find(|l| l.text.starts_with("battery"))
+            .expect("the insert is named");
+        assert!(
+            (label.at.z - (8.2 + 12.5 + f64::from(open.z))).abs() < 1e-6,
+            "the insert's label rides with it, but it sits at z = {}",
+            label.at.z
+        );
+    }
+
     #[test]
     fn a_split_bin_previews_as_pieces_a_gap_apart() {
         let cells = [GridCell { x: 0, y: 0 }, GridCell { x: 1, y: 0 }];
@@ -1197,7 +1367,7 @@ mod tests {
             boxed("socket set", 0, KernelVec3::new(2.0, 2.0, 0.0), KernelVec3::new(30.0, 30.0, 5.0), true),
             boxed("tape measure", 1, KernelVec3::new(50.0, 2.0, 0.0), KernelVec3::new(80.0, 30.0, 400.0), false),
         ];
-        let labels = scene_labels(&params, &boxes, Some(&plate), &[], &[], &[]);
+        let labels = scene_labels(&params, true, &boxes, &[], Some(&plate), &[], &[], &[]);
         let text: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(
             text,
@@ -1261,7 +1431,7 @@ mod tests {
             boxed("bracket", 0, KernelVec3::new(10.0, 10.0, 0.0), KernelVec3::new(140.0, 30.0, 5.0), true),
             boxed("bracket", 0, KernelVec3::new(10.0, 30.0, 0.0), KernelVec3::new(40.0, 60.0, 5.0), true),
         ];
-        let labels = scene_labels(&params, &l_shaped, None, &[], &[], &[]);
+        let labels = scene_labels(&params, true, &l_shaped, &[], None, &[], &[], &[]);
         let text: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(
             text,
@@ -1292,7 +1462,7 @@ mod tests {
             "gridfinity-bin-2-piece-1-of-2.stl".to_string(),
             "gridfinity-bin-2-piece-2-of-2.stl".to_string(),
         ]];
-        let labels = scene_labels(&params, &[], None, &["bin 2".to_string()], &files, &[]);
+        let labels = scene_labels(&params, true, &[], &[], None, &["bin 2".to_string()], &files, &[]);
         let text: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(
             text,
@@ -1320,6 +1490,8 @@ mod tests {
         let whole = split_bin(&cells, &[]);
         let one = scene_labels(
             &whole,
+            true,
+            &[],
             &[],
             None,
             &["bin 2".to_string()],
@@ -1348,7 +1520,7 @@ mod tests {
             "gridfinity-baseplate-piece-1-of-2.stl".to_string(),
             "gridfinity-baseplate-piece-2-of-2.stl".to_string(),
         ];
-        let labels = scene_labels(&params, &[], Some(&plate), &[], &[], &plate_files);
+        let labels = scene_labels(&params, true, &[], &[], Some(&plate), &[], &[], &plate_files);
         let plate_text: Vec<&str> = labels
             .iter()
             .map(|l| l.text.as_str())
@@ -1370,7 +1542,7 @@ mod tests {
         let cells: Vec<GridCell> = (0..3).map(|x| GridCell { x, y: 0 }).collect();
         let pitch = gridfinity::GRID_PITCH;
         let centred = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }]);
-        let label = scene_labels(&centred, &[], None, &[], &[], &[]);
+        let label = scene_labels(&centred, true, &[], &[], None, &[], &[], &[]);
         assert_eq!(label.len(), 1);
         assert!(
             (label[0].at.x - (1.5 * pitch + f64::from(SPLIT_APART_MM) / 2.0)).abs() < 1e-9,
@@ -1379,7 +1551,7 @@ mod tests {
         );
 
         let other = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 2 }]);
-        let label = scene_labels(&other, &[], None, &[], &[], &[]);
+        let label = scene_labels(&other, true, &[], &[], None, &[], &[], &[]);
         assert!(
             (label[0].at.x - (1.5 * pitch - f64::from(SPLIT_APART_MM) / 2.0)).abs() < 1e-9,
             "cut later and the same centre stands on the first band instead, not {}",

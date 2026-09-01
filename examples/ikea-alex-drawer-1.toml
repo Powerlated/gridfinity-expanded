@@ -20,8 +20,11 @@ grid_size = 40         # the cell pitch; 42 mm is the Gridfinity standard
 divider_thickness = 1.2
 clearance = 2
 effort = "standard"    # quick | standard | thorough
-height_units = 4       # 7 mm each, above a 7 mm base
+height_units = 2       # 3.5 mm each, above a 7 mm base
 wall_thickness = 1.2
+# subbin_wall_thickness = 1.2  # the wall and floor of an insert; wall_thickness by default
+# subbin_clearance = 0.25     # the gap between an insert and its compartment, per side.
+#                             # Not `clearance`, which is the room an object is given.
 fillet_radius = 2.5
 magnets = false
 screws = false
@@ -38,16 +41,21 @@ size = ["2.1 in", "9.2 in"]
 name = "caliper box"
 size = ["25 cm", "9 cm"]
 
-# `max_size` is the most this object's compartment may measure once the fit has
-# finished tidying it, per axis, with an empty string for no limit. Settling
-# grows a compartment into whatever leftover faces it, which would leave these
-# batteries room to lie over at an angle; held to their own width they stay
-# stood up. Stated in the object's own frame, so it follows the object round
-# whichever quarter turn the packer gives it.
+# `subbin` asks for an insert: a separately printed open-top box that drops into
+# this object's compartment, stating its *interior* as [width, depth, height]
+# with an empty string for an axis the fit decides. The interior is a strictly
+# bounded box with no floor blend, so these batteries are held at 45 mm across
+# and 30 mm deep however much settling grows the compartment, while the depth
+# takes whatever it is given. Its four vertical corners are rounded within that
+# box, by the outer corner less the wall, so the walls are one thickness the
+# whole way round; its floor stays sharp, so nothing sinks into a blend. Stated in the object's own frame, so it
+# follows the object round whichever quarter turn the packer gives it. An axis
+# the subbin states is one `max_size` may not state again -- both are the same
+# measurement -- and `max_size` alone still bounds an object with no insert.
 [[objects]]
 name = "AAA batteries"
-size =     ["4.5 cm", "124 mm"]
-max_size = ["4.5 cm", ""]
+size =   ["4.5 cm", "124 mm"]
+subbin = ["4.5cm", "", "3cm"]
 
 [[objects]]
 name = "tape measure"

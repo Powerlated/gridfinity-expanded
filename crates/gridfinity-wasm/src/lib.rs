@@ -1,9 +1,9 @@
 
-use gridfinity_cad::gridfinity::{
+use gridfinity_model::gridfinity::{
     self, BASE_TOTAL_HEIGHT, GRID_PITCH, HEIGHT_PER_UNIT, InnerWall, LogicalBin, Params,
 };
-use gridfinity_cad::layout::{GridCell, GridEdge};
-use gridfinity_cad::tessellate;
+use gridfinity_model::layout::{GridCell, GridEdge};
+use gridfinity_model::tessellate;
 use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
@@ -111,7 +111,7 @@ pub fn export_parasolid(bins: JsValue) -> Result<String, JsValue> {
     let bins: Vec<BinParams> = serde_wasm_bindgen::from_value(bins)
         .map_err(|e| JsValue::from_str(&format!("invalid bin parameters: {e}")))?;
 
-    let mut solids: Vec<gridfinity_cad::Solid> = Vec::new();
+    let mut solids: Vec<gridfinity_model::Solid> = Vec::new();
     for bin in &bins {
         let params = bin.to_params();
         let whole = gridfinity::build_bin_solid(&params, &bin.cells, None, &[])
@@ -122,20 +122,20 @@ pub fn export_parasolid(bins: JsValue) -> Result<String, JsValue> {
             solids.push(solid);
         }
     }
-    let bodies: Vec<&gridfinity_cad::Solid> = solids.iter().collect();
-    gridfinity_cad::to_xt_text(&bodies)
+    let bodies: Vec<&gridfinity_model::Solid> = solids.iter().collect();
+    gridfinity_model::to_xt_text(&bodies)
         .map_err(|e| JsValue::from_str(&format!("parasolid export: {e}")))
 }
 
 /// The drawer packer, driven from JavaScript one chunk of restarts at a time.
 ///
-/// The whole search lives in `gridfinity-cad`; this is only the boundary. The
+/// The whole search lives in `gridfinity-project`; this is only the boundary. The
 /// caller constructs it from a `PackInput`, spends the budget in `step` calls so
 /// it can report progress between them, and reads `result` whenever it likes --
 /// the incumbent layout is meaningful from construction, before any step.
 #[wasm_bindgen]
 pub struct PackSearch {
-    inner: gridfinity_cad::project::pack::PackSearch,
+    inner: gridfinity_project::pack::PackSearch,
 }
 
 /// The serializer the pack boundary uses: maps become plain objects, because
@@ -151,11 +151,11 @@ impl PackSearch {
     /// run.
     #[wasm_bindgen(constructor)]
     pub fn new(input: JsValue) -> Result<PackSearch, JsValue> {
-        let input: gridfinity_cad::project::pack::PackInput =
+        let input: gridfinity_project::pack::PackInput =
             serde_wasm_bindgen::from_value(input)
                 .map_err(|e| JsValue::from_str(&format!("invalid pack input: {e}")))?;
         Ok(PackSearch {
-            inner: gridfinity_cad::project::pack::PackSearch::new(input),
+            inner: gridfinity_project::pack::PackSearch::new(input),
         })
     }
 
@@ -184,7 +184,7 @@ impl PackSearch {
     }
 }
 
-fn render_vertices(solid: &gridfinity_cad::Solid, arc_segments: usize) -> Vec<f32> {
+fn render_vertices(solid: &gridfinity_model::Solid, arc_segments: usize) -> Vec<f32> {
     tessellate(solid, arc_segments).welded_render_buffer()
 }
 
