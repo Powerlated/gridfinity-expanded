@@ -1469,6 +1469,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gridfinity-web"
+version = "0.1.0"
+
+[[package]]
 name = "gridfinity-xt"
 version = "0.1.0"
 dependencies = [

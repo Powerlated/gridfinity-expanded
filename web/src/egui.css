@@ -1,5 +1,0 @@
-html, body, #gridfinity-canvas { margin: 0; width: 100%; height: 100%; overflow: hidden; }
-body { background: #11151b; color: #e8edf2; font: 14px system-ui, sans-serif; }
-#gridfinity-canvas { display: block; }
-#startup { position: fixed; inset: 0; display: grid; place-items: center; }
-#startup[data-failed="true"] { color: #ff9b9b; padding: 2rem; text-align: center; }

@@ -1,0 +1,10 @@
+[package]
+name = "gridfinity-web"
+description = "Builds the app, the renderer and OCCT into one WebAssembly module and stages the page around it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gridfinity-web"
+path = "src/main.rs"

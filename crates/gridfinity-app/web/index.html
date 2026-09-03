@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>Gridfinity Expanded</title>
+    <style>
+        html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #1b1c1f; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        #startup { position: absolute; inset: 0; display: flex; align-items: center;
+                   justify-content: center; color: #c9cbd1; font-family: system-ui, sans-serif; }
+    </style>
+</head>
+
+<body>
+    <canvas id="gridfinity-canvas" aria-label="Gridfinity CAD application"></canvas>
+    <div id="startup">Loading Gridfinity CAD…</div>
+    <script type="module">
+        // The module is Emscripten's own ES6 output with wasm-bindgen's glue
+        // merged into it (-sWASM_BINDGEN), so starting the app is importing it
+        // and calling the factory. It locates its .wasm beside itself.
+        import init from './gridfinity-app.js';
+        const startup = document.getElementById('startup');
+        try {
+            await init();
+            startup.remove();
+        } catch (error) {
+            startup.textContent = `Could not start Gridfinity CAD: ${error}`;
+            startup.dataset.failed = 'true';
+            throw error;
+        }
+    </script>
+</body>
+
+</html>
