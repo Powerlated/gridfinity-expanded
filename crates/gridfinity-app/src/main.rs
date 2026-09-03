@@ -1,4 +1,3 @@
-
 //! The Gridfinity desktop app, and the one command it also answers to.
 //!
 //! With no arguments it is the egui construction debugger: `App` owns the
@@ -33,20 +32,21 @@ mod wireframe;
 use clap::{Parser, Subcommand};
 use eframe::egui;
 
+#[cfg(not(target_arch = "wasm32"))]
 #[global_allocator]
 static ALLOC: gridfinity_brep::perf::CountingAlloc<mimalloc::MiMalloc> =
     gridfinity_brep::perf::CountingAlloc::new(mimalloc::MiMalloc);
 use debugger::Debugger;
-use explode::Explosion;
 use editor::Editor;
-use gridfinity_model::gridfinity::{self, LogicalBin, Mode, Params};
-use gridfinity_brep::math::Vec3 as KernelVec3;
-use gridfinity_model::layout::{GridCell, SplitLine, partition_cells};
-use gridfinity_model::printers::{DEFAULT_PRINTER, PrinterProfile};
-use gridfinity_brep::build::extrude;
+use explode::Explosion;
 use glam::Vec3;
+use gridfinity_brep::build::extrude;
+use gridfinity_brep::math::Vec3 as KernelVec3;
 use gridfinity_brep::sketch::Sketch;
 use gridfinity_brep::topo::Solid;
+use gridfinity_model::gridfinity::{self, LogicalBin, Mode, Params};
+use gridfinity_model::layout::{GridCell, SplitLine, partition_cells};
+use gridfinity_model::printers::{DEFAULT_PRINTER, PrinterProfile};
 use gridfinity_model::subbin::build_subbin;
 use gridfinity_model::{tessellate, tessellate_shell};
 use std::sync::{Arc, Mutex};
@@ -110,7 +110,11 @@ fn vert_bounds(verts: &[f32]) -> (Vec3, Vec3) {
         min = min.min(p);
         max = max.max(p);
     }
-    if min.x > max.x { (Vec3::ZERO, Vec3::ZERO) } else { (min, max) }
+    if min.x > max.x {
+        (Vec3::ZERO, Vec3::ZERO)
+    } else {
+        (min, max)
+    }
 }
 
 /// The same vertices, every position moved by `shift` and every normal, colour
@@ -130,7 +134,11 @@ fn displace(verts: &mut [f32], shift: Vec3) {
 /// about whether the scene is open -- a body standing apart from boxes that
 /// stayed put is a picture of nothing.
 fn explode(explosion: Explosion, gaps: bool) -> Explosion {
-    if gaps { explosion } else { explosion.collapsed() }
+    if gaps {
+        explosion
+    } else {
+        explosion.collapsed()
+    }
 }
 
 /// One bin's preview vertices, given the whole solid the kernel built for it:
@@ -216,11 +224,7 @@ fn plate_vertices(p: &Params, solid: &Solid, gaps: bool) -> Result<Vec<f32>, Str
 /// compartment is only M mm deep` warning made visible. The box stands its full
 /// height either way: clipping it to the cavity would hide the thing worth
 /// seeing.
-fn object_box_vertices(
-    boxes: &[optimize::ObjectBox],
-    params: &Params,
-    gaps: bool,
-) -> Vec<f32> {
+fn object_box_vertices(boxes: &[optimize::ObjectBox], params: &Params, gaps: bool) -> Vec<f32> {
     let explosions: Vec<Explosion> = params
         .bins
         .iter()
@@ -228,7 +232,12 @@ fn object_box_vertices(
         .collect();
     let mut out = Vec::new();
     for b in boxes {
-        assert!(b.max.z > b.min.z, "an object box stands some height, but {} is not under {}", b.min, b.max);
+        assert!(
+            b.max.z > b.min.z,
+            "an object box stands some height, but {} is not under {}",
+            b.min,
+            b.max
+        );
         let explosion = &explosions[b.bin];
         for part in explosion.pieces() {
             let Some((min, max)) = explosion.clip(part.col, part.row, b.min, b.max) else {
@@ -315,7 +324,14 @@ fn body_labels(
     files: &[String],
 ) -> Vec<wireframe::Label> {
     if files.is_empty() {
-        return vec![body_label(explosion, cells, pitch, top, name.to_string(), LABEL_INK)];
+        return vec![body_label(
+            explosion,
+            cells,
+            pitch,
+            top,
+            name.to_string(),
+            LABEL_INK,
+        )];
     }
     let parts = partition_cells(cells, splits);
     assert_eq!(
@@ -330,7 +346,14 @@ fn body_labels(
         .iter()
         .zip(files)
         .map(|(part, file)| {
-            body_label(explosion, &part.cells, pitch, top, format!("{name}\n{file}"), LABEL_INK)
+            body_label(
+                explosion,
+                &part.cells,
+                pitch,
+                top,
+                format!("{name}\n{file}"),
+                LABEL_INK,
+            )
         })
         .collect()
 }
@@ -469,8 +492,11 @@ fn scene_labels(
         let shift = subbin_shift(insert, params, gaps);
         out.push(wireframe::Label {
             at: KernelVec3::new(x, y, insert.spec.top() + f64::from(shift.z)),
-            text: format!("{}
-{}", insert.label, insert.file),
+            text: format!(
+                "{}
+{}",
+                insert.label, insert.file
+            ),
             color: LABEL_INK,
         });
     }
@@ -527,7 +553,10 @@ fn placeholder(p: &Params, bin: &LogicalBin) -> Vec<f32> {
         let cx = c.x as f64 * gridfinity::GRID_PITCH + gridfinity::GRID_PITCH / 2.0;
         let cy = c.y as f64 * gridfinity::GRID_PITCH + gridfinity::GRID_PITCH / 2.0;
         let sk = Sketch::rounded_rect(cx, cy, side, side, gridfinity::OUTER_R);
-        out.extend(flagged(&tessellate(&extrude(&sk, 0.0, h), PREVIEW_RES), true));
+        out.extend(flagged(
+            &tessellate(&extrude(&sk, 0.0, h), PREVIEW_RES),
+            true,
+        ));
     }
     out
 }
@@ -645,6 +674,7 @@ enum Command {
 
 /// Dispatches the command line: `optimize` runs the fitter and opens a window
 /// only if it asked to, no subcommand opens the debugger on a default bin.
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     let initial = match Cli::parse().command {
         Some(Command::Optimize(args)) => match optimize::run(&args) {
@@ -661,9 +691,11 @@ fn main() -> eframe::Result<()> {
 }
 
 /// Opens the construction debugger, on the given fit when there is one.
+#[cfg(any(not(target_arch = "wasm32"), target_os = "emscripten"))]
 fn window(initial: Option<optimize::View>) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
+        run_and_return: !cfg!(target_os = "emscripten"),
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 760.0])
             .with_title("Gridfinity Parametric — analytic B-rep CAD"),
@@ -674,6 +706,66 @@ fn window(initial: Option<optimize::View>) -> eframe::Result<()> {
         options,
         Box::new(move |cc| Ok(Box::new(App::new(cc, initial)))),
     )
+}
+
+/// Emscripten owns the browser event loop. `WebRunner` installs egui on the
+/// canvas and returns control immediately; geometry work remains synchronous
+/// on this same instance, as required by the single-WASM execution model.
+#[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
+fn main() {
+    console_error_panic_hook::set_once();
+    #[cfg(feature = "occt")]
+    {
+        // Fail at startup if the supposedly unified artifact omitted its C++
+        // kernel. This shape is immediately dropped; real model migration uses
+        // the same owning handle.
+        gridfinity_occt::Shape::box_solid(1.0, 1.0, 1.0)
+            .expect("the unified web build must contain OCCT");
+    }
+    wasm_bindgen_futures::spawn_local(async {
+        let window = web_sys::window().expect("the egui web build needs a Window");
+        let canvas = window
+            .document()
+            .and_then(|d| d.get_element_by_id("gridfinity-canvas"))
+            .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            .expect("index.html must contain canvas#gridfinity-canvas");
+        eframe::WebRunner::new()
+            .start(
+                canvas,
+                eframe::WebOptions::default(),
+                Box::new(|cc| Ok(Box::new(App::new(cc, None)))),
+            )
+            .await
+            .expect("egui WebRunner failed");
+    });
+}
+
+/// Emscripten follows eframe's winit runner, not its wasm-bindgen `WebRunner`.
+/// wgpu then selects its GLES/Emscripten backend and winit supplies the browser
+/// canvas through the normal window surface path.
+#[cfg(target_os = "emscripten")]
+fn main() -> eframe::Result<()> {
+    #[cfg(feature = "occt")]
+    gridfinity_occt::Shape::box_solid(1.0, 1.0, 1.0)
+        .expect("the unified web build must contain OCCT");
+    window(None)
+}
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, prelude::wasm_bindgen};
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(inline_js = r#"
+export function download_bytes(name, mime, bytes) {
+  const blob = new Blob([bytes], {type: mime});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+"#)]
+extern "C" {
+    fn download_bytes(name: &str, mime: &str, bytes: &[u8]);
 }
 
 struct App {
@@ -703,12 +795,13 @@ struct App {
     errors: Vec<BinError>,
 }
 
-
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, initial: Option<optimize::View>) -> App {
         theme::apply(&cc.egui_ctx);
-        let state =
-            cc.wgpu_render_state.as_ref().expect("this build requires the wgpu backend");
+        let state = cc
+            .wgpu_render_state
+            .as_ref()
+            .expect("this build requires the wgpu backend");
         let gpu = Gpu {
             device: state.device.clone(),
             queue: state.queue.clone(),
@@ -795,7 +888,11 @@ impl App {
             }
         }
         if self.show_object_boxes && !self.params.bins.is_empty() {
-            verts.extend(object_box_vertices(&self.object_boxes, &self.params, self.show_gaps));
+            verts.extend(object_box_vertices(
+                &self.object_boxes,
+                &self.params,
+                self.show_gaps,
+            ));
         }
         if dbg_solid.is_none() && self.show_subbins {
             let (insert_verts, insert_errors) =
@@ -817,14 +914,25 @@ impl App {
         }
         self.labels = wf.labels;
         if dbg_solid.is_none() {
-            let boxes: &[optimize::ObjectBox] =
-                if self.show_object_boxes { &self.object_boxes } else { &[] };
-            let plate = if self.show_plate { self.plate.as_ref() } else { None };
+            let boxes: &[optimize::ObjectBox] = if self.show_object_boxes {
+                &self.object_boxes
+            } else {
+                &[]
+            };
+            let plate = if self.show_plate {
+                self.plate.as_ref()
+            } else {
+                None
+            };
             self.labels.extend(scene_labels(
                 &self.params,
                 self.show_gaps,
                 boxes,
-                if self.show_subbins { &self.subbins } else { &[] },
+                if self.show_subbins {
+                    &self.subbins
+                } else {
+                    &[]
+                },
                 plate,
                 &self.bin_names,
                 &self.bin_files,
@@ -838,8 +946,6 @@ impl App {
         drop(r);
         self.dirty = false;
     }
-
-
 
     fn config_report(&self) -> String {
         let mut out = self.params.rust_literal();
@@ -868,17 +974,28 @@ impl App {
         let text = self.config_report();
         ctx.copy_text(text.clone());
         let line = text.lines().count();
-        self.status = match rfd::FileDialog::new()
-            .set_file_name("bin-config.rs")
-            .add_filter("Rust", &["rs"])
-            .save_file()
+        #[cfg(target_arch = "wasm32")]
         {
-            Some(path) => match std::fs::write(&path, &text) {
-                Ok(()) => format!("Config copied to clipboard and written to {}", path.display()),
-                Err(e) => format!("Config copied to clipboard; writing failed: {e}"),
-            },
-            None => format!("Config copied to clipboard ({line} line(s))"),
-        };
+            download_bytes("bin-config.rs", "text/plain;charset=utf-8", text.as_bytes());
+            self.status = format!("Config copied and downloaded ({line} line(s))");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.status = match rfd::FileDialog::new()
+                .set_file_name("bin-config.rs")
+                .add_filter("Rust", &["rs"])
+                .save_file()
+            {
+                Some(path) => match std::fs::write(&path, &text) {
+                    Ok(()) => format!(
+                        "Config copied to clipboard and written to {}",
+                        path.display()
+                    ),
+                    Err(e) => format!("Config copied to clipboard; writing failed: {e}"),
+                },
+                None => format!("Config copied to clipboard ({line} line(s))"),
+            };
+        }
     }
 
     fn export_stl(&mut self) {
@@ -886,6 +1003,17 @@ impl App {
             self.status = "Cannot export: fix the failed bin first".into();
             return;
         }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let solid = match try_whole(&self.params) {
+                Ok(s) => s,
+                Err(msg) => { self.status = format!("Export failed: {msg}"); return; }
+            };
+            let mesh = tessellate(&solid, EXPORT_RES).to_mesh();
+            download_bytes("gridfinity-bin.stl", "model/stl", &mesh.to_stl_binary());
+            self.status = format!("Downloaded gridfinity-bin.stl ({} triangles)", mesh.tri_count());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name("gridfinity-bin.stl")
             .add_filter("STL", &["stl"])
@@ -900,7 +1028,13 @@ impl App {
             };
             let mesh = tessellate(&solid, EXPORT_RES).to_mesh();
             match std::fs::write(&path, mesh.to_stl_binary()) {
-                Ok(()) => self.status = format!("Exported {} ({} triangles)", path.display(), mesh.tri_count()),
+                Ok(()) => {
+                    self.status = format!(
+                        "Exported {} ({} triangles)",
+                        path.display(),
+                        mesh.tri_count()
+                    )
+                }
                 Err(e) => self.status = format!("Export failed: {e}"),
             }
         }
@@ -911,7 +1045,6 @@ impl App {
             self.status = "Cannot export: fix the failed bin first".into();
             return;
         }
-        let Some(dir) = rfd::FileDialog::new().pick_folder() else { return };
         let pieces = match catch(|| gridfinity::try_build_pieces(&self.params)) {
             Ok(p) => p,
             Err(msg) => {
@@ -919,6 +1052,18 @@ impl App {
                 return;
             }
         };
+        #[cfg(target_arch = "wasm32")]
+        {
+            let n = pieces.len();
+            for piece in &pieces {
+                let mesh = tessellate(&piece.solid, EXPORT_RES).to_mesh();
+                download_bytes(&piece.name, "model/stl", &mesh.to_stl_binary());
+            }
+            self.status = format!("Downloaded {n} piece(s)");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+        let Some(dir) = rfd::FileDialog::new().pick_folder() else { return; };
         let mut n = 0usize;
         for piece in &pieces {
             let mesh = tessellate(&piece.solid, EXPORT_RES).to_mesh();
@@ -932,6 +1077,7 @@ impl App {
             }
         }
         self.status = format!("Exported {n} piece(s) to {}", dir.display());
+        }
     }
 }
 
@@ -1014,7 +1160,10 @@ impl App {
             if widgets::segmented(
                 ui,
                 &mut workspace,
-                &[(Workspace::Editor, "Bin editor"), (Workspace::Debugger, "Debugger")],
+                &[
+                    (Workspace::Editor, "Bin editor"),
+                    (Workspace::Debugger, "Debugger"),
+                ],
                 false,
             ) {
                 self.debugger.set_shown(workspace == Workspace::Debugger);
@@ -1062,7 +1211,13 @@ impl App {
         if !self.errors.is_empty() || self.renderer.lock().unwrap().is_accumulating() {
             ui.ctx().request_repaint();
         }
-        ui.painter().add(viewport::callback(rect, self.gpu.clone(), renderer, cam, time));
+        ui.painter().add(viewport::callback(
+            rect,
+            self.gpu.clone(),
+            renderer,
+            cam,
+            time,
+        ));
         self.paint_labels(ui, rect);
         self.viewport_tools(ui, rect);
         self.paint_error_banner(ui, rect);
@@ -1084,7 +1239,11 @@ impl App {
         if child.button("Reset view").clicked() {
             self.regenerate(true);
         }
-        let label = if self.show_gaps { "Close up" } else { "Show gaps" };
+        let label = if self.show_gaps {
+            "Close up"
+        } else {
+            "Show gaps"
+        };
         if child
             .add(egui::Button::new(label).selected(self.show_gaps))
             .on_hover_text("Stand every cut piece off its neighbours, or abut them as printed.")
@@ -1124,9 +1283,11 @@ impl App {
                     ui.label(egui::RichText::new(&e.msg).color(theme::RED_PALE));
                 }
                 ui.label(
-                    egui::RichText::new("Shown as a plain block; the rest of the layout is unaffected.")
-                        .small()
-                        .color(theme::TEXT_DIMMED),
+                    egui::RichText::new(
+                        "Shown as a plain block; the rest of the layout is unaffected.",
+                    )
+                    .small()
+                    .color(theme::TEXT_DIMMED),
                 );
             });
     }
@@ -1159,12 +1320,15 @@ impl App {
                 continue;
             }
             let [r, g, b] = label.color;
-            let color = egui::Color32::from_rgb(
-                (r * 255.0) as u8,
-                (g * 255.0) as u8,
-                (b * 255.0) as u8,
+            let color =
+                egui::Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8);
+            painter.text(
+                p,
+                egui::Align2::CENTER_CENTER,
+                label.text.clone(),
+                font.clone(),
+                color,
             );
-            painter.text(p, egui::Align2::CENTER_CENTER, label.text.clone(), font.clone(), color);
         }
     }
 }
@@ -1186,7 +1350,10 @@ mod tests {
         Params {
             bins: cells
                 .iter()
-                .map(|&c| LogicalBin { cells: vec![c], ..Default::default() })
+                .map(|&c| LogicalBin {
+                    cells: vec![c],
+                    ..Default::default()
+                })
                 .collect(),
             height_units: 1,
             ..Params::default()
@@ -1197,7 +1364,11 @@ mod tests {
         let mut good = 0;
         let mut bad = 0;
         for v in verts.chunks_exact(MESH_STRIDE) {
-            if v[BAD_FLAG_OFFSET] > 0.5 { bad += 1 } else { good += 1 }
+            if v[BAD_FLAG_OFFSET] > 0.5 {
+                bad += 1
+            } else {
+                good += 1
+            }
         }
         (good, bad)
     }
@@ -1208,16 +1379,26 @@ mod tests {
         let (verts, errors) = build_scene_with(&p, always_fails, true);
         assert_eq!(errors.len(), 1, "the one bad bin should be reported once");
         assert_eq!(errors[0].bin, 0);
-        assert!(!errors[0].msg.is_empty(), "the failure needs a message to show");
+        assert!(
+            !errors[0].msg.is_empty(),
+            "the failure needs a message to show"
+        );
         let (good, bad) = flags(&verts);
         assert!(bad > 0, "the failed bin needs placeholder geometry to glow");
-        assert_eq!(good, 0, "nothing else built, so nothing should be unflagged");
+        assert_eq!(
+            good, 0,
+            "nothing else built, so nothing should be unflagged"
+        );
     }
 
     #[test]
     fn a_valid_layout_reports_nothing_and_flags_nothing() {
         let (verts, errors) = build_scene(&Params::default(), true);
-        assert!(errors.is_empty(), "default bin should build: {:?}", errors[0].msg);
+        assert!(
+            errors.is_empty(),
+            "default bin should build: {:?}",
+            errors[0].msg
+        );
         let (good, bad) = flags(&verts);
         assert!(good > 0);
         assert_eq!(bad, 0, "a healthy bin must not be flagged");
@@ -1232,7 +1413,10 @@ mod tests {
 
         let (ok_verts, ok_errors) = build_scene(&p, true);
         assert!(ok_errors.is_empty());
-        assert!(ok_verts.len() > verts.len(), "real geometry beats placeholders");
+        assert!(
+            ok_verts.len() > verts.len(),
+            "real geometry beats placeholders"
+        );
     }
 
     /// A bin of `cells` in one piece, and the same bin cut on `splits`.
@@ -1263,7 +1447,13 @@ mod tests {
         let cells: Vec<GridCell> = (0..4)
             .flat_map(|x| (0..4).map(move |y| GridCell { x, y }))
             .collect();
-        let params = split_bin(&cells, &[SplitLine { axis: Axis::Y, index: 2 }]);
+        let params = split_bin(
+            &cells,
+            &[SplitLine {
+                axis: Axis::Y,
+                index: 2,
+            }],
+        );
         let insert = optimize::PlacedSubbin {
             label: "battery".to_string(),
             file: "gridfinity-subbin.stl".to_string(),
@@ -1326,8 +1516,16 @@ mod tests {
         let cells = [GridCell { x: 0, y: 0 }, GridCell { x: 1, y: 0 }];
         let (whole, errors) = build_scene(&split_bin(&cells, &[]), true);
         assert!(errors.is_empty(), "the uncut bin must build");
-        let (cut, errors) =
-            build_scene(&split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }]), true);
+        let (cut, errors) = build_scene(
+            &split_bin(
+                &cells,
+                &[SplitLine {
+                    axis: Axis::X,
+                    index: 1,
+                }],
+            ),
+            true,
+        );
         assert!(errors.is_empty(), "the cut bin must build");
 
         let (whole_min, whole_max) = vert_bounds(&whole);
@@ -1351,7 +1549,14 @@ mod tests {
         max: KernelVec3,
         fits: bool,
     ) -> optimize::ObjectBox {
-        optimize::ObjectBox { name: name.to_string(), instance, bin: 0, min, max, fits }
+        optimize::ObjectBox {
+            name: name.to_string(),
+            instance,
+            bin: 0,
+            min,
+            max,
+            fits,
+        }
     }
 
     /// Everything `--view` puts on screen says what it is: both bodies, and
@@ -1361,11 +1566,32 @@ mod tests {
     #[test]
     fn every_item_in_the_view_is_labelled() {
         let cells = [GridCell { x: 0, y: 0 }, GridCell { x: 1, y: 0 }];
-        let params = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }]);
-        let plate = Params { mode: Mode::Baseplate, ..split_bin(&cells, &[]) };
+        let params = split_bin(
+            &cells,
+            &[SplitLine {
+                axis: Axis::X,
+                index: 1,
+            }],
+        );
+        let plate = Params {
+            mode: Mode::Baseplate,
+            ..split_bin(&cells, &[])
+        };
         let boxes = [
-            boxed("socket set", 0, KernelVec3::new(2.0, 2.0, 0.0), KernelVec3::new(30.0, 30.0, 5.0), true),
-            boxed("tape measure", 1, KernelVec3::new(50.0, 2.0, 0.0), KernelVec3::new(80.0, 30.0, 400.0), false),
+            boxed(
+                "socket set",
+                0,
+                KernelVec3::new(2.0, 2.0, 0.0),
+                KernelVec3::new(30.0, 30.0, 5.0),
+                true,
+            ),
+            boxed(
+                "tape measure",
+                1,
+                KernelVec3::new(50.0, 2.0, 0.0),
+                KernelVec3::new(80.0, 30.0, 400.0),
+                false,
+            ),
         ];
         let labels = scene_labels(&params, true, &boxes, &[], Some(&plate), &[], &[], &[]);
         let text: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
@@ -1384,7 +1610,10 @@ mod tests {
             "an object that does not clear the cavity says so in its label as well as its rim"
         );
         assert!(
-            labels.iter().filter(|l| l.text == "socket set").all(|l| l.color == LABEL_INK),
+            labels
+                .iter()
+                .filter(|l| l.text == "socket set")
+                .all(|l| l.color == LABEL_INK),
             "an object that fits is labelled plainly"
         );
         assert!(
@@ -1392,13 +1621,19 @@ mod tests {
             "a box's label sits on top of it, not inside it: {}",
             too_tall.at.z
         );
-        let bin = labels.iter().find(|l| l.text == "bin").expect("the bin is labelled");
+        let bin = labels
+            .iter()
+            .find(|l| l.text == "bin")
+            .expect("the bin is labelled");
         assert!(
             (bin.at.z - params.total_height()).abs() < 1e-9,
             "the bin is labelled on its rim, not at {}",
             bin.at.z
         );
-        let plate_label = labels.iter().find(|l| l.text == "baseplate").expect("so is the plate");
+        let plate_label = labels
+            .iter()
+            .find(|l| l.text == "baseplate")
+            .expect("so is the plate");
         assert!(
             (plate_label.at.z - gridfinity::PEG_HEIGHT).abs() < 1e-9,
             "the plate is labelled at its own height, under the bin's"
@@ -1416,9 +1651,18 @@ mod tests {
             .flat_map(|x| (0..2).map(move |y| GridCell { x, y }))
             .collect();
         let splits = [
-            SplitLine { axis: Axis::X, index: 1 },
-            SplitLine { axis: Axis::X, index: 3 },
-            SplitLine { axis: Axis::Y, index: 1 },
+            SplitLine {
+                axis: Axis::X,
+                index: 1,
+            },
+            SplitLine {
+                axis: Axis::X,
+                index: 3,
+            },
+            SplitLine {
+                axis: Axis::Y,
+                index: 1,
+            },
         ];
         let params = split_bin(&cells, &splits);
         let pitch = gridfinity::GRID_PITCH;
@@ -1428,8 +1672,20 @@ mod tests {
             "the fixture is a bin in six pieces"
         );
         let l_shaped = [
-            boxed("bracket", 0, KernelVec3::new(10.0, 10.0, 0.0), KernelVec3::new(140.0, 30.0, 5.0), true),
-            boxed("bracket", 0, KernelVec3::new(10.0, 30.0, 0.0), KernelVec3::new(40.0, 60.0, 5.0), true),
+            boxed(
+                "bracket",
+                0,
+                KernelVec3::new(10.0, 10.0, 0.0),
+                KernelVec3::new(140.0, 30.0, 5.0),
+                true,
+            ),
+            boxed(
+                "bracket",
+                0,
+                KernelVec3::new(10.0, 30.0, 0.0),
+                KernelVec3::new(40.0, 60.0, 5.0),
+                true,
+            ),
         ];
         let labels = scene_labels(&params, true, &l_shaped, &[], None, &[], &[], &[]);
         let text: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
@@ -1456,13 +1712,25 @@ mod tests {
     #[test]
     fn a_body_is_named_once_per_file_it_becomes() {
         let cells: Vec<GridCell> = (0..4).map(|x| GridCell { x, y: 0 }).collect();
-        let splits = [SplitLine { axis: Axis::X, index: 2 }];
+        let splits = [SplitLine {
+            axis: Axis::X,
+            index: 2,
+        }];
         let params = split_bin(&cells, &splits);
         let files = vec![vec![
             "gridfinity-bin-2-piece-1-of-2.stl".to_string(),
             "gridfinity-bin-2-piece-2-of-2.stl".to_string(),
         ]];
-        let labels = scene_labels(&params, true, &[], &[], None, &["bin 2".to_string()], &files, &[]);
+        let labels = scene_labels(
+            &params,
+            true,
+            &[],
+            &[],
+            None,
+            &["bin 2".to_string()],
+            &files,
+            &[],
+        );
         let text: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(
             text,
@@ -1479,7 +1747,9 @@ mod tests {
             labels[1].at.x
         );
         assert!(
-            (labels[1].at.x - labels[0].at.x - 2.0 * gridfinity::GRID_PITCH
+            (labels[1].at.x
+                - labels[0].at.x
+                - 2.0 * gridfinity::GRID_PITCH
                 - f64::from(SPLIT_APART_MM))
             .abs()
                 < 1e-9,
@@ -1511,16 +1781,37 @@ mod tests {
     #[test]
     fn the_baseplate_names_each_of_its_own_pieces() {
         let cells: Vec<GridCell> = (0..3).map(|x| GridCell { x, y: 0 }).collect();
-        let params = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 2 }]);
+        let params = split_bin(
+            &cells,
+            &[SplitLine {
+                axis: Axis::X,
+                index: 2,
+            }],
+        );
         let plate = Params {
             mode: Mode::Baseplate,
-            ..split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }])
+            ..split_bin(
+                &cells,
+                &[SplitLine {
+                    axis: Axis::X,
+                    index: 1,
+                }],
+            )
         };
         let plate_files = vec![
             "gridfinity-baseplate-piece-1-of-2.stl".to_string(),
             "gridfinity-baseplate-piece-2-of-2.stl".to_string(),
         ];
-        let labels = scene_labels(&params, true, &[], &[], Some(&plate), &[], &[], &plate_files);
+        let labels = scene_labels(
+            &params,
+            true,
+            &[],
+            &[],
+            Some(&plate),
+            &[],
+            &[],
+            &plate_files,
+        );
         let plate_text: Vec<&str> = labels
             .iter()
             .map(|l| l.text.as_str())
@@ -1541,7 +1832,13 @@ mod tests {
     fn a_labels_position_follows_the_piece_its_centre_stands_on() {
         let cells: Vec<GridCell> = (0..3).map(|x| GridCell { x, y: 0 }).collect();
         let pitch = gridfinity::GRID_PITCH;
-        let centred = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }]);
+        let centred = split_bin(
+            &cells,
+            &[SplitLine {
+                axis: Axis::X,
+                index: 1,
+            }],
+        );
         let label = scene_labels(&centred, true, &[], &[], None, &[], &[], &[]);
         assert_eq!(label.len(), 1);
         assert!(
@@ -1550,7 +1847,13 @@ mod tests {
             label[0].at.x
         );
 
-        let other = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 2 }]);
+        let other = split_bin(
+            &cells,
+            &[SplitLine {
+                axis: Axis::X,
+                index: 2,
+            }],
+        );
         let label = scene_labels(&other, true, &[], &[], None, &[], &[], &[]);
         assert!(
             (label[0].at.x - (1.5 * pitch - f64::from(SPLIT_APART_MM) / 2.0)).abs() < 1e-9,
@@ -1571,7 +1874,13 @@ mod tests {
         };
         let (whole, errors) = build_scene(&plate(&[]), true);
         assert!(errors.is_empty(), "the uncut plate must build");
-        let (cut, errors) = build_scene(&plate(&[SplitLine { axis: Axis::X, index: 1 }]), true);
+        let (cut, errors) = build_scene(
+            &plate(&[SplitLine {
+                axis: Axis::X,
+                index: 1,
+            }]),
+            true,
+        );
         assert!(errors.is_empty(), "the cut plate must build");
 
         let (whole_min, whole_max) = vert_bounds(&whole);
@@ -1594,12 +1903,22 @@ mod tests {
     #[test]
     fn the_plate_and_the_bin_open_their_gaps_in_different_places() {
         let cells: Vec<GridCell> = (0..4).map(|x| GridCell { x, y: 0 }).collect();
-        let bin_line = SplitLine { axis: Axis::X, index: 2 };
-        let plate_line = SplitLine { axis: Axis::X, index: 1 };
+        let bin_line = SplitLine {
+            axis: Axis::X,
+            index: 2,
+        };
+        let plate_line = SplitLine {
+            axis: Axis::X,
+            index: 1,
+        };
         let bin = Explosion::new(&cells, &[bin_line], gridfinity::GRID_PITCH);
         let plate = Explosion::new(&cells, &[plate_line], gridfinity::GRID_PITCH);
         for (body, line) in [(&bin, bin_line), (&plate, plate_line)] {
-            let moved: Vec<f32> = body.pieces().iter().map(|p| body.shift(p.col, p.row).x).collect();
+            let moved: Vec<f32> = body
+                .pieces()
+                .iter()
+                .map(|p| body.shift(p.col, p.row).x)
+                .collect();
             assert_eq!(
                 moved,
                 vec![-SPLIT_APART_MM / 2.0, SPLIT_APART_MM / 2.0],
@@ -1625,7 +1944,13 @@ mod tests {
     #[test]
     fn an_object_box_is_cut_and_moved_with_the_piece_it_lies_in() {
         let cells = [GridCell { x: 0, y: 0 }, GridCell { x: 1, y: 0 }];
-        let params = split_bin(&cells, &[SplitLine { axis: Axis::X, index: 1 }]);
+        let params = split_bin(
+            &cells,
+            &[SplitLine {
+                axis: Axis::X,
+                index: 1,
+            }],
+        );
         let pitch = gridfinity::GRID_PITCH;
         let across = optimize::ObjectBox {
             name: "across the cut".to_string(),
@@ -1644,7 +1969,8 @@ mod tests {
             across.max.x - across.min.x
         );
         assert!(
-            (max.z - across.max.z as f32).abs() < 1e-3 && (min.z - across.min.z as f32).abs() < 1e-3,
+            (max.z - across.max.z as f32).abs() < 1e-3
+                && (min.z - across.min.z as f32).abs() < 1e-3,
             "a cut is vertical, so it takes nothing off the box's height"
         );
         let (good, bad) = flags(&verts);
@@ -1664,9 +1990,16 @@ mod tests {
         };
         let verts = object_box_vertices(std::slice::from_ref(&tall), &params, true);
         let (_, max) = vert_bounds(&verts);
-        assert!((max.z - 400.0).abs() < 1e-3, "the box stands its full height, not {}", max.z);
+        assert!(
+            (max.z - 400.0).abs() < 1e-3,
+            "the box stands its full height, not {}",
+            max.z
+        );
         let (good, bad) = flags(&verts);
-        assert!(bad > 0 && good == 0, "every vertex of a box that does not fit is flagged");
+        assert!(
+            bad > 0 && good == 0,
+            "every vertex of a box that does not fit is flagged"
+        );
     }
 
     #[test]
@@ -1675,8 +2008,14 @@ mod tests {
         let (verts, _) = build_scene_with(&p, always_fails, true);
         let (min, max) = vert_bounds(&verts);
         let pitch = gridfinity::GRID_PITCH as f32;
-        assert!(min.x > 2.0 * pitch - 1.0 && max.x < 3.0 * pitch + 1.0, "x {min:?}..{max:?}");
-        assert!(min.y > 1.0 * pitch - 1.0 && max.y < 2.0 * pitch + 1.0, "y {min:?}..{max:?}");
+        assert!(
+            min.x > 2.0 * pitch - 1.0 && max.x < 3.0 * pitch + 1.0,
+            "x {min:?}..{max:?}"
+        );
+        assert!(
+            min.y > 1.0 * pitch - 1.0 && max.y < 2.0 * pitch + 1.0,
+            "y {min:?}..{max:?}"
+        );
         assert!(
             (max.z - gridfinity::HEIGHT_PER_UNIT as f32).abs() < 1e-3,
             "one height unit tall"

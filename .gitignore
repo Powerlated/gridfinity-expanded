@@ -28,6 +28,7 @@ test-results/
 
 # Rust geometry kernel, compiled by `npm run build:wasm` (see web/scripts/build-wasm.mjs)
 web/src/wasm/
+web/src/wasm-egui/
 
 # Parasolid import ladder, written by the `writes_the_import_ladder` test
 xt-ladder/

@@ -5,6 +5,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+occt = ["dep:gridfinity-occt", "gridfinity-occt/occt"]
+
+[build-dependencies]
+cc = "1"
+
 [[bin]]
 name = "gridfinity-app"
 path = "src/main.rs"
@@ -14,15 +21,25 @@ gridfinity-brep = { path = "../gridfinity-brep" }
 gridfinity-model = { path = "../gridfinity-model" }
 gridfinity-project = { path = "../gridfinity-project" }
 gridfinity-render = { path = "../gridfinity-render" }
-eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+gridfinity-occt = { path = "../gridfinity-occt", optional = true }
+eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts"] }
 egui = "0.35"
 egui-wgpu = "0.35"
 wgpu = { workspace = true }
 glam = "0.29"
 bytemuck = "1"
-rfd = "0.15"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+rfd = "0.15"
 mimalloc = "0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.126"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Document", "Element", "HtmlCanvasElement", "Window"] }
+console_error_panic_hook = "0.1"
 

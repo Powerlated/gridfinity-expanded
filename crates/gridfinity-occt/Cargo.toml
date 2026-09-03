@@ -1,0 +1,18 @@
+[package]
+name = "gridfinity-occt"
+description = "Small, exception-safe C ABI over the vendored Open CASCADE geometry kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+links = "gridfinity_occt_bridge"
+
+[features]
+default = []
+# Building OCCT itself is deliberately separate (cmake/presets/occt-*.cmake).
+# This feature compiles the bridge and links an installed OCCT tree selected by
+# OCCT_ROOT. Keeping it opt-in lets the legacy kernel remain the fallback while
+# the model is migrated operator by operator.
+occt = []
+
+[build-dependencies]
+cc = "1"

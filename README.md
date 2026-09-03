@@ -1,8 +1,8 @@
 # Gridfinity Expanded
 
-A React 19 + Vite 6 TypeScript application for designing connected Gridfinity bins and exporting printable STL parts.
+A Rust/egui parametric CAD application for designing connected Gridfinity bins and exporting printable parts. The same egui application runs on desktop and in the browser; the browser page is only a canvas host.
 
-The editor supports multiple explicitly selected bins, perimeter openings, full-height internal walls, editable printer-aware cuts, magnet recesses, and M3 recesses. The UI resolves cuts into printable parts, then a background worker builds trusted input into triangle soups used directly by both the preview and STL export. The preview is drawn by the Rust workspace's own WebGL2 renderer, shared with its egui debugger.
+The editor supports multiple explicitly selected bins, perimeter openings, full-height internal walls, editable printer-aware cuts, magnet recesses, and M3 recesses. Geometry and UI run synchronously in one WebAssembly instance. OCCT is being introduced behind the `occt` feature while the legacy analytic kernel remains available during migration.
 
 ## Development
 
@@ -16,6 +16,21 @@ npm run dev
 ```
 
 Required validation commands are documented in [`CLAUDE.md`](./CLAUDE.md).
+
+The browser build requires Rust 1.96+, `wasm32-unknown-emscripten`, Emscripten
+6.0.5, wasm-bindgen-cli 0.2.126, CMake, and Ninja. `npm run build:wasm`
+configures the pinned `vendor/occt` submodule, statically links OCCT and egui,
+and refuses an output containing anything other than one `.wasm` file. A local
+emsdk in `target/emsdk` and wasm-bindgen in `target/tools/bin` are discovered
+automatically.
+
+For a native OCCT bridge build:
+
+```sh
+cmake --preset occt-native
+cmake --build --preset occt-native-install
+OCCT_ROOT=target/occt-install/native cargo test -p gridfinity-occt --features occt
+```
 
 ## Fitting a drawer from the command line
 
@@ -59,4 +74,4 @@ it.
 
 ## Geometry documentation
 
-[`CLAUDE.md`](./CLAUDE.md) is the canonical specification and architecture record. It documents the trusted-input contract, shape/wall/cut ownership, solid construction, direct preview, STL export, and printability gates. Normative Gridfinity dimensions and their sources live in `web/src/lib/gridfinitySpec.ts`.
+[`CLAUDE.md`](./CLAUDE.md) is the canonical specification and architecture record. It documents the trusted-input contract, shape/wall/cut ownership, solid construction, direct preview, STL export, and printability gates. Normative Gridfinity dimensions live in `gridfinity-model`.

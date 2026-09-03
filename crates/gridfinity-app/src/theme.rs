@@ -174,16 +174,23 @@ fn style(style: &mut egui::Style) {
 /// bundled face: the typeface is a nicety, and failing to start over it would
 /// not be.
 fn install_fonts(ctx: &egui::Context) {
+    #[cfg(target_arch = "wasm32")]
+    let _ = ctx;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     const SEGOE_UI: &str = r"C:\Windows\Fonts\segoeui.ttf";
     let Ok(bytes) = std::fs::read(SEGOE_UI) else {
         return;
     };
     let mut fonts = FontDefinitions::default();
-    fonts.font_data.insert("system-ui".to_owned(), FontData::from_owned(bytes).into());
+    fonts
+        .font_data
+        .insert("system-ui".to_owned(), FontData::from_owned(bytes).into());
     fonts
         .families
         .entry(FontFamily::Proportional)
         .or_default()
         .insert(0, "system-ui".to_owned());
     ctx.set_fonts(fonts);
+    }
 }

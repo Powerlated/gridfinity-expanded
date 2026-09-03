@@ -1,0 +1,16 @@
+[package]
+name = "gridfinity-xt"
+description = "The Parasolid XT transmit writer, and the OCCT bodies it is written from"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Reading an OCCT shape needs a linked OCCT; without it the crate is still the
+# whole writer, over bodies a caller builds itself.
+occt = ["gridfinity-occt/occt"]
+
+[dependencies]
+gridfinity-occt = { path = "../gridfinity-occt" }
+glam = "0.29"

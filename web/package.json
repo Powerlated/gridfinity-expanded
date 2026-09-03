@@ -4,36 +4,20 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "node scripts/build-wasm.mjs --if-needed && vite",
+    "dev": "node scripts/build-egui.mjs --if-needed && vite",
     "dev:nowasm": "vite",
-    "build": "tsc -b && vite build",
-    "lint": "oxlint",
+    "build": "node scripts/build-egui.mjs --if-needed && vite build",
+    "lint": "node --check scripts/build-egui.mjs && node --check src/bootstrap.js",
     "preview": "vite preview",
     "classify:changes": "node scripts/classify-changes.mjs",
-    "build:wasm": "node scripts/build-wasm.mjs",
-    "test": "vitest run",
+    "build:wasm": "node scripts/build-egui.mjs",
+    "test": "node --test",
     "test:e2e": "playwright test"
   },
-  "dependencies": {
-    "@mantine/core": "^9.4.1",
-    "@mantine/hooks": "^9.4.1",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "zustand": "^5.0.14"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@playwright/test": "^1.55.0",
-    "@types/node": "^24.13.2",
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^4.7.0",
-    "esbuild": "^0.25.12",
-    "oxlint": "^1.71.0",
-    "postcss": "^8.5.16",
-    "postcss-preset-mantine": "^1.18.0",
-    "postcss-simple-vars": "^7.0.1",
-    "typescript": "~6.0.2",
     "vite": "^6.4.3",
-    "vitest": "^4.1.10"
+    "@playwright/test": "^1.55.0"
   }
 }

@@ -1,0 +1,42 @@
+[target.wasm32-unknown-emscripten]
+# rustc's default linker for this target is `emcc.bat`, which emsdk 6 does not
+# ship on Windows; naming the driver lets PATH resolve the extension it does.
+linker = "emcc"
+# wasm-bindgen's Emscripten closure ABI requires Rust callbacks to be aborting;
+# OCCT C++ exceptions remain enabled and are caught inside the C bridge.
+# Every flag below is a property of the *final link*, so it has to be stated
+# here: cargo ignores `cargo:rustc-link-arg` emitted by a dependency's build
+# script, and the C++ kernel that needs these is a dependency of the binary.
+# rustc passes `-fwasm-exceptions` for this target unconditionally, so OCCT and
+# the bridge are compiled with the same exception model (CMakePresets.json,
+# gridfinity-occt/build.rs); the two models cannot be mixed in one module, and
+# emcc refuses the combination outright rather than miscompiling it.
+#   -sWASM_BINDGEN emcc runs wasm-bindgen itself and merges the generated
+#                  bindings into its own JS output; there is no separate pass.
+#   -sENVIRONMENT=web
+#                  The page is the only host. Without it emcc also emits its
+#                  Node and worker glue, whose `node:module` import a browser
+#                  bundler can only externalize.
+#   -Wno-error=undefined
+#                  rustc lists wasm-bindgen's externref helpers in
+#                  EXPORTED_FUNCTIONS, and wasm-bindgen's own post-link pass
+#                  then removes the ones the externref transform did not need,
+#                  so emcc's export check finds them missing. The warning still
+#                  prints, so an export that goes missing for a real reason is
+#                  still visible; only the promotion to an error is dropped.
+rustflags = [
+    "-C",
+    "panic=abort",
+    "-C",
+    "link-arg=-sWASM_BINDGEN",
+    "-C",
+    "link-arg=-Wno-error=undefined",
+    "-C",
+    "link-arg=-sALLOW_MEMORY_GROWTH=1",
+    "-C",
+    "link-arg=-sENVIRONMENT=web",
+    "-C",
+    "link-arg=-sMODULARIZE=1",
+    "-C",
+    "link-arg=-sEXPORT_ES6=1",
+]

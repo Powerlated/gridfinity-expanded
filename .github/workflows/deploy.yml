@@ -23,6 +23,8 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-node@v4
         with:
@@ -35,9 +37,17 @@ jobs:
         working-directory: web
 
       - name: Set up Rust
-        run: rustup target add wasm32-unknown-unknown
+        run: |
+          rustup target add wasm32-unknown-emscripten
+          cargo install wasm-bindgen-cli --version 0.2.126 --locked
 
-      - name: Build the geometry kernel
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.5
+          actions-cache-folder: emsdk-cache
+
+      - name: Build unified egui and OCCT WebAssembly
         run: npm run build:wasm
         working-directory: web
 

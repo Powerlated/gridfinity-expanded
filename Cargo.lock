@@ -800,8 +800,6 @@ dependencies = [
 [[package]]
 name = "eframe"
 version = "0.35.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8dc8234e2f681b2afd2b2e8c332fa614de2fddbdcb28d0acf5c420449682ea90"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -855,8 +853,6 @@ dependencies = [
 [[package]]
 name = "egui-wgpu"
 version = "0.35.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2e6cfac0725563555fa4f91e9f799b9d7c6c5dd831fca6abc8234afc64b7a34"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -1382,19 +1378,25 @@ name = "gridfinity-app"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "cc",
  "clap",
+ "console_error_panic_hook",
  "eframe",
  "egui",
  "egui-wgpu",
  "glam",
  "gridfinity-brep",
  "gridfinity-model",
+ "gridfinity-occt",
  "gridfinity-project",
  "gridfinity-render",
  "mimalloc",
  "rfd",
  "serde",
  "toml",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "wgpu",
 ]
 
@@ -1418,6 +1420,13 @@ dependencies = [
  "rayon",
  "serde",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "gridfinity-occt"
+version = "0.1.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -1457,6 +1466,14 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "wgpu",
+]
+
+[[package]]
+name = "gridfinity-xt"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "gridfinity-occt",
 ]
 
 [[package]]
@@ -4146,8 +4163,6 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6755fa58a9f8350bd1e472d4c3fcc25f824ec358933bba33306d0b63df5978d"
 dependencies = [
  "ahash",
  "android-activity",

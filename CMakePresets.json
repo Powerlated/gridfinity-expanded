@@ -1,0 +1,32 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "occt-native",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/target/occt-native",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/target/occt-install/native",
+        "CMAKE_PROJECT_INCLUDE_BEFORE": "${sourceDir}/cmake/occt-common.cmake"
+      }
+    },
+    {
+      "name": "occt-web",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/target/occt-web",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/target/occt-install/emscripten",
+        "CMAKE_TOOLCHAIN_FILE": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+        "CMAKE_C_FLAGS": "-w",
+        "CMAKE_CXX_FLAGS": "-fwasm-exceptions -w",
+        "CMAKE_PROJECT_INCLUDE_BEFORE": "${sourceDir}/cmake/occt-common.cmake"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "occt-native-install", "configurePreset": "occt-native", "targets": ["install"] },
+    { "name": "occt-web-install", "configurePreset": "occt-web", "targets": ["install"] }
+  ]
+}

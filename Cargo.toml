@@ -4,9 +4,11 @@ default-members = ["crates/gridfinity-app"]
 members = [
     "crates/gridfinity-app",
     "crates/gridfinity-brep",
+    "crates/gridfinity-occt",
     "crates/gridfinity-model",
     "crates/gridfinity-project",
     "crates/gridfinity-render",
+    "crates/gridfinity-xt",
     "crates/gridfinity-wasm",
 ]
 
@@ -17,6 +19,19 @@ license = "MIT"
 
 [workspace.dependencies]
 wgpu = { version = "29", features = ["webgl"] }
+
+[workspace.metadata.occt]
+# Keep this synchronized with the vendor/occt gitlink.  OCCT is LGPL-2.1 with
+# the OCCT exception; see THIRD_PARTY_LICENSES.md.
+version = "8.0.1"
+
+[patch.crates-io]
+# 0.35 treats every wasm32 target as wasm-bindgen's browser backend. Emscripten
+# uses wgpu-core-deps-emscripten instead, so its secure-context probe must not
+# reference wgpu::web_sys. Remove when upstream releases equivalent gating.
+egui-wgpu = { path = "third_party/egui-wgpu" }
+eframe = { path = "third_party/eframe" }
+winit = { path = "third_party/winit" }
 
 [profile.release]
 opt-level = 3
