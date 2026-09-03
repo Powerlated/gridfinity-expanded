@@ -47,10 +47,6 @@ workspace lives. Nothing but `Cargo.toml`/`Cargo.lock`, the two guides,
   browser page it is served behind.
 - `crates/gridfinity-web` -- builds that page: links the app and OCCT into one
   Emscripten module and stages `dist/`.
-- `crates/gridfinity-wasm` -- **unreferenced, pending deletion.** It was the
-  deleted React app's bindings: `PackSearch`, `generate_geometry`,
-  `export_parasolid` and the `Viewer`, all reached from TypeScript that no longer
-  exists. Nothing consumes it. Do not build on it.
 - `docs/` holds reference material that is not source (`xt_format.pdf`, the
   Parasolid manual `gridfinity-xt` is written against); `examples/` holds worked
   `optimize` inputs; `vendor/occt` is the pinned OCCT submodule; `third_party/`

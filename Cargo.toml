@@ -10,7 +10,6 @@ members = [
     "crates/gridfinity-render",
     "crates/gridfinity-web",
     "crates/gridfinity-xt",
-    "crates/gridfinity-wasm",
 ]
 
 [workspace.package]

@@ -430,7 +430,7 @@ Three phases, two parallelisable. Measured 8c/16t: check phase alone **7.1×** (
 
 ## Workspace layout
 
-Virtual workspace rooted at the **repository root** (`../Cargo.toml`, edition 2024, resolver 3) — every `cargo` command runs from there, not from `crates/`. Nine crates, `default-members` the app:
+Virtual workspace rooted at the **repository root** (`../Cargo.toml`, edition 2024, resolver 3) — every `cargo` command runs from there, not from `crates/`. Eight crates, `default-members` the app:
 
 - **`crates/gridfinity-brep`** — the engine library, whose crate root *is* the kernel. One dependency: `glam`. B-rep kernel and triangulator alike are hand-rolled.
 - **`crates/gridfinity-model`** — the Gridfinity model on top of it. Feature `serde` derives the parameter types' JSON; the wasm crate turns it on.
@@ -440,7 +440,6 @@ Virtual workspace rooted at the **repository root** (`../Cargo.toml`, edition 20
 - **`crates/gridfinity-occt`** — the C ABI over the vendored Open CASCADE kernel, behind the `occt` feature.
 - **`crates/gridfinity-xt`** — the Parasolid transmit writer, reader and validator, over its own analytic vocabulary. Reads OCCT bodies; depends on `gridfinity-brep` not at all.
 - **`crates/gridfinity-web`** — builds the browser page.
-- **`crates/gridfinity-wasm`** — the deleted React app's bindings. Unreferenced, pending deletion.
 
 **There is no facade crate.** `gridfinity-cad`, which held the first three layers as one, is gone; each consumer names the layers it reaches into in its own `Cargo.toml`, so a call from model-level code into the kernel is a dependency someone had to declare. `gridfinity-model` re-exports `Mesh`, `Solid`, `Tessellation`/`tessellate`, `audit`, `to_xt_text` and `Params` at its root, which is what the app and the bindings import for the common cases.
 
@@ -493,7 +492,7 @@ Two constructions are load-bearing. **`outer_profile(spec, inset)` produces both
 
 Pure logic beside `printers.rs`, no kernel dependency, six modules: `rects` (axis-aligned boxes, their lattice, `union_area`/`parts_connected`/`rect_covered_by`, boundary runs and `merge_segments`), `pack` (`PackSearch`, the bottom-left first fit over four rotations, restarts perturbed by `Mulberry32`), `tidy` (what the search prefers once everything fits), `settle` (what tidies the layout it chose), `walls` (`layout_walls` → `Wall`/`InnerWall`, extended half a thickness at both ends), `drawer` (`drawer_grid`, `packing_area`, `cavity_region`, `MAX_GRID` 40).
 
-**This is the only implementation.** It used to live in the deleted TypeScript app and was ported here verbatim — `mulberry32` bit for bit, the same tie-break on the instance sort — then verified against it: the same input gave byte-identical placements, counts, iterations and walls at both `quick` and `thorough`. The TypeScript optimizer is deleted; `../web/src/lib/project/rects.ts` keeps only the render-time measurements the SVG canvases take, and the web app reaches this one through `gridfinity-wasm`'s `PackSearch`.
+**This is the only implementation.** It used to live in the deleted TypeScript app and was ported here verbatim — `mulberry32` bit for bit, the same tie-break on the instance sort — then verified against it: the same input gave byte-identical placements, counts, iterations and walls at both `quick` and `thorough`. The TypeScript optimizer is deleted, and so is the binding layer that reached it.
 
 **`Rect::right`/`bottom` quantise.** The TS original did not, and `rect_grid`'s "does one part cover this cell" test compares a quantised lattice line against a raw `x + width`: at `x = 28.65, width = 28.2` the sum is an ulp below the line, the cell reads empty, and `union_area` returns **0** for a plain box. That value is the packer's own sort key, so the defect changed which layout came out. Quantising the far edges is what makes a box's right edge and its neighbour's left edge one number. `union_area` now asserts its result lies in `largest_part ..= sum_of_parts`, which is the check that would have caught it.
 
@@ -855,7 +854,7 @@ Rectilinear region engine: unions/differences of axis-aligned rects resolved on 
 
 Twelve modules, dividing by what part of a bin they author. `mod` = wiring + `build`/`try_build`/`try_build_reporting`/`program`/`build_piece`/`build_bin_solid*`. `spec` = the normative dimensions and every clamp the model holds itself to (`buildable_wall_thickness`, `buildable_floor_fillet`, and one named const per tolerance — no bare epsilons). `params` = `Params`/`LogicalBin`/`InnerWall`, plain data, no validation. `outline` = the boundary walk + `OuterLoops`/`split_outline_at`. `cavity` = `cavity_inset`/`compartment_corners`/`finger_strips`/`walked_cavity`/`shape_cavity_loop`. `cavity` also holds `pocket_cavity`, the stated-compartment way in. `opening` = `OpenSpan`/`CavityLoop`/`clip_cavity_to_outline`. `wall` = `Island`/`Notch`/`Banded`/`inner_wall_quad`. `peg` = the three ring profiles + `split_peg_profile`. `stack` = `plan_cavity_flat`/`plan_cavity_banded` + the slope arithmetic. `plan` = `plan_piece`. `pieces` = `carve_to_cells`/`carve_baseplate_to_cells`/`try_build_pieces`. `baseplate`.
 
-Each submodule names its own kernel imports and reaches its siblings through `use super::*`, so everything shared between them is `pub(super)` and `mod.rs` globs each back in. The public surface is `mod.rs`'s `pub use` and is what `gridfinity-app`, `gridfinity-wasm` and `tests/fuzz.rs` see — moving an item between submodules changes nothing outside.
+Each submodule names its own kernel imports and reaches its siblings through `use super::*`, so everything shared between them is `pub(super)` and `mod.rs` globs each back in. The public surface is `mod.rs`'s `pub use` and is what `gridfinity-app` and `tests/fuzz.rs` see — moving an item between submodules changes nothing outside.
 
 Parametric model + spec constants + `Params`, a faithful port of the TS reference's `BinConfig`. `Params.bins: Vec<LogicalBin>` holds polyomino cell sets (plus optional floor slope); `Params::rect(gx,gy)` is the rectangular convenience. **Each bin is built in one `Builder`** so interface edges are shared automatically — there is *no general boolean*.
 
