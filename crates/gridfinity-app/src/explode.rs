@@ -16,10 +16,10 @@
 //! visibly laps a seam of the other. `of` is the bin's way in, `new` the plain
 //! cells-and-lines one the plate takes.
 
-use gridfinity_model::gridfinity::LogicalBin;
-use gridfinity_brep::math::Vec3 as KernelVec3;
-use gridfinity_model::layout::{GridCell, Piece, SplitLine, partition_cells};
 use glam::Vec3;
+use gridfinity_model::gridfinity::LogicalBin;
+use gridfinity_model::layout::{GridCell, Piece, SplitLine, partition_cells};
+use gridfinity_sketch::math::Vec3 as KernelVec3;
 
 /// How far apart adjacent pieces of a split bin stand in the preview, in
 /// millimetres. Far enough that every cut reads as a gap at a glance, near
@@ -57,8 +57,14 @@ pub struct Explosion {
 /// into millimetres by the grid pitch, which is what puts a band in the same
 /// coordinates as the solid and the object boxes.
 fn bands(mut spans: Vec<(i32, i32)>, pitch: f64) -> Vec<Band> {
-    assert!(!spans.is_empty(), "a bin with cells has at least one band along every axis");
-    assert!(pitch > 0.0, "a grid pitch is a positive number of millimetres, not {pitch}");
+    assert!(
+        !spans.is_empty(),
+        "a bin with cells has at least one band along every axis"
+    );
+    assert!(
+        pitch > 0.0,
+        "a grid pitch is a positive number of millimetres, not {pitch}"
+    );
     let last = spans.len() - 1;
     spans
         .drain(..)
@@ -69,7 +75,11 @@ fn bands(mut spans: Vec<(i32, i32)>, pitch: f64) -> Vec<Band> {
                 "a band runs from its first cell to its last, but {first_cell} is past {last_cell}"
             );
             Band {
-                lo: if i == 0 { f64::NEG_INFINITY } else { first_cell as f64 * pitch },
+                lo: if i == 0 {
+                    f64::NEG_INFINITY
+                } else {
+                    first_cell as f64 * pitch
+                },
                 hi: if i == last {
                     f64::INFINITY
                 } else {
@@ -85,12 +95,18 @@ fn bands(mut spans: Vec<(i32, i32)>, pitch: f64) -> Vec<Band> {
 /// A single band is centred on zero, which is why an axis with no cut moves
 /// nothing.
 fn band_offset(i: i32, count: usize, gap: f32) -> f32 {
-    assert!(count > 0, "an axis of a bin with cells has at least one band, not {count}");
+    assert!(
+        count > 0,
+        "an axis of a bin with cells has at least one band, not {count}"
+    );
     assert!(
         i >= 0 && (i as usize) < count,
         "band {i} is not one of the {count} bands along this axis"
     );
-    assert!(gap >= 0.0, "pieces stand apart or abut, so a gap is not {gap} mm");
+    assert!(
+        gap >= 0.0,
+        "pieces stand apart or abut, so a gap is not {gap} mm"
+    );
     (i as f32 - (count - 1) as f32 / 2.0) * gap
 }
 
@@ -127,7 +143,12 @@ impl Explosion {
         };
         let x = bands(spans(|p| p.col, |c| c.x), pitch);
         let y = bands(spans(|p| p.row, |c| c.y), pitch);
-        Explosion { pieces, x, y, gap: SPLIT_APART_MM }
+        Explosion {
+            pieces,
+            x,
+            y,
+            gap: SPLIT_APART_MM,
+        }
     }
 
     /// The same pieces and bands with every offset zero: the body shown as it
@@ -215,7 +236,10 @@ impl Explosion {
         if hi_x - lo_x <= 0.0 || hi_y - lo_y <= 0.0 {
             return None;
         }
-        Some((KernelVec3::new(lo_x, lo_y, min.z), KernelVec3::new(hi_x, hi_y, max.z)))
+        Some((
+            KernelVec3::new(lo_x, lo_y, min.z),
+            KernelVec3::new(hi_x, hi_y, max.z),
+        ))
     }
 }
 
@@ -238,11 +262,24 @@ mod tests {
     /// The ikea drawer's own partition: 6 x 12 cells cut at x=3, y=4 and y=8.
     fn ikea() -> Explosion {
         Explosion::of(
-            &bin(6, 12, &[
-                SplitLine { axis: Axis::X, index: 3 },
-                SplitLine { axis: Axis::Y, index: 4 },
-                SplitLine { axis: Axis::Y, index: 8 },
-            ]),
+            &bin(
+                6,
+                12,
+                &[
+                    SplitLine {
+                        axis: Axis::X,
+                        index: 3,
+                    },
+                    SplitLine {
+                        axis: Axis::Y,
+                        index: 4,
+                    },
+                    SplitLine {
+                        axis: Axis::Y,
+                        index: 8,
+                    },
+                ],
+            ),
             GRID_PITCH,
         )
     }
@@ -257,12 +294,28 @@ mod tests {
 
     #[test]
     fn an_axis_with_no_cut_is_not_moved_along() {
-        let across =
-            Explosion::of(&bin(4, 3, &[SplitLine { axis: Axis::X, index: 2 }]), GRID_PITCH);
+        let across = Explosion::of(
+            &bin(
+                4,
+                3,
+                &[SplitLine {
+                    axis: Axis::X,
+                    index: 2,
+                }],
+            ),
+            GRID_PITCH,
+        );
         for piece in across.pieces() {
             let shift = across.shift(piece.col, piece.row);
-            assert_eq!(shift.y, 0.0, "nothing is cut along y, so nothing moves along y");
-            assert_eq!(shift.x.abs(), SPLIT_APART_MM / 2.0, "the one cut opens by one gap");
+            assert_eq!(
+                shift.y, 0.0,
+                "nothing is cut along y, so nothing moves along y"
+            );
+            assert_eq!(
+                shift.x.abs(),
+                SPLIT_APART_MM / 2.0,
+                "the one cut opens by one gap"
+            );
         }
     }
 
@@ -270,7 +323,12 @@ mod tests {
     fn every_cut_opens_by_exactly_one_gap() {
         let e = ikea();
         assert_eq!(e.pieces().len(), 6, "two columns of three rows");
-        for (a, b) in [((0, 0), (1, 0)), ((0, 0), (0, 1)), ((0, 1), (0, 2)), ((1, 1), (1, 2))] {
+        for (a, b) in [
+            ((0, 0), (1, 0)),
+            ((0, 0), (0, 1)),
+            ((0, 1), (0, 2)),
+            ((1, 1), (1, 2)),
+        ] {
             let (from, to) = (e.shift(a.0, a.1), e.shift(b.0, b.1));
             assert!(
                 ((to - from).length() - SPLIT_APART_MM).abs() < 1e-6,
@@ -292,7 +350,10 @@ mod tests {
             apart.pieces().len(),
             "closing the gaps does not weld the pieces back together"
         );
-        assert!(together.is_split(), "a bin cut on three lines is still a bin cut on three lines");
+        assert!(
+            together.is_split(),
+            "a bin cut on three lines is still a bin cut on three lines"
+        );
         for piece in together.pieces() {
             assert_eq!(
                 together.shift(piece.col, piece.row),
@@ -331,20 +392,30 @@ mod tests {
     fn a_box_across_a_cut_clips_into_parts_that_sum_to_it() {
         let e = ikea();
         let pitch = GRID_PITCH;
-        let (min, max) =
-            (KernelVec3::new(pitch, pitch, 0.0), KernelVec3::new(5.0 * pitch, 2.0 * pitch, 10.0));
+        let (min, max) = (
+            KernelVec3::new(pitch, pitch, 0.0),
+            KernelVec3::new(5.0 * pitch, 2.0 * pitch, 10.0),
+        );
         let widths: Vec<f64> = (0..2)
             .filter_map(|col| e.clip(col, 0, min, max))
             .map(|(lo, hi)| hi.x - lo.x)
             .collect();
-        assert_eq!(widths.len(), 2, "a box across the x cut lies in both columns");
+        assert_eq!(
+            widths.len(),
+            2,
+            "a box across the x cut lies in both columns"
+        );
         assert!(
             (widths.iter().sum::<f64>() - (max.x - min.x)).abs() < 1e-9,
             "the parts {widths:?} do not add up to the box's {} mm",
             max.x - min.x
         );
         for part in (0..2).filter_map(|col| e.clip(col, 0, min, max)) {
-            assert_eq!((part.0.z, part.1.z), (min.z, max.z), "a cut takes nothing off the height");
+            assert_eq!(
+                (part.0.z, part.1.z),
+                (min.z, max.z),
+                "a cut takes nothing off the height"
+            );
         }
     }
 
@@ -365,10 +436,18 @@ mod tests {
     fn a_box_reaching_past_the_outline_still_belongs_to_the_outer_band() {
         let e = ikea();
         let pitch = GRID_PITCH;
-        let (min, max) =
-            (KernelVec3::new(-10.0, -10.0, 0.0), KernelVec3::new(pitch, pitch, 10.0));
-        let (lo, hi) = e.clip(0, 0, min, max).expect("the outer band is open outwards");
-        assert_eq!((lo.x, lo.y), (min.x, min.y), "the outer band keeps what hangs off the bin");
+        let (min, max) = (
+            KernelVec3::new(-10.0, -10.0, 0.0),
+            KernelVec3::new(pitch, pitch, 10.0),
+        );
+        let (lo, hi) = e
+            .clip(0, 0, min, max)
+            .expect("the outer band is open outwards");
+        assert_eq!(
+            (lo.x, lo.y),
+            (min.x, min.y),
+            "the outer band keeps what hangs off the bin"
+        );
         assert_eq!((hi.x, hi.y), (max.x, max.y));
     }
 }

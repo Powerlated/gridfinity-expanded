@@ -178,19 +178,19 @@ fn install_fonts(ctx: &egui::Context) {
     let _ = ctx;
     #[cfg(not(target_arch = "wasm32"))]
     {
-    const SEGOE_UI: &str = r"C:\Windows\Fonts\segoeui.ttf";
-    let Ok(bytes) = std::fs::read(SEGOE_UI) else {
-        return;
-    };
-    let mut fonts = FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("system-ui".to_owned(), FontData::from_owned(bytes).into());
-    fonts
-        .families
-        .entry(FontFamily::Proportional)
-        .or_default()
-        .insert(0, "system-ui".to_owned());
-    ctx.set_fonts(fonts);
+        const SEGOE_UI: &str = r"C:\Windows\Fonts\segoeui.ttf";
+        let Ok(bytes) = std::fs::read(SEGOE_UI) else {
+            return;
+        };
+        let mut fonts = FontDefinitions::default();
+        fonts
+            .font_data
+            .insert("system-ui".to_owned(), FontData::from_owned(bytes).into());
+        fonts
+            .families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .insert(0, "system-ui".to_owned());
+        ctx.set_fonts(fonts);
     }
 }

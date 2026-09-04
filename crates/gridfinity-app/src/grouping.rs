@@ -489,7 +489,11 @@ pub fn outer_pack(
             .map(|plan| PackObject {
                 id: plan.objects.join("+"),
                 name: plan.objects.join(" + "),
-                parts: plan.cells.iter().map(|c| cell_rect(*c, spec.pitch)).collect(),
+                parts: plan
+                    .cells
+                    .iter()
+                    .map(|c| cell_rect(*c, spec.pitch))
+                    .collect(),
                 quantity: 1,
             })
             .collect(),
@@ -597,11 +601,7 @@ pub struct Groups {
 /// groups is offered a swap, again taking the best improving move until none
 /// improves -- which is what gets past the point where no *pair* of whole groups
 /// can be merged but one object is in the wrong one.
-pub fn choose_groups(
-    spec: &Spec,
-    grid: DrawerGrid,
-    floor_fillet: f64,
-) -> Result<Groups, String> {
+pub fn choose_groups(spec: &Spec, grid: DrawerGrid, floor_fillet: f64) -> Result<Groups, String> {
     let mut plans = Plans::new(spec, grid, floor_fillet);
     let singletons = canonical(
         spec.objects
@@ -622,8 +622,12 @@ pub fn choose_groups(
     let mut budget = search_budget(spec.effort);
 
     while budget > 0 {
-        let Some(winner) = best_neighbour(&merges(&best.partition, &mut plans), &best, &mut plans, &mut budget)
-        else {
+        let Some(winner) = best_neighbour(
+            &merges(&best.partition, &mut plans),
+            &best,
+            &mut plans,
+            &mut budget,
+        ) else {
             break;
         };
         best = winner;
@@ -655,7 +659,13 @@ pub fn choose_groups(
                     .unwrap_or_else(|| panic!("{id} is not one of the run's objects"))
             })
             .collect();
-        chosen.push(plan_group_bin(spec, &objects, grid, floor_fillet, spec.effort)?);
+        chosen.push(plan_group_bin(
+            spec,
+            &objects,
+            grid,
+            floor_fillet,
+            spec.effort,
+        )?);
     }
     assert_eq!(
         chosen.iter().map(GroupPlan::instances).sum::<usize>(),

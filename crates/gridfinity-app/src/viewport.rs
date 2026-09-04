@@ -102,7 +102,13 @@ pub fn callback(
 ) -> egui::PaintCallback {
     egui_wgpu::Callback::new_paint_callback(
         rect,
-        ViewportCallback { gpu, renderer, rect, camera: cam_snapshot, time },
+        ViewportCallback {
+            gpu,
+            renderer,
+            rect,
+            camera: cam_snapshot,
+            time,
+        },
     )
 }
 

@@ -229,7 +229,10 @@ fn tilt_window(width_mm: f64, depth_mm: f64, bed_w: f64, bed_d: f64) -> Vec<(f64
             }
         }
     }
-    runs.sort_by(|x, y| x.partial_cmp(y).expect("an angle is a finite number of radians"));
+    runs.sort_by(|x, y| {
+        x.partial_cmp(y)
+            .expect("an angle is a finite number of radians")
+    });
     assert!(
         runs.len() <= 2,
         "a body's two bed constraints are one arc each, so they leave at most two runs, not {}",
@@ -802,15 +805,13 @@ mod tests {
             .flat_map(|x| (0..8).map(move |y| GridCell { x, y }))
             .collect();
         let bin = compute_auto_split_lines(&c, PRINTER_PROFILES[0], GRID_PITCH);
-        assert!(!bin.is_empty(), "an 8 x 8 grid does not fit a 180 mm bed whole");
-        let plate = compute_staggered_split_lines(
-            &c,
-            PRINTER_PROFILES[0],
-            GRID_PITCH,
-            (0.0, 0.0),
-            &bin,
-        )
-        .expect("an 8 x 8 grid has room to be cut somewhere else");
+        assert!(
+            !bin.is_empty(),
+            "an 8 x 8 grid does not fit a 180 mm bed whole"
+        );
+        let plate =
+            compute_staggered_split_lines(&c, PRINTER_PROFILES[0], GRID_PITCH, (0.0, 0.0), &bin)
+                .expect("an 8 x 8 grid has room to be cut somewhere else");
         assert!(
             !shares_a_line(&plate, &bin),
             "the plate is cut at {plate:?} and the bin at {bin:?}, which part on the same plane"
@@ -836,7 +837,10 @@ mod tests {
         let plate =
             compute_staggered_split_lines(&c, DEFAULT_PRINTER, GRID_PITCH, (0.0, 0.0), &bin)
                 .expect("a two-cell plate prints whole");
-        assert!(plate.is_empty(), "an uncut plate spans every seam of the bin over it");
+        assert!(
+            plate.is_empty(),
+            "an uncut plate spans every seam of the bin over it"
+        );
     }
 
     /// The plate is not its cells: a fitted one stands half the drawer's
@@ -844,7 +848,11 @@ mod tests {
     /// whole cells is how it came to outgrow the bed it was split for.
     #[test]
     fn an_overhanging_plate_is_measured_where_it_reaches_to() {
-        let bed = PrinterProfile { name: "170 square", bed_width: 170, bed_depth: 170 };
+        let bed = PrinterProfile {
+            name: "170 square",
+            bed_width: 170,
+            bed_depth: 170,
+        };
         let c: Vec<GridCell> = (0..4).map(|x| GridCell { x, y: 0 }).collect();
         let bare = compute_staggered_split_lines(&c, bed, GRID_PITCH, (0.0, 0.0), &[])
             .expect("four 42 mm cells are 168 mm, which prints on a 170 mm bed");
@@ -895,12 +903,21 @@ mod tests {
             bed_depth: 178,
         };
         let bin = compute_auto_split_lines(&c, bed, GRID_PITCH);
-        assert_eq!(bin, vec![SplitLine { axis: Axis::X, index: 3 }]);
+        assert_eq!(
+            bin,
+            vec![SplitLine {
+                axis: Axis::X,
+                index: 3
+            }]
+        );
         let plate = compute_staggered_split_lines(&c, bed, GRID_PITCH, (0.0, 0.0), &bin)
             .expect("a six-cell run cut in two has three lines to choose from");
         assert_eq!(
             plate,
-            vec![SplitLine { axis: Axis::X, index: 2 }],
+            vec![SplitLine {
+                axis: Axis::X,
+                index: 2
+            }],
             "the plate parts beside the bin's seam, not on it, and still in two pieces"
         );
     }
@@ -911,7 +928,10 @@ mod tests {
         assert_eq!(cuts.len(), 3);
         let mut prev = 0;
         for &cut in &cuts {
-            assert!(cut - prev <= widest_chunk(10, 4), "chunk {prev}..{cut} is too wide");
+            assert!(
+                cut - prev <= widest_chunk(10, 4),
+                "chunk {prev}..{cut} is too wide"
+            );
             prev = cut;
         }
         assert!(10 - prev <= widest_chunk(10, 4));
@@ -923,7 +943,11 @@ mod tests {
     /// takes is reported as diagonal.
     #[test]
     fn a_fit_names_the_one_placement_the_body_needs() {
-        let bed = PrinterProfile { name: "oblong", bed_width: 250, bed_depth: 150 };
+        let bed = PrinterProfile {
+            name: "oblong",
+            bed_width: 250,
+            bed_depth: 150,
+        };
         let flat = bed.bed_fit_mm(200.0, 100.0);
         assert!(flat.fits && !flat.rotated && flat.tilt_deg.is_none());
         let turned = bed.bed_fit_mm(100.0, 200.0);
@@ -945,9 +969,17 @@ mod tests {
     /// slicer's rotation box wants typed into it.
     #[test]
     fn a_tilted_body_is_told_the_roundest_angle_that_takes_it() {
-        let bed = PrinterProfile { name: "256 square", bed_width: 256, bed_depth: 256 };
+        let bed = PrinterProfile {
+            name: "256 square",
+            bed_width: 256,
+            bed_depth: 256,
+        };
         assert_eq!(bed.bed_fit_mm(80.0, 280.0).tilt_deg, Some(45.0));
-        let oblong = PrinterProfile { name: "oblong", bed_width: 250, bed_depth: 150 };
+        let oblong = PrinterProfile {
+            name: "oblong",
+            bed_width: 250,
+            bed_depth: 150,
+        };
         let awkward = oblong
             .bed_fit_mm(260.0, 30.0)
             .tilt_deg
@@ -973,12 +1005,18 @@ mod tests {
                 let (bw, bd) = (p * t.cos() + q * t.sin(), p * t.sin() + q * t.cos());
                 let on_bed = bw <= a && bd <= b;
                 if inside(t) {
-                    assert!(on_bed, "{w} x {d} mm is said to fit at {t} rad and does not");
+                    assert!(
+                        on_bed,
+                        "{w} x {d} mm is said to fit at {t} rad and does not"
+                    );
                 } else if on_bed {
-                    let edge = runs.iter().any(|&(lo, hi)| {
-                        (t - lo).abs() < 1e-3 || (t - hi).abs() < 1e-3
-                    });
-                    assert!(edge, "{w} x {d} mm fits at {t} rad and the window misses it");
+                    let edge = runs
+                        .iter()
+                        .any(|&(lo, hi)| (t - lo).abs() < 1e-3 || (t - hi).abs() < 1e-3);
+                    assert!(
+                        edge,
+                        "{w} x {d} mm fits at {t} rad and the window misses it"
+                    );
                 }
             }
         }
@@ -989,14 +1027,24 @@ mod tests {
     /// the rule is not "anything shorter than the diagonal".
     #[test]
     fn a_long_thin_body_lies_across_a_bed_a_shorter_wide_one_cannot() {
-        let bed = PrinterProfile { name: "256 square", bed_width: 256, bed_depth: 256 };
+        let bed = PrinterProfile {
+            name: "256 square",
+            bed_width: 256,
+            bed_depth: 256,
+        };
         let strip = bed.bed_fit_mm(320.0, 40.0);
         assert!(
             strip.fits && strip.tilt_deg.is_some(),
             "320 x 40 mm lies across a 256 mm square"
         );
-        assert!(!bed.bed_fit_mm(300.0, 100.0).fits, "300 x 100 mm does not, at any angle");
-        assert!(!bed.bed_fit_mm(370.0, 1.0).fits, "nothing reaches past the bed's own diagonal");
+        assert!(
+            !bed.bed_fit_mm(300.0, 100.0).fits,
+            "300 x 100 mm does not, at any angle"
+        );
+        assert!(
+            !bed.bed_fit_mm(370.0, 1.0).fits,
+            "nothing reaches past the bed's own diagonal"
+        );
     }
 
     /// The property the whole per-axis planning rests on: a body that prints
@@ -1005,7 +1053,11 @@ mod tests {
     /// not bound the chunks in between.
     #[test]
     fn a_body_that_prints_still_prints_when_it_shrinks() {
-        let bed = PrinterProfile { name: "256 square", bed_width: 256, bed_depth: 256 };
+        let bed = PrinterProfile {
+            name: "256 square",
+            bed_width: 256,
+            bed_depth: 256,
+        };
         let mut w = 5.0;
         while w < 400.0 {
             let mut d = 5.0;
@@ -1027,10 +1079,17 @@ mod tests {
     /// diagonal.
     #[test]
     fn a_body_longer_than_the_bed_is_the_same_question_either_way_round() {
-        let bed = PrinterProfile { name: "256 square", bed_width: 256, bed_depth: 256 };
+        let bed = PrinterProfile {
+            name: "256 square",
+            bed_width: 256,
+            bed_depth: 256,
+        };
         let deep = bed.bed_fit_mm(40.0, 320.0);
         let long = bed.bed_fit_mm(320.0, 40.0);
-        assert!(deep.fits && deep.tilt_deg.is_some(), "40 x 320 mm lies across a 256 square");
+        assert!(
+            deep.fits && deep.tilt_deg.is_some(),
+            "40 x 320 mm lies across a 256 square"
+        );
         assert_eq!((deep.fits, deep.tilt_deg), (long.fits, long.tilt_deg));
     }
 
@@ -1039,10 +1098,17 @@ mod tests {
     /// square, but it drops in at an angle whole.
     #[test]
     fn a_bin_that_only_prints_at_an_angle_is_not_cut() {
-        let bed = PrinterProfile { name: "256 square", bed_width: 256, bed_depth: 256 };
+        let bed = PrinterProfile {
+            name: "256 square",
+            bed_width: 256,
+            bed_depth: 256,
+        };
         let c: Vec<GridCell> = (0..7).map(|x| GridCell { x, y: 0 }).collect();
         let fit = check_bed_fit(&c, bed, 40.0);
-        assert!(fit.fits && fit.tilt_deg.is_some(), "280 x 40 mm needs the diagonal");
+        assert!(
+            fit.fits && fit.tilt_deg.is_some(),
+            "280 x 40 mm needs the diagonal"
+        );
         assert!(
             compute_auto_split_lines(&c, bed, 40.0).is_empty(),
             "a bin that prints whole is not cut"
@@ -1062,7 +1128,11 @@ mod tests {
     /// axis-aligned cap asks for.
     #[test]
     fn a_chunk_that_only_prints_at_an_angle_is_not_divided_further() {
-        let bed = PrinterProfile { name: "256 square", bed_width: 256, bed_depth: 256 };
+        let bed = PrinterProfile {
+            name: "256 square",
+            bed_width: 256,
+            bed_depth: 256,
+        };
         let c: Vec<GridCell> = (0..13).map(|x| GridCell { x, y: 0 }).collect();
         let lines = compute_auto_split_lines(&c, bed, 40.0);
         let pieces = partition_cells(&c, &lines);

@@ -5,14 +5,22 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[example]]
+name = "kernel_bench"
+required-features = ["occt"]
+
 [features]
+default = ["occt"]
 # Derives Serialize/Deserialize on the parameter types, shaped to match the
 # TypeScript reference's `BinConfig` JSON. Off by default so the native GUI
 # build stays lean; the wasm crate turns it on.
 serde = ["dep:serde"]
+occt = ["gridfinity-occt/occt"]
 
 [dependencies]
 gridfinity-brep = { path = "../gridfinity-brep" }
+gridfinity-occt = { path = "../gridfinity-occt" }
+gridfinity-sketch = { path = "../gridfinity-sketch" }
 serde = { version = "1", features = ["derive"], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]

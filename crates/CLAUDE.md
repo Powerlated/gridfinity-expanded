@@ -4,6 +4,8 @@ Guidance for Claude Code in this repo. Keep it current with the code. `../CLAUDE
 
 **The kernel is its own crate.** `gridfinity-brep` is the B-rep engine and nothing else -- `glam` is its only dependency and no module in it names a bin, a cell or a drawer. `gridfinity-model` is the Gridfinity model on top of it, `gridfinity-project` the drawer fitter on top of that. A path below that reads `kernel/x.rs` is `crates/gridfinity-brep/src/x.rs`.
 
+**Kernel boundary.** `gridfinity-model` authors features, never topology. Allowed: sketches, datum planes, extrude add/remove/intersect, loft, boolean, fillet, chamfer, split, transform, pattern, shell, whole-shape queries. Forbidden: explicit faces/wires/fins, topology IDs, manual caps, slab stacks, analytic `Program`. Missing feature goes behind the opaque kernel trait. OCCT-inspired API/implementation gets an adjacent credit: OCCT class + path under `vendor/occt`; no copied implementation code.
+
 **Write style — mandatory for all agents editing this file.** Terse, telegraphic, high-density. Fragments over sentences. Drop filler, hedging, connective prose. Keep every technical fact (names, paths, constants, measured numbers, test names); cut only the words around them. Contribute new facts in this same style.
 
 **Doc comments carry the information; bodies carry none** — see `../CLAUDE.md`. Every fn gets a `///` stating its input→output mapping: argument spaces/units/preconditions, returned topology, what holds of the result. File keeps one paragraph at the top for what the doc comments don't own. No inline comments. In this crate an invariant goes to an assertion message before it goes to a doc comment: one stated in an `assert!` is checked, one stated in prose is not. A fn whose mapping won't state, or a file too big for one paragraph, is split.
@@ -442,6 +444,11 @@ Virtual workspace rooted at the **repository root** (`../Cargo.toml`, edition 20
 - **`crates/gridfinity-web`** — builds the browser page.
 
 **There is no facade crate.** `gridfinity-cad`, which held the first three layers as one, is gone; each consumer names the layers it reaches into in its own `Cargo.toml`, so a call from model-level code into the kernel is a dependency someone had to declare. `gridfinity-model` re-exports `Mesh`, `Solid`, `Tessellation`/`tessellate`, `audit`, `to_xt_text` and `Params` at its root, which is what the app and the bindings import for the common cases.
+
+`gridfinity-model::kernel::Kernel` is the static comparison boundary. `Legacy`
+and `Occt` retain their native associated solid types. Run `cargo run --release
+-p gridfinity-model --example kernel_bench -- 3` to measure construction and
+tessellation separately over identical `Params`.
 
 The three, layer by layer:
 

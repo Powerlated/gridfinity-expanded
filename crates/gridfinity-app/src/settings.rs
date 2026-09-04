@@ -13,8 +13,8 @@
 
 use eframe::egui::{self, RichText};
 use gridfinity_model::gridfinity::{self, BinSlope, Mode, SlopeDir};
-use gridfinity_model::printers::{PRINTER_PROFILES, check_bed_fit};
 use gridfinity_model::layout::GridFootprint;
+use gridfinity_model::printers::{PRINTER_PROFILES, check_bed_fit};
 
 use crate::App;
 use crate::theme;
@@ -25,9 +25,11 @@ use crate::widgets;
 pub fn panel(app: &mut App, ui: &mut egui::Ui) -> bool {
     let mut changed = false;
     egui::ScrollArea::vertical().show(ui, |ui| {
-        changed |= widgets::section(ui, "Dimensions", true, |ui| dimensions(app, ui)).unwrap_or(false);
+        changed |=
+            widgets::section(ui, "Dimensions", true, |ui| dimensions(app, ui)).unwrap_or(false);
         changed |= widgets::section(ui, "Features", false, |ui| features(app, ui)).unwrap_or(false);
-        changed |= widgets::section(ui, "Printer fit", false, |ui| printer(app, ui)).unwrap_or(false);
+        changed |=
+            widgets::section(ui, "Printer fit", false, |ui| printer(app, ui)).unwrap_or(false);
         widgets::section(ui, "Display", false, |ui| display(app, ui));
     });
     changed
@@ -39,7 +41,10 @@ fn dimensions(app: &mut App, ui: &mut egui::Ui) -> bool {
     let mut changed = false;
     let p = &mut app.params;
 
-    let millimetres = format!("({:.0} mm)", p.height_units as f64 * gridfinity::HEIGHT_PER_UNIT);
+    let millimetres = format!(
+        "({:.0} mm)",
+        p.height_units as f64 * gridfinity::HEIGHT_PER_UNIT
+    );
     changed |= widgets::slider_field(
         ui,
         "Height",
@@ -78,12 +83,20 @@ fn dimensions(app: &mut App, ui: &mut egui::Ui) -> bool {
     );
 
     ui.add_space(6.0);
-    widgets::label(ui, &format!("Sloped floor · bin {}", app.editor.active_bin + 1));
+    widgets::label(
+        ui,
+        &format!("Sloped floor · bin {}", app.editor.active_bin + 1),
+    );
     if let Some(bin) = p.bins.get_mut(app.editor.active_bin) {
         let mut on = bin.slope.is_some();
-        changed |= ui.checkbox(&mut on, "Enable (disables floor fillet)").changed();
+        changed |= ui
+            .checkbox(&mut on, "Enable (disables floor fillet)")
+            .changed();
         if on {
-            let slope = bin.slope.get_or_insert(BinSlope { angle_deg: 20.0, dir: SlopeDir::MinusX });
+            let slope = bin.slope.get_or_insert(BinSlope {
+                angle_deg: 20.0,
+                dir: SlopeDir::MinusX,
+            });
             changed |= widgets::slider_field(
                 ui,
                 "Angle",
@@ -117,7 +130,9 @@ fn features(app: &mut App, ui: &mut egui::Ui) -> bool {
     let mut changed = false;
     let p = &mut app.params;
     widgets::label(ui, "Base attachment");
-    changed |= ui.checkbox(&mut p.magnet_holes, "Magnet recesses").changed();
+    changed |= ui
+        .checkbox(&mut p.magnet_holes, "Magnet recesses")
+        .changed();
     widgets::hint(ui, "⌀6.5 × 2.4 mm, four per cell.");
     changed |= ui.checkbox(&mut p.screw_holes, "M3 recesses").changed();
     widgets::hint(ui, "M3 × 6 mm, inside the same four base positions.");
@@ -130,7 +145,10 @@ fn features(app: &mut App, ui: &mut egui::Ui) -> bool {
         &[(Mode::Bin, "Bin"), (Mode::Baseplate, "Baseplate")],
         true,
     );
-    widgets::hint(ui, "A baseplate is the grid the bins drop into. It carries no fasteners.");
+    widgets::hint(
+        ui,
+        "A baseplate is the grid the bins drop into. It carries no fasteners.",
+    );
     changed
 }
 
@@ -146,20 +164,27 @@ fn printer(app: &mut App, ui: &mut egui::Ui) -> bool {
             }
         });
     ui.label(
-        RichText::new(format!("{} × {} mm bed", app.printer.bed_width, app.printer.bed_depth))
-            .color(theme::TEXT_DIMMED),
+        RichText::new(format!(
+            "{} × {} mm bed",
+            app.printer.bed_width, app.printer.bed_depth
+        ))
+        .color(theme::TEXT_DIMMED),
     );
 
     let printer = app.printer;
     let pitch = app.params.pitch;
     let active = app.editor.active_bin;
-    let Some(bin) = app.params.bins.get_mut(active) else { return changed };
+    let Some(bin) = app.params.bins.get_mut(active) else {
+        return changed;
+    };
     if bin.cells.is_empty() {
         widgets::hint(ui, "Paint cells in the Shape tab first.");
         return changed;
     }
     let fit = check_bed_fit(&bin.cells, printer, pitch);
-    let (w, d) = GridFootprint::from_cells(&bin.cells).map(|f| f.mm(pitch)).unwrap_or((0.0, 0.0));
+    let (w, d) = GridFootprint::from_cells(&bin.cells)
+        .map(|f| f.mm(pitch))
+        .unwrap_or((0.0, 0.0));
     widgets::status_banner(
         ui,
         fit.fits,
@@ -174,7 +199,10 @@ fn printer(app: &mut App, ui: &mut egui::Ui) -> bool {
                 }
             )
         } else {
-            format!("Bin {} ({w:.0} × {d:.0} mm) exceeds the bed. Cut it.", active + 1)
+            format!(
+                "Bin {} ({w:.0} × {d:.0} mm) exceeds the bed. Cut it.",
+                active + 1
+            )
         },
     );
     if !fit.fits && ui.button("Auto-cut to fit").clicked() {
@@ -193,7 +221,11 @@ fn display(app: &mut App, ui: &mut egui::Ui) {
     widgets::segmented(
         ui,
         &mut app.quality,
-        &[(Quality::Low, "Low"), (Quality::Medium, "Medium"), (Quality::High, "High")],
+        &[
+            (Quality::Low, "Low"),
+            (Quality::Medium, "Medium"),
+            (Quality::High, "High"),
+        ],
         true,
     );
     if app.quality != before {

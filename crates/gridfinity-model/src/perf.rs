@@ -1,4 +1,4 @@
-//! The model's own rows in `gridfinity_brep::perf`'s one table.
+//! The model's own rows in `gridfinity_sketch::perf`'s one table.
 //!
 //! The kernel names its own scopes and knows nothing about a bin, so the five
 //! scopes a bin's plan passes through are claimed as *user slots*: `Scope`
@@ -8,7 +8,7 @@
 //! allocation made inside `plan_piece` to `plan_piece` -- there is one scope
 //! stack, and a second table would not be on it.
 
-use gridfinity_brep::perf;
+use gridfinity_sketch::perf;
 
 /// A scope of the model's own, in the order it claims the kernel's user slots.
 #[derive(Clone, Copy, PartialEq, Eq)]

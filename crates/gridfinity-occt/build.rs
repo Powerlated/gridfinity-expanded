@@ -94,14 +94,14 @@ fn main() {
         return;
     }
 
-    let root = absolute(Path::new(&env::var_os("OCCT_ROOT").expect(
-        "the `occt` feature requires OCCT_ROOT to point at an OCCT install prefix; run cmake --preset occt-native-install first",
-    )));
+    let root_value = env::var_os("OCCT_ROOT")
+        .unwrap_or_else(|| "target/occt-install/native".into());
+    let root = absolute(Path::new(&root_value));
     let emscripten = env::var("TARGET").is_ok_and(|t| t == "wasm32-unknown-emscripten");
     let include = root.join("include").join("opencascade");
     if !include.join("TopoDS_Shape.hxx").is_file() {
         panic!(
-            "OCCT_ROOT has no include/opencascade/TopoDS_Shape.hxx: {}",
+            "OCCT is not installed at {}. Run `cmake --preset occt-native-install` once, or set OCCT_ROOT to another install prefix",
             root.display()
         );
     }

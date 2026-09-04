@@ -1,13 +1,12 @@
 [package]
-name = "gridfinity-brep"
-description = "Minimalistic analytic-surface B-rep CAD kernel: sketches, solids, booleans, blends, tessellation and Parasolid XT transmit"
+name = "gridfinity-sketch"
+description = "Closed-form 2D profiles, loop rounding, region booleans and the shared math, hashing and profiling the layers above are stated in"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 glam = "0.29"
-gridfinity-sketch = { path = "../gridfinity-sketch" }
 
 # The benchmarks and `perf_report` must see the allocator the shipping binary
 # uses, or they measure a bottleneck production does not have. Not a real

@@ -15,9 +15,9 @@
 //! corners of one ring can otherwise claim the same angle.
 
 use super::*;
-use gridfinity_brep::math::{Vec2, wrap_angle_into};
-use gridfinity_brep::sketch::{COINCIDENT, Seg, Sketch, ccw_segs};
 use crate::layout::{GridCell, GridEdge, Orientation, cell_edges};
+use gridfinity_sketch::math::{Vec2, wrap_angle_into};
+use gridfinity_sketch::sketch::{COINCIDENT, Seg, Sketch, ccw_segs};
 use std::collections::HashMap;
 
 pub(super) fn peg_profile(c: GridCell, pitch: f64, w: f64, r: f64) -> Vec<Seg> {

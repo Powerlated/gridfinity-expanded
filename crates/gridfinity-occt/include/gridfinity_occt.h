@@ -39,6 +39,14 @@ GfOcctShape* gf_occt_loft(const double* segments, const size_t* loops,
                           const size_t* loops_per_section, const double* zs,
                           size_t section_count);
 
+/* Removes the material on the side `normal` points to, keeping what lies
+   behind the plane through `origin`. `normal` need not be unit and need not be
+   axis aligned: a tilted plane is the whole point, being the one thing a
+   z-prism cannot express and the reason a sloped bin exists. The plane is
+   unbounded, so a cut of a bounded shape always returns a bounded one. */
+GfOcctShape* gf_occt_cut_half_space(const GfOcctShape* shape, double ox, double oy, double oz,
+                                    double nx, double ny, double nz);
+
 /* op 0 subtracts `b` from `a`, 1 unions them, 2 intersects them. */
 GfOcctShape* gf_occt_boolean(const GfOcctShape* a, const GfOcctShape* b, int op);
 
@@ -53,6 +61,25 @@ GfOcctShape* gf_occt_fillet_edges(const GfOcctShape* shape, const double* edges,
 int gf_occt_volume(const GfOcctShape* shape, double* volume);
 int gf_occt_bounds(const GfOcctShape* shape, double* bounds);
 int gf_occt_shell_count(const GfOcctShape* shape, size_t* shells);
+
+/* The signed volume each of the shape's shells bounds, one double per shell in
+   the order `gf_occt_shell_count` counts them; `volumes` must hold that many.
+   A shell whose faces point out of the material it encloses measures positive
+   and a shell bounding a void sealed inside the material measures negative, so
+   the sign is the answer to "does this shell enclose material" and not an
+   incidental property of the arithmetic. That distinction is what a carve is
+   held to: a detached lump and a sealed void both tessellate like ordinary
+   geometry, and the shell count alone tells them apart from neither. */
+int gf_occt_shell_volumes(const GfOcctShape* shape, double* volumes, size_t count);
+
+/* The edges of `shape` by the midpoint each is named by across this ABI, three
+   doubles each, in explorer order; `count` from `gf_occt_edge_count`. This is
+   what `gf_occt_fillet_edges` matches against, so it is how a caller whose
+   blend was refused finds out what edges the shape actually carries. Unlike the
+   topology API it refuses nothing -- a diagnostic that declines to describe the
+   shape that broke is no diagnostic. */
+int gf_occt_edge_count(const GfOcctShape* shape, size_t* edges);
+int gf_occt_edge_midpoints(const GfOcctShape* shape, double* midpoints, size_t count);
 
 /* Two-call topology API, the same shape as the mesh one: query counts, allocate
    in Rust, then copy. It states a shape's B-rep in the analytic forms Parasolid
@@ -94,7 +121,15 @@ int gf_occt_topology_copy(const GfOcctShape* shape, double* vertices, double* ed
 
 /* Two-call mesh API: query counts, allocate in Rust, then copy. Positions and
    normals contain three doubles per vertex; indices contain three uint32s per
-   triangle. */
+   triangle.
+
+   A normal is the *surface's* own normal at that node, evaluated from the face's
+   analytic geometry and turned to point out of the material, not an average of
+   the triangles meeting there -- a cylinder is smooth because it is a cylinder,
+   and a box's corner is sharp because each of its three faces owns its own
+   nodes. A face whose triangulation carries no uv nodes falls back to the
+   area-weighted average of its own triangles, which is the same answer wherever
+   the face is planar. */
 int gf_occt_mesh_counts(const GfOcctShape* shape, double deflection,
                         size_t* vertex_count, size_t* index_count);
 int gf_occt_mesh_copy(const GfOcctShape* shape, double deflection,

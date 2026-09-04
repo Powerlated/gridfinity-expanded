@@ -25,6 +25,62 @@ missing B-rep operators are the expected answer to a hard case (see
 `crates/CLAUDE.md`'s "no mesh operations" rule, which says the same thing) -- do
 not treat "that would need a kernel change" as a reason to stop.
 
+**The model speaks in Part Studio features, never B-rep topology.** Code in
+`gridfinity-model` may create sketches and planes and apply extrude-add/remove/
+intersect, loft, boolean, fillet, chamfer, split, transform, pattern and shell
+features, followed by whole-shape queries such as validity, bounds, volume and
+tessellation. It may not create faces, wires, fins or topology IDs, assemble caps,
+emit slab stacks, or depend on a kernel-specific construction program. Missing
+feature semantics belong inside each kernel. Backend traits use opaque associated
+shape types so Rust enforces the boundary.
+
+The feature vocabulary follows Open CASCADE's shape/builder separation where that
+makes the kernels easier to compare. Any API or algorithm materially inspired by
+OCCT must credit the relevant OCCT class and vendored source path in an adjacent
+comment. Credit the idea; do not paste implementation code. Keep OCCT license and
+exception notices in `THIRD_PARTY_LICENSES.md` current.
+
+### Feature-kernel migration checkpoint (2026-09-04)
+
+This migration is active and deliberately stops here in a compiling, inspectable
+state; it is **not complete**. Treat the worktree as authoritative and do not
+restore the deleted model-side planner files.
+
+- `gridfinity-model/src/kernel.rs` owns the neutral `FeatureKernel` vocabulary and
+  adapters `AnalyticFeatures` and `OcctFeatures`. `gridfinity::try_build_features`
+  is the one generic bin/baseplate construction path. The analytic benchmark
+  backend now calls it directly.
+- `gridfinity-model/src/gridfinity/native.rs`, `baseplate_native.rs`, and
+  `pieces_native.rs` are feature-generic. Bin feature order is body prism ->
+  cavity/walls/fillet -> foot loft fuses; this keeps operations independent and
+  gives both kernels the same feature history.
+- The former model-side `baseplate.rs`, `legacy.rs`, `pieces.rs`, `plan.rs`,
+  `stack.rs`, and OCCT profile adapter `occt.rs` have been removed. Do not bring
+  their topology/program/slab architecture back into `gridfinity-model`.
+- `gridfinity-brep/src/occt_api.rs` is the opaque analytic `Shape` API.
+  `boolean.rs` contains independently written, adjacently credited OCCT-inspired
+  validation, disjoint assembly, planar cell classification, and horizontal
+  same-domain contact fusion. The default 2x2 bin now builds validly through only
+  neutral features, including its cavity fillet and four lofted feet.
+- Last verified command: `cargo check -p gridfinity-model
+  --no-default-features` passed after the planner disconnection. Immediately
+  before that disconnection, the entire no-default-feature model suite passed
+  (40 unit tests, 4 assertion tests, 1 non-ignored fuzz test, and 6 kernel-on-bin
+  tests), and `cargo test -p gridfinity-brep --lib` passed 127 tests with 1
+  ignored. Re-run broad tests because the public no-OCCT `Solid` alias is now the
+  opaque analytic `Shape` and old topology-oriented integration tests may need
+  conversion to whole-shape assertions.
+- Resume with these concrete remaining items: route non-OCCT printable pieces
+  through `try_build_pieces_features`; convert `subbin.rs` to the generic feature
+  builder in `subbin_native.rs` and remove the topology version; finish analytic
+  Common/cutting cases exercised by piece carving and fastener bores; remove the
+  now-unused compatibility helpers/warnings; add a source gate forbidding model
+  imports of `gridfinity_brep::{topo,geom,program,slab}`; then run both complete
+  backend suites and the shared benchmark. The OCCT suite may first require
+  `cmake --preset occt-native` and
+  `cmake --build --preset occt-native-install` to populate
+  `target/occt-install/native`.
+
 ## Structure
 
 **Every `cargo` command runs from the repository root**, where the virtual
@@ -32,8 +88,8 @@ workspace lives. Nothing but `Cargo.toml`/`Cargo.lock`, the two guides,
 `README.md`, `LICENSE`, `THIRD_PARTY_LICENSES.md`, `.gitignore`, `.cargo/`,
 `.github/`, and the CMake files that build the vendored kernel sits there.
 
-- `crates/gridfinity-brep` -- the legacy analytic B-rep kernel. `glam` is its only
-  dependency and it names no bin, cell or drawer.
+- `crates/gridfinity-brep` -- the legacy analytic B-rep kernel. It shares the
+  kernel-neutral 2D vocabulary in `gridfinity-sketch` and names no bin, cell or drawer.
 - `crates/gridfinity-occt` -- a small, exception-safe C ABI over the vendored
   **Open CASCADE** kernel in `vendor/occt`, behind the `occt` feature.
 - `crates/gridfinity-xt` -- the Parasolid XT transmit writer, its reader and its
@@ -146,13 +202,15 @@ Every command runs from the repository root.
 - `cargo test --release --workspace -- --ignored --nocapture` — the fuzzers,
   benchmarks and perf reports
 
-The OCCT-backed crates need a built OCCT and are behind the `occt` feature:
+The OCCT-backed crates use `target/occt-install/native` by default and honor an
+explicit `OCCT_ROOT` override. Build the local install once with:
 
 ```sh
 cmake --preset occt-native
 cmake --build --preset occt-native-install
-OCCT_ROOT=target/occt-install/native cargo test --release -p gridfinity-occt --features occt
-OCCT_ROOT=target/occt-install/native cargo test --release -p gridfinity-xt --features occt
+cargo test --release -p gridfinity-occt --features occt
+cargo test --release -p gridfinity-model --features occt --lib
+cargo test --release -p gridfinity-xt --features occt
 ```
 
 `cargo run -p gridfinity-web --release` builds the browser page into `dist/`: it
@@ -207,6 +265,38 @@ therefore transmits, which is what every printed piece is. Two things are still
 refused by name: a **lofted or swept surface**, which has no analytic escape, and a
 **seam edge** on a closed surface of revolution, used twice by one loop — which is
 why no OCCT body can currently supply a CONE.
+
+**Complete model bodies migrate to OCCT before the public body type changes.**
+With `gridfinity-model/occt` enabled, `build_subbin_occt` builds an insert as a
+prism or three-section chamfer loft minus its interior prism, and
+`build_baseplate_occt` builds rounded outline islands minus four-section socket
+lofts. Their OCCT tests hold analytic volume or removed material, declared
+bounds, validity, island count and material-facing shell orientation. The legacy
+builders remain only until the bin body and model consumers can change together;
+a mixed-kernel X_T file is not an acceptable intermediate production format.
+`try_build_occt` and `try_build_pieces_occt` are the native model entry points.
+They construct bins from outline prisms, peg loft fusions, fastener booleans,
+cavity booleans and OCCT fillets; stated pockets, free-form walls, openings and
+sloped floors all stay in that path. Piece carving intersects the finished body
+with the exact cell-region prism, including the reentrant-corner and baseplate
+flange reach rules, and checks positive shell volumes plus volume conservation.
+No native entry point silently falls back through `gridfinity-brep`.
+
+**Every user-facing build and export now selects OCCT by default.** The app's
+default feature is `occt`; its main viewport, direct whole/piece STL actions and
+the optimizer's STL and X_T writers consume native shapes. The optimizer's
+`Run` owns those shapes directly: soundness, bed-fit reporting, preview and
+export all inspect the same body, with no legacy accounting build and no
+export-time rebuild. OCCT tessellation owns both analytic preview normals and
+binary STL facets, and the X_T path reads the same native bodies. The remaining
+`gridfinity-brep` implementation is available as `gridfinity_model::kernel::Legacy`;
+`kernel::Occt` implements the same static `Kernel` boundary. Run
+`cargo run --release -p gridfinity-model --example kernel_bench -- 3` to time the
+same parameters through both. Neither is a fallback in a native entry point or a
+user-facing geometry file. The desktop app no
+longer depends directly on `gridfinity-brep`; its former command-stream debugger
+is an OCCT diagnostics panel. From the workspace root, `cargo run --release`
+uses the local OCCT install automatically and opens the editor.
 
 **Onshape imports all five ladder files clean.** Getting there took two rounds against a real reader, both
 invisible to a green suite: the header had to be padded to the 80-character records a Parasolid frustrum

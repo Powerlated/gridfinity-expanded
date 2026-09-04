@@ -39,7 +39,9 @@ pub fn hint(ui: &mut egui::Ui, text: &str) {
 
 /// A value the eye should land on: `<Text c="bright">`.
 pub fn value_text(text: &str) -> RichText {
-    RichText::new(text).size(theme::FONT_SM).color(theme::TEXT_BRIGHT)
+    RichText::new(text)
+        .size(theme::FONT_SM)
+        .color(theme::TEXT_BRIGHT)
 }
 
 /// The standard numeric control -- `SliderField` -- as a labelled row: the
@@ -129,7 +131,11 @@ pub fn section<R>(
 pub fn swatch_button(ui: &mut egui::Ui, selected: bool, color: Color32, text: &str) -> Response {
     const DOT_R: f32 = 4.0;
     let font = egui::TextStyle::Button.resolve(ui.style());
-    let ink = if selected { theme::TEXT_BRIGHT } else { theme::TEXT };
+    let ink = if selected {
+        theme::TEXT_BRIGHT
+    } else {
+        theme::TEXT
+    };
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, ink);
     let padding = ui.spacing().button_padding;
     let lead = 3.0 * DOT_R + padding.x;
@@ -143,7 +149,11 @@ pub fn swatch_button(ui: &mut egui::Ui, selected: bool, color: Color32, text: &s
     painter.rect(
         rect,
         visuals.corner_radius,
-        if selected { color.gamma_multiply(0.30) } else { theme::SURFACE },
+        if selected {
+            color.gamma_multiply(0.30)
+        } else {
+            theme::SURFACE
+        },
         Stroke::new(1.0, if selected { color } else { theme::BORDER }),
         egui::StrokeKind::Inside,
     );
@@ -186,8 +196,15 @@ pub fn segmented<T: PartialEq + Copy>(
             } else {
                 theme::TEXT
             }))
-            .fill(if selected { theme::BLUE } else { theme::SURFACE })
-            .stroke(Stroke::new(1.0, if selected { theme::BLUE } else { theme::BORDER }));
+            .fill(if selected {
+                theme::BLUE
+            } else {
+                theme::SURFACE
+            })
+            .stroke(Stroke::new(
+                1.0,
+                if selected { theme::BLUE } else { theme::BORDER },
+            ));
             if full_width {
                 button = button.min_size(egui::vec2(each, 0.0));
             }
@@ -205,7 +222,10 @@ pub fn segmented<T: PartialEq + Copy>(
 /// painter does not: an opening and a candidate cut are both dashed there, and
 /// solid they would read as a wall.
 pub fn dashed_line(painter: &egui::Painter, points: [Pos2; 2], stroke: Stroke, on: f32, off: f32) {
-    assert!(on > 0.0 && off > 0.0, "a dash pattern advances, but {on} on / {off} off does not");
+    assert!(
+        on > 0.0 && off > 0.0,
+        "a dash pattern advances, but {on} on / {off} off does not"
+    );
     let [a, b] = points;
     let span = b - a;
     let length = span.length();

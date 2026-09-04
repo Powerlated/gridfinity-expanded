@@ -27,6 +27,10 @@
 #include <BRepGProp.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeHalfSpace.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <GeomLProp_SLProps.hxx>
+#include <TopoDS_Shell.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <gp_Ax2.hxx>
@@ -356,10 +360,19 @@ Mesh mesh_of(const TopoDS_Shape& shape, double deflection) {
     if (tri.IsNull()) continue;
     const uint32_t base = static_cast<uint32_t>(out.p.size() / 3);
     const gp_Trsf transform = loc.Transformation();
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    const bool analytic = !surface.IsNull() && tri->HasUVNodes();
+    const double flip = face.Orientation() == TopAbs_REVERSED ? -1.0 : 1.0;
     for (int node = 1; node <= tri->NbNodes(); ++node) {
       gp_Pnt p = tri->Node(node).Transformed(transform);
       out.p.insert(out.p.end(), {p.X(), p.Y(), p.Z()});
-      out.n.insert(out.n.end(), {0.0, 0.0, 0.0});
+      gp_Vec normal(0.0, 0.0, 0.0);
+      if (analytic) {
+        const gp_Pnt2d uv = tri->UVNode(node);
+        GeomLProp_SLProps props(surface, uv.X(), uv.Y(), 1, Precision::Confusion());
+        if (props.IsNormalDefined()) normal = gp_Vec(props.Normal()).Transformed(transform) * flip;
+      }
+      out.n.insert(out.n.end(), {normal.X(), normal.Y(), normal.Z()});
     }
     for (int t = 1; t <= tri->NbTriangles(); ++t) {
       int a, b, c; tri->Triangle(t).Get(a, b, c);
@@ -374,7 +387,8 @@ Mesh mesh_of(const TopoDS_Shape& shape, double deflection) {
       double nx=uy*vz-uz*vy, ny=uz*vx-ux*vz, nz=ux*vy-uy*vx;
       double len=std::sqrt(nx*nx+ny*ny+nz*nz);
       if (len > 0) { nx/=len; ny/=len; nz/=len; }
-      for (uint32_t v : {ia, ib, ic}) { out.n[3*v]+=nx; out.n[3*v+1]+=ny; out.n[3*v+2]+=nz; }
+      if (!analytic)
+        for (uint32_t v : {ia, ib, ic}) { out.n[3*v]+=nx; out.n[3*v+1]+=ny; out.n[3*v+2]+=nz; }
     }
   }
   for (size_t v=0; v<out.n.size()/3; ++v) {
@@ -450,6 +464,26 @@ extern "C" GfOcctShape* gf_occt_loft(const double* segments, const size_t* loops
       solid = cut.Shape();
     }
     return new GfOcctShape{solid};
+  });
+}
+
+extern "C" GfOcctShape* gf_occt_cut_half_space(const GfOcctShape* shape, double ox, double oy,
+                                              double oz, double nx, double ny, double nz) {
+  return guarded([&]() -> GfOcctShape* {
+    if (!shape) throw std::invalid_argument("a half-space cut needs a shape");
+    const gp_Vec n(nx, ny, nz);
+    if (n.Magnitude() <= Precision::Confusion())
+      throw std::invalid_argument("a half-space cut needs a non-zero normal");
+    const gp_Pnt origin(ox, oy, oz);
+    const gp_Dir direction(n);
+    const TopoDS_Face plane = BRepBuilderAPI_MakeFace(gp_Pln(origin, direction)).Face();
+    /* The half-space contains its reference point, so a point one unit along
+       the normal names the material to remove and the cut keeps the rest. */
+    const gp_Pnt discarded = origin.Translated(gp_Vec(direction));
+    const TopoDS_Shape half = BRepPrimAPI_MakeHalfSpace(plane, discarded).Solid();
+    BRepAlgoAPI_Cut cut(shape->value, half);
+    if (!cut.IsDone()) throw std::runtime_error("OCCT could not cut against a plane");
+    return new GfOcctShape{cut.Shape()};
   });
 }
 
@@ -532,6 +566,52 @@ extern "C" int gf_occt_shell_count(const GfOcctShape* shape, size_t* shells) {
     size_t found = 0;
     for (TopExp_Explorer ex(shape->value, TopAbs_SHELL); ex.More(); ex.Next()) ++found;
     *shells = found;
+    return 1;
+  });
+}
+
+extern "C" int gf_occt_shell_volumes(const GfOcctShape* shape, double* volumes, size_t count) {
+  return guarded([&]() {
+    if (!shape || !volumes) throw std::invalid_argument("invalid shell volume arguments");
+    size_t found = 0;
+    for (TopExp_Explorer ex(shape->value, TopAbs_SHELL); ex.More(); ex.Next()) {
+      if (found == count) throw std::invalid_argument("the shape has more shells than the buffer");
+      /* A shell carries its own orientation, and a solid made of it alone
+         integrates that orientation: a shell bounding material measures its
+         volume, a shell bounding a void measures the negative of the void's. */
+      const TopoDS_Solid solid = BRepBuilderAPI_MakeSolid(TopoDS::Shell(ex.Current())).Solid();
+      GProp_GProps props;
+      BRepGProp::VolumeProperties(solid, props);
+      volumes[found++] = props.Mass();
+    }
+    if (found != count) throw std::invalid_argument("the shape has fewer shells than the buffer");
+    return 1;
+  });
+}
+
+extern "C" int gf_occt_edge_count(const GfOcctShape* shape, size_t* edges) {
+  return guarded([&]() {
+    if (!shape || !edges) throw std::invalid_argument("invalid edge count arguments");
+    TopTools_IndexedMapOfShape map;
+    TopExp::MapShapes(shape->value, TopAbs_EDGE, map);
+    *edges = static_cast<size_t>(map.Extent());
+    return 1;
+  });
+}
+
+extern "C" int gf_occt_edge_midpoints(const GfOcctShape* shape, double* midpoints, size_t count) {
+  return guarded([&]() {
+    if (!shape || !midpoints) throw std::invalid_argument("invalid edge midpoint arguments");
+    TopTools_IndexedMapOfShape map;
+    TopExp::MapShapes(shape->value, TopAbs_EDGE, map);
+    if (static_cast<size_t>(map.Extent()) != count)
+      throw std::invalid_argument("the shape's edge count changed between the two calls");
+    for (size_t e = 0; e < count; ++e) {
+      const gp_Pnt mid = edge_midpoint(TopoDS::Edge(map(static_cast<int>(e) + 1)));
+      midpoints[3 * e] = mid.X();
+      midpoints[3 * e + 1] = mid.Y();
+      midpoints[3 * e + 2] = mid.Z();
+    }
     return 1;
   });
 }

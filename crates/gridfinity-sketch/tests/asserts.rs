@@ -38,12 +38,8 @@ const BIG_FN_STATEMENTS: usize = 20;
 /// **under** one without the budget being lowered, so the table cannot quietly
 /// drift away from the code it describes.
 const BUDGET: &[(&str, usize)] = &[
-    ("gridfinity/baseplate_native.rs", 0),
-    ("gridfinity/outline.rs", 2),
-    ("gridfinity/peg.rs", 2),
-    ("gridfinity/pieces_native.rs", 0),
-    ("gridfinity/wall.rs", 1),
-    ("layout.rs", 1),
+    ("rectregion.rs", 2),
+    ("region2d.rs", 3),
 ];
 
 // ---------------------------------------------------------------------------

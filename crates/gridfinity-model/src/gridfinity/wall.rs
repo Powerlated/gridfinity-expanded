@@ -12,9 +12,9 @@
 //! with a `top`.
 
 use super::*;
-use gridfinity_brep::math::Vec2;
-use gridfinity_brep::round::short_arc;
-use gridfinity_brep::sketch::{Seg, loop_area, point_in_segs, reverse_loop};
+use gridfinity_sketch::math::Vec2;
+use gridfinity_sketch::round::short_arc;
+use gridfinity_sketch::sketch::{Seg, loop_area, point_in_segs, reverse_loop};
 
 #[derive(Clone, Debug)]
 pub(super) struct Island {

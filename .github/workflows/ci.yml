@@ -31,16 +31,25 @@ jobs:
           version: 6.0.5
           actions-cache-folder: emsdk-cache
 
-      - name: Build the workspace
-        run: cargo build --release --workspace
-
-      - name: Run the suite
-        run: cargo test --release --workspace
-
       - name: Build OCCT for the host
         run: |
           cmake --preset occt-native
           cmake --build --preset occt-native-install
+
+      - name: Build the workspace
+        env:
+          OCCT_ROOT: target/occt-install/native
+        run: cargo build --release --workspace
+
+      - name: Run the suite
+        env:
+          OCCT_ROOT: target/occt-install/native
+        run: cargo test --release --workspace
+
+      - name: Run the restored analytic kernel suite
+        run: |
+          cargo test --release -p gridfinity-brep --lib
+          cargo test --release -p gridfinity-model --no-default-features
 
       - name: Run the OCCT-backed suites
         env:

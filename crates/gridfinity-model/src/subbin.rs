@@ -326,25 +326,22 @@ pub fn build_subbin(spec: &SubbinSpec) -> Result<Solid, String> {
         let chamfered = outer_profile(spec, spec.chamfer);
         let bottom = ring(&mut b, &chamfered, spec.z);
         wall_between(
-            &mut b,
-            &chamfered,
-            &outer,
-            &bottom,
-            &outer_lo,
-            spec.z,
-            base_z,
-            true,
+            &mut b, &chamfered, &outer, &bottom, &outer_lo, spec.z, base_z, true,
         );
         cap(&mut b, spec.z, false, &bottom, &[]);
     } else {
         cap(&mut b, spec.z, false, &outer_lo, &[]);
     }
     let outer_hi = ring(&mut b, &outer, top);
-    wall_between(&mut b, &outer, &outer, &outer_lo, &outer_hi, base_z, top, true);
+    wall_between(
+        &mut b, &outer, &outer, &outer_lo, &outer_hi, base_z, top, true,
+    );
 
     let inner_lo = ring(&mut b, &inner, floor_z);
     let inner_hi = ring(&mut b, &inner, top);
-    wall_between(&mut b, &inner, &inner, &inner_lo, &inner_hi, floor_z, top, false);
+    wall_between(
+        &mut b, &inner, &inner, &inner_lo, &inner_hi, floor_z, top, false,
+    );
     b.face(
         Surface::plane(vec3_of(0.0, 0.0, floor_z), -Vec3::Z),
         false,
@@ -375,7 +372,10 @@ fn assert_subbin_is_sound(solid: &Solid, spec: &SubbinSpec) {
         panic!("a built insert is not a closed manifold: {e}");
     }
     let audited = crate::audit(solid);
-    assert!(audited.is_ok(), "a built insert is not geometrically sound:\n{audited}");
+    assert!(
+        audited.is_ok(),
+        "a built insert is not geometrically sound:\n{audited}"
+    );
     assert!(
         solid.orphan_vertices().is_empty() && solid.orphan_edges().is_empty(),
         "a built insert carries {} vertex(es) and {} edge(s) nothing names",
@@ -455,7 +455,11 @@ mod tests {
                  {blend} mm, so the insert would meet it"
             );
         }
-        assert_eq!(blend_inset(fr, fr), 0.0, "the blend is spent at its own radius");
+        assert_eq!(
+            blend_inset(fr, fr),
+            0.0,
+            "the blend is spent at its own radius"
+        );
         assert!(
             (blend_inset(fr, 0.0) - fr).abs() < 1e-12,
             "the blend takes its whole radius of floor at the wall"

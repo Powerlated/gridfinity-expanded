@@ -9,33 +9,30 @@
 //! solid as a Parasolid transmit file with no tessellation at all.
 //!
 //! The kernel knows nothing about what is built on it: no module here names a
-//! bin, a cell or a drawer, and `Cargo.toml` says so -- `glam` is the only
-//! dependency.
+//! bin, a cell or a drawer. Its two-dimensional vocabulary is shared with the
+//! OCCT backend through `gridfinity-sketch`.
 
 pub mod audit;
+pub mod boolean;
 pub mod build;
 pub mod chamfer;
 pub mod curvedge;
 pub mod fillet;
 pub mod geom;
-pub mod hash;
 pub mod isect;
-pub mod math;
 pub mod mesh;
-pub mod nesting;
 pub mod orient;
-pub mod perf;
+pub mod occt_api;
 pub mod planar;
 pub mod program;
-pub mod rectregion;
-pub mod region2d;
-pub mod round;
-pub mod sketch;
 pub mod slab;
 pub mod split;
 pub mod tess;
 pub mod topo;
 pub mod xt;
+
+pub use gridfinity_sketch::{hash, math, nesting, perf, rectregion, region2d, round, sketch};
+pub use occt_api::Shape;
 
 #[cfg(test)]
 #[global_allocator]

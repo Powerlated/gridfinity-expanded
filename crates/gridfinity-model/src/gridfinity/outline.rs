@@ -13,11 +13,11 @@
 //! inside it is `cavity`'s, and the two meet only through `outline_region`.
 
 use super::*;
-use gridfinity_brep::math::{Vec2, wrap_angle_into};
-use gridfinity_brep::region2d::point_seg_distance;
-use gridfinity_brep::round::{short_arc, v2_eq};
-use gridfinity_brep::sketch::{COINCIDENT, Seg};
 use crate::layout::{GridCell, GridEdge, Orientation};
+use gridfinity_sketch::math::{Vec2, wrap_angle_into};
+use gridfinity_sketch::region2d::point_seg_distance;
+use gridfinity_sketch::round::{short_arc, v2_eq};
+use gridfinity_sketch::sketch::{COINCIDENT, Seg};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug)]
@@ -353,12 +353,12 @@ impl OuterLoops {
         for i in 0..pieces.len() {
             let pc = pieces[i];
             if v2_eq(pc.seg.start(), p) || v2_eq(pc.seg.end(), p) {
-                if gridfinity_brep::region2d::point_seg_distance(p, &pc.seg) < COINCIDENT {
+                if gridfinity_sketch::region2d::point_seg_distance(p, &pc.seg) < COINCIDENT {
                     return;
                 }
                 continue;
             }
-            if gridfinity_brep::region2d::point_seg_distance(p, &pc.seg) > COINCIDENT {
+            if gridfinity_sketch::region2d::point_seg_distance(p, &pc.seg) > COINCIDENT {
                 continue;
             }
             let (lo, hi) = match pc.seg {

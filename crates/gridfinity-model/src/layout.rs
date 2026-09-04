@@ -1,4 +1,4 @@
-use gridfinity_brep::hash::{FxHashMap, FxHashSet};
+use gridfinity_sketch::hash::{FxHashMap, FxHashSet};
 
 pub const PITCH: i32 = 42;
 
@@ -75,7 +75,10 @@ impl GridFootprint {
 
     /// The footprint in millimetres, on a grid of `pitch`.
     pub fn mm(&self, pitch: f64) -> (f64, f64) {
-        (self.width_cells as f64 * pitch, self.depth_cells as f64 * pitch)
+        (
+            self.width_cells as f64 * pitch,
+            self.depth_cells as f64 * pitch,
+        )
     }
 }
 

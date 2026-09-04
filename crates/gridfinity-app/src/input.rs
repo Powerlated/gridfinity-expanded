@@ -77,9 +77,9 @@ impl<'de> serde::Deserialize<'de> for Length {
         }
         match Stated::deserialize(deserializer)? {
             Stated::Millimetres(mm) => Ok(Length(mm)),
-            Stated::Measured(text) => {
-                text_to_mm(&text).map(Length).map_err(serde::de::Error::custom)
-            }
+            Stated::Measured(text) => text_to_mm(&text)
+                .map(Length)
+                .map_err(serde::de::Error::custom),
         }
     }
 }
@@ -338,7 +338,9 @@ fn positive(value: f64, what: &str, whose: &str) -> Result<f64, String> {
     if value > 0.0 {
         return Ok(value);
     }
-    Err(format!("{whose}: {what} must be greater than zero, but is {value}"))
+    Err(format!(
+        "{whose}: {what} must be greater than zero, but is {value}"
+    ))
 }
 
 /// The `size` array as one box plus the height it declares, accepting `[width,
@@ -505,7 +507,9 @@ fn subbin_footprint(
     let own = parts_bounds(parts);
     let mut extent = [0.0; 2];
     let mut limits = [None; 2];
-    for (index, (axis, own)) in [("width", own.width), ("depth", own.depth)].into_iter().enumerate()
+    for (index, (axis, own)) in [("width", own.width), ("depth", own.depth)]
+        .into_iter()
+        .enumerate()
     {
         let pinned = subbin.interior[index];
         if let Some(interior) = pinned
@@ -547,7 +551,9 @@ fn subbin_footprint(
 /// The `boxes` list as a part list plus the tallest height any of them declares.
 fn boxes_to_parts(boxes: &[BoxSpec], whose: &str) -> Result<(Vec<Rect>, Option<f64>), String> {
     if boxes.is_empty() {
-        return Err(format!("{whose}: boxes is empty, so the object has no footprint"));
+        return Err(format!(
+            "{whose}: boxes is empty, so the object has no footprint"
+        ));
     }
     let mut parts = Vec::with_capacity(boxes.len());
     let mut height: Option<f64> = None;
@@ -619,7 +625,9 @@ pub fn parse(text: &str) -> Result<Spec, String> {
     )?;
     let clearance = settings.clearance.map_or(0.5, Length::mm);
     if clearance < 0.0 {
-        return Err(format!("settings.clearance is {clearance}, which is less than none"));
+        return Err(format!(
+            "settings.clearance is {clearance}, which is less than none"
+        ));
     }
     let fillet_radius = settings.fillet_radius.map_or(2.5, Length::mm);
     if fillet_radius < 0.0 {
@@ -648,7 +656,9 @@ pub fn parse(text: &str) -> Result<Spec, String> {
     }
 
     let subbin_wall_thickness = positive(
-        settings.subbin_wall_thickness.map_or(wall_thickness, Length::mm),
+        settings
+            .subbin_wall_thickness
+            .map_or(wall_thickness, Length::mm),
         "settings.subbin_wall_thickness",
         "settings",
     )?;
@@ -674,12 +684,16 @@ pub fn parse(text: &str) -> Result<Spec, String> {
         }
         let (parts, height) = match (&spec.size, &spec.boxes) {
             (Some(_), Some(_)) => {
-                return Err(format!("{whose}: states both size and boxes; state one or the other"));
+                return Err(format!(
+                    "{whose}: states both size and boxes; state one or the other"
+                ));
             }
             (Some(size), None) => size_to_parts(size, &whose)?,
             (None, Some(boxes)) => boxes_to_parts(boxes, &whose)?,
             (None, None) => {
-                return Err(format!("{whose}: has neither size nor boxes, so it has no footprint"));
+                return Err(format!(
+                    "{whose}: has neither size nor boxes, so it has no footprint"
+                ));
             }
         };
         if !parts_connected(&parts) {
@@ -697,7 +711,10 @@ pub fn parse(text: &str) -> Result<Spec, String> {
                 clearance + floor_fillet - subbin_clearance,
                 &whose,
             )?,
-            None => (parts.clone(), max_size_of(spec.max_size.as_deref(), &parts, &whose)?),
+            None => (
+                parts.clone(),
+                max_size_of(spec.max_size.as_deref(), &parts, &whose)?,
+            ),
         };
         objects.push(Object {
             pack: PackObject {
@@ -799,8 +816,7 @@ subbin = [\"4.5cm\", \"\", \"3cm\"]
         let packed = parts_bounds(&object.pack.parts);
         let want = |interior: f64| interior + 2.0 * wall - 2.0 * deflate;
         assert!(
-            (packed.width - want(45.0)).abs() < 1e-9
-                && (packed.depth - want(124.0)).abs() < 1e-9,
+            (packed.width - want(45.0)).abs() < 1e-9 && (packed.depth - want(124.0)).abs() < 1e-9,
             "the insert's outer box less what it gives back is {} x {}, but {} x {} was \
              packed",
             want(45.0),
@@ -820,12 +836,14 @@ subbin = [\"4.5cm\", \"\", \"3cm\"]
     #[test]
     fn a_subbin_that_states_no_insert_is_refused() {
         let bad = |object: &str| {
-            parse(&format!("[drawer]
+            parse(&format!(
+                "[drawer]
 width = 400
 depth = 300
 
-{object}"))
-                .expect_err("the fixture is meant to be refused")
+{object}"
+            ))
+            .expect_err("the fixture is meant to be refused")
         };
         let err = bad("[[objects]]
 name = \"a\"
@@ -834,14 +852,12 @@ subbin = [40, \"\", 10]
 ");
         assert!(err.contains("subbin width"), "{err}");
 
-        let err = bad(
-            "[[objects]]
+        let err = bad("[[objects]]
 name = \"a\"
 size = [50, 20]
 max_size = [60, \"\"]
              subbin = [55, \"\", 10]
-",
-        );
+");
         assert!(err.contains("stated twice"), "{err}");
 
         let err = bad(
@@ -915,7 +931,10 @@ max_size = [40, \"\"]
 ",
         )
         .expect_err("40 mm does not hold a 50 mm object");
-        assert!(err.contains("max_size width"), "the error names the axis: {err}");
+        assert!(
+            err.contains("max_size width"),
+            "the error names the axis: {err}"
+        );
 
         let short = parse(
             "[drawer]
@@ -938,7 +957,10 @@ max_size = [60]
         assert_eq!(spec.effort, PackEffort::Standard);
         assert_eq!(spec.height_units, 3);
         assert_eq!(spec.printer.name, DEFAULT_PRINTER.name);
-        assert!(spec.baseplate, "a drawer bin gets the grid it sits in unless asked not to");
+        assert!(
+            spec.baseplate,
+            "a drawer bin gets the grid it sits in unless asked not to"
+        );
         assert_eq!(spec.subbin_wall_thickness, spec.wall_thickness);
         assert_eq!(
             spec.subbin_clearance, HALF_TOL,
@@ -965,11 +987,13 @@ max_size = [60]
 
     #[test]
     fn takes_the_baseplate_away_when_the_file_says_so() {
-        let spec = parse(&format!("{MINIMAL}
+        let spec = parse(&format!(
+            "{MINIMAL}
 [settings]
 baseplate = false
-"))
-            .expect("baseplate is a setting");
+"
+        ))
+        .expect("baseplate is a setting");
         assert!(!spec.baseplate);
     }
 
@@ -980,16 +1004,20 @@ baseplate = false
     fn takes_the_widest_strip_worth_absorbing_from_the_pitch() {
         let spec = parse(MINIMAL).expect("the minimal file is a valid run");
         assert!((spec.tidy_absorb - spec.pitch / 2.0).abs() < 1e-9);
-        let stated = parse(&format!("{MINIMAL}
+        let stated = parse(&format!(
+            "{MINIMAL}
 [settings]
 tidy_absorb = \"4 mm\"
-"))
+"
+        ))
         .expect("tidy_absorb is a setting");
         assert!((stated.tidy_absorb - 4.0).abs() < 1e-9);
-        let refused = parse(&format!("{MINIMAL}
+        let refused = parse(&format!(
+            "{MINIMAL}
 [settings]
 tidy_absorb = -1
-"))
+"
+        ))
         .expect_err("a strip of negative width is not a strip");
         assert!(refused.contains("tidy_absorb"), "{refused}");
     }
@@ -1070,8 +1098,16 @@ tidy_absorb = -1
              [settings]\nclearance = \"1 mm\"\nbed = { width = \"25 cm\", depth = 210 }\n",
         )
         .expect("every measurement takes a unit");
-        assert!((spec.drawer_width - 292.1).abs() < 1e-9, "{}", spec.drawer_width);
-        assert!((spec.drawer_depth - 523.24).abs() < 1e-9, "{}", spec.drawer_depth);
+        assert!(
+            (spec.drawer_width - 292.1).abs() < 1e-9,
+            "{}",
+            spec.drawer_width
+        );
+        assert!(
+            (spec.drawer_depth - 523.24).abs() < 1e-9,
+            "{}",
+            spec.drawer_depth
+        );
         assert_eq!(spec.clearance, 1.0);
         assert_eq!(spec.printer.bed_width, 250);
         assert_eq!(spec.printer.bed_depth, 210);
@@ -1079,45 +1115,58 @@ tidy_absorb = -1
 
     #[test]
     fn takes_the_grid_size_the_file_states_and_the_standard_otherwise() {
-        assert_eq!(parse(MINIMAL).expect("a drawer alone is a valid run").pitch, GRID_PITCH);
-        let spec = parse(&format!("{MINIMAL}
+        assert_eq!(
+            parse(MINIMAL).expect("a drawer alone is a valid run").pitch,
+            GRID_PITCH
+        );
+        let spec = parse(&format!(
+            "{MINIMAL}
 [settings]
 grid_size = \"21 mm\"
-"))
-            .expect("a grid size is a setting, and it is a measurement");
+"
+        ))
+        .expect("a grid size is a setting, and it is a measurement");
         assert_eq!(spec.pitch, 21.0);
     }
 
     #[test]
     fn rejects_a_grid_size_no_cell_can_be_built_at() {
-        let err = parse(&format!("{MINIMAL}
+        let err = parse(&format!(
+            "{MINIMAL}
 [settings]
 grid_size = 4
-"))
-            .expect_err("a 4 mm cell has no peg profile");
+"
+        ))
+        .expect_err("a 4 mm cell has no peg profile");
         assert!(err.contains("grid_size"), "{err}");
     }
 
     #[test]
     fn rejects_fasteners_a_cell_that_small_cannot_hold() {
-        let text = format!("{MINIMAL}
+        let text = format!(
+            "{MINIMAL}
 [settings]
 grid_size = 21
 magnets = true
-");
+"
+        );
         let err = parse(&text).expect_err("a 21 mm cell cannot hold four magnet bores");
         assert!(err.contains("magnets or screws"), "{err}");
-        parse(&format!("{MINIMAL}
+        parse(&format!(
+            "{MINIMAL}
 [settings]
 grid_size = 21
-"))
-            .expect("the same cell without fasteners is fine");
+"
+        ))
+        .expect("the same cell without fasteners is fine");
     }
 
     #[test]
     fn rejects_a_measurement_in_a_unit_it_does_not_know() {
-        let err = parse(&format!("{MINIMAL}\n[[objects]]\nname = \"x\"\nsize = [\"3 furlongs\", 10]\n"))
-            .expect_err("a furlong is not a unit");
+        let err = parse(&format!(
+            "{MINIMAL}\n[[objects]]\nname = \"x\"\nsize = [\"3 furlongs\", 10]\n"
+        ))
+        .expect_err("a furlong is not a unit");
         assert!(err.contains("furlong"), "{err}");
     }
 }

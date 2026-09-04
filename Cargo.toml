@@ -8,6 +8,7 @@ members = [
     "crates/gridfinity-model",
     "crates/gridfinity-project",
     "crates/gridfinity-render",
+    "crates/gridfinity-sketch",
     "crates/gridfinity-web",
     "crates/gridfinity-xt",
 ]

@@ -22,12 +22,12 @@
 //! leaves the bin solid everywhere a pocket is not.
 
 use super::*;
-use gridfinity_brep::math::Vec2;
-use gridfinity_brep::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
-use gridfinity_brep::region2d::region_difference;
-use gridfinity_brep::round::{corners_of, loop_of_points};
-use gridfinity_brep::sketch::{COINCIDENT, Seg, loop_area, reverse_loop};
 use crate::layout::{EffectiveWalls, GridCell, GridEdge, Orientation};
+use gridfinity_sketch::math::Vec2;
+use gridfinity_sketch::rectregion::{LoopStyle, RectF, TracedLoop, shape_loop, trace_rects};
+use gridfinity_sketch::region2d::region_difference;
+use gridfinity_sketch::round::{corners_of, loop_of_points};
+use gridfinity_sketch::sketch::{COINCIDENT, Seg, loop_area, reverse_loop};
 use std::collections::HashSet;
 
 /// How far one compartment's cavity stands in from a boundary edge's pitch line.

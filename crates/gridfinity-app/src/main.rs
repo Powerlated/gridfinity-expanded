@@ -34,25 +34,23 @@ use eframe::egui;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[global_allocator]
-static ALLOC: gridfinity_brep::perf::CountingAlloc<mimalloc::MiMalloc> =
-    gridfinity_brep::perf::CountingAlloc::new(mimalloc::MiMalloc);
+static ALLOC: gridfinity_sketch::perf::CountingAlloc<mimalloc::MiMalloc> =
+    gridfinity_sketch::perf::CountingAlloc::new(mimalloc::MiMalloc);
 use debugger::Debugger;
 use editor::Editor;
 use explode::Explosion;
 use glam::Vec3;
-use gridfinity_brep::build::extrude;
-use gridfinity_brep::math::Vec3 as KernelVec3;
-use gridfinity_brep::sketch::Sketch;
-use gridfinity_brep::topo::Solid;
 use gridfinity_model::gridfinity::{self, LogicalBin, Mode, Params};
 use gridfinity_model::layout::{GridCell, SplitLine, partition_cells};
 use gridfinity_model::printers::{DEFAULT_PRINTER, PrinterProfile};
+#[cfg(not(feature = "occt"))]
 use gridfinity_model::subbin::build_subbin;
-use gridfinity_model::{tessellate, tessellate_shell};
+use gridfinity_sketch::math::Vec3 as KernelVec3;
 use std::sync::{Arc, Mutex};
 use viewport::{Camera, CameraExt, Gpu, Quality, Renderer};
 
 const PREVIEW_RES: usize = 5;
+#[cfg(not(feature = "occt"))]
 const EXPORT_RES: usize = 48;
 
 pub const MESH_STRIDE: usize = gridfinity_render::VERTEX_STRIDE;
@@ -86,20 +84,22 @@ struct BinError {
     msg: String,
 }
 
-fn shaded(tess: &gridfinity_model::Tessellation, rgb: u32, bad: bool) -> Vec<f32> {
+
+
+#[cfg(feature = "occt")]
+fn shaded_occt(shape: &gridfinity_occt::Shape, rgb: u32, bad: bool) -> Result<Vec<f32>, String> {
+    let mesh = shape
+        .tessellate(0.16)
+        .map_err(|e| format!("OCCT could not tessellate the preview: {e}"))?;
     let mut out = Vec::new();
     gridfinity_render::append_smooth_shaded(
         &mut out,
-        &tess.render_buffer(),
+        &mesh.render_buffer(),
         Vec3::ZERO,
         gridfinity_render::color_of(rgb),
         bad,
     );
-    out
-}
-
-fn flagged(tess: &gridfinity_model::Tessellation, bad: bool) -> Vec<f32> {
-    shaded(tess, DEBUG_BASE_COLOR, bad)
+    Ok(out)
 }
 
 fn vert_bounds(verts: &[f32]) -> (Vec3, Vec3) {
@@ -150,25 +150,6 @@ fn explode(explosion: Explosion, gaps: bool) -> Explosion {
 /// carved out of the one solid -- so what the window shows apart is what the
 /// files hold separately, and a carve the kernel refuses here is the error it
 /// would be there.
-fn bin_vertices(
-    bin: &LogicalBin,
-    pitch: f64,
-    solid: &Solid,
-    gaps: bool,
-) -> Result<Vec<f32>, String> {
-    let explosion = explode(Explosion::of(bin, pitch), gaps);
-    if !explosion.is_split() {
-        return Ok(flagged(&tessellate(solid, PREVIEW_RES), false));
-    }
-    let mut out = Vec::new();
-    for part in explosion.pieces() {
-        let piece = catch(|| gridfinity::carve_to_cells(solid, pitch, &bin.cells, &part.cells))?;
-        let mut verts = flagged(&tessellate(&piece, PREVIEW_RES), false);
-        displace(&mut verts, explosion.shift(part.col, part.row));
-        out.extend(verts);
-    }
-    Ok(out)
-}
 
 /// The whole baseplate's preview vertices, given the one solid the kernel built
 /// for it: that solid tessellated when the plate is not split, and otherwise its
@@ -181,38 +162,6 @@ fn bin_vertices(
 /// without the pieces of the other that span its seams. Carving is
 /// `carve_baseplate_to_cells`, the same call the export makes, so what the
 /// window shows apart is what the files hold separately.
-fn plate_vertices(p: &Params, solid: &Solid, gaps: bool) -> Result<Vec<f32>, String> {
-    let cells = p.all_cells();
-    let mut splits: Vec<SplitLine> = Vec::new();
-    for bin in &p.bins {
-        for line in &bin.split_lines {
-            if !splits.contains(line) {
-                splits.push(*line);
-            }
-        }
-    }
-    let explosion = explode(Explosion::new(&cells, &splits, p.pitch), gaps);
-    if !explosion.is_split() {
-        return Ok(shaded(&tessellate(solid, PREVIEW_RES), PLATE_GREY, false));
-    }
-    let mut out = Vec::new();
-    for part in explosion.pieces() {
-        let piece = catch(|| {
-            gridfinity::carve_baseplate_to_cells(
-                solid,
-                p.pitch,
-                &cells,
-                &part.cells,
-                p.plate_margin_x,
-                p.plate_margin_y,
-            )
-        })?;
-        let mut verts = shaded(&tessellate(&piece, PREVIEW_RES), PLATE_GREY, false);
-        displace(&mut verts, explosion.shift(part.col, part.row));
-        out.extend(verts);
-    }
-    Ok(out)
-}
 
 /// The packed objects as solid boxes in the drawer's own millimetre coordinates,
 /// each cut on the split lines of the bin it stands in and each part displaced
@@ -243,15 +192,21 @@ fn object_box_vertices(boxes: &[optimize::ObjectBox], params: &Params, gaps: boo
             let Some((min, max)) = explosion.clip(part.col, part.row, b.min, b.max) else {
                 continue;
             };
-            let sketch = Sketch::rectangle(
-                (min.x + max.x) / 2.0,
-                (min.y + max.y) / 2.0,
-                max.x - min.x,
-                max.y - min.y,
-            );
-            let solid = extrude(&sketch, min.z, max.z);
-            let mut verts = shaded(&tessellate(&solid, PREVIEW_RES), OBJECT_WHITE, !b.fits);
-            displace(&mut verts, explosion.shift(part.col, part.row));
+            #[cfg(feature = "occt")]
+            let mut verts = {
+                let solid = gridfinity_occt::Shape::box_solid(
+                    max.x - min.x,
+                    max.y - min.y,
+                    max.z - min.z,
+                )
+                .expect("a positive object box builds");
+                shaded_occt(&solid, OBJECT_WHITE, !b.fits)
+                    .expect("an OCCT object box tessellates")
+            };
+            #[cfg(feature = "occt")]
+            let shift = explosion.shift(part.col, part.row)
+                + Vec3::new(min.x as f32, min.y as f32, min.z as f32);
+            displace(&mut verts, shift);
             out.extend(verts);
         }
     }
@@ -373,12 +328,30 @@ fn subbin_vertices(
     let mut out = Vec::new();
     let mut errors = Vec::new();
     for insert in subbins {
+        #[cfg(not(feature = "occt"))]
         match catch(|| build_subbin(&insert.spec)) {
             Ok(solid) => {
                 let mut verts = shaded(&tessellate(&solid, PREVIEW_RES), SUBBIN_AMBER, false);
                 displace(&mut verts, subbin_shift(insert, params, gaps));
                 out.extend(verts);
             }
+            Err(msg) => errors.push(BinError {
+                bin: insert.bin,
+                msg,
+            }),
+        }
+        #[cfg(feature = "occt")]
+        match catch(|| gridfinity_model::subbin::build_subbin_occt(&insert.spec)) {
+            Ok(shape) => match shaded_occt(&shape, SUBBIN_AMBER, false) {
+                Ok(mut verts) => {
+                    displace(&mut verts, subbin_shift(insert, params, gaps));
+                    out.extend(verts);
+                }
+                Err(msg) => errors.push(BinError {
+                    bin: insert.bin,
+                    msg,
+                }),
+            },
             Err(msg) => errors.push(BinError {
                 bin: insert.bin,
                 msg,
@@ -541,25 +514,7 @@ fn scene_labels(
     out
 }
 
-fn build_bin(p: &Params, bin: &LogicalBin) -> Result<Solid, String> {
-    catch(|| gridfinity::build_piece(p, &bin.cells, &bin.cells, bin.slope, &bin.pockets))
-}
 
-fn placeholder(p: &Params, bin: &LogicalBin) -> Vec<f32> {
-    let h = (p.height_units as f64 * gridfinity::HEIGHT_PER_UNIT).max(1.0);
-    let side = gridfinity::GRID_PITCH - 2.0 * gridfinity::HALF_TOL;
-    let mut out = Vec::new();
-    for c in &bin.cells {
-        let cx = c.x as f64 * gridfinity::GRID_PITCH + gridfinity::GRID_PITCH / 2.0;
-        let cy = c.y as f64 * gridfinity::GRID_PITCH + gridfinity::GRID_PITCH / 2.0;
-        let sk = Sketch::rounded_rect(cx, cy, side, side, gridfinity::OUTER_R);
-        out.extend(flagged(
-            &tessellate(&extrude(&sk, 0.0, h), PREVIEW_RES),
-            true,
-        ));
-    }
-    out
-}
 
 pub(crate) fn catch<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     let prev = std::panic::take_hook();
@@ -579,15 +534,59 @@ pub(crate) fn catch<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, Strin
     }
 }
 
-fn try_whole(p: &Params) -> Result<Solid, String> {
-    catch(|| gridfinity::try_build(p))
-}
 
 /// Every bin of `p` as preview vertices, with the split bodies standing apart
 /// when `gaps` and abutting as printed when not -- the viewport's *Show gaps*
 /// toggle, and the only thing the window varies about the scene.
-fn build_scene(p: &Params, gaps: bool) -> (Vec<f32>, Vec<BinError>) {
-    build_scene_with(p, build_bin, gaps)
+
+#[cfg(feature = "occt")]
+fn build_scene_occt(p: &Params, gaps: bool) -> (Vec<f32>, Vec<BinError>) {
+    let pieces = match gridfinity_model::try_build_pieces_occt(p) {
+        Ok(pieces) => pieces,
+        Err(msg) => return (Vec::new(), vec![BinError { bin: 0, msg }]),
+    };
+    let mut out = Vec::new();
+    for piece in pieces {
+        let explosion = if p.mode == Mode::Baseplate {
+            let cells = p.all_cells();
+            let lines: Vec<SplitLine> = p
+                .bins
+                .iter()
+                .flat_map(|bin| bin.split_lines.iter().copied())
+                .fold(Vec::new(), |mut all, line| {
+                    if !all.contains(&line) {
+                        all.push(line);
+                    }
+                    all
+                });
+            Explosion::new(&cells, &lines, p.pitch)
+        } else {
+            Explosion::of(&p.bins[piece.bin], p.pitch)
+        };
+        let color = if p.mode == Mode::Baseplate {
+            PLATE_GREY
+        } else {
+            DEBUG_BASE_COLOR
+        };
+        let mut vertices = match shaded_occt(&piece.solid, color, false) {
+            Ok(vertices) => vertices,
+            Err(msg) => {
+                return (
+                    Vec::new(),
+                    vec![BinError {
+                        bin: piece.bin,
+                        msg,
+                    }],
+                );
+            }
+        };
+        displace(
+            &mut vertices,
+            explode(explosion, gaps).shift(piece.col, piece.row),
+        );
+        out.extend(vertices);
+    }
+    (out, Vec::new())
 }
 
 /// `build_scene` with the per-bin builder supplied.
@@ -598,39 +597,6 @@ fn build_scene(p: &Params, gaps: bool) -> (Vec<f32>, Vec<BinError>) {
 /// pass in builds cleanly now -- and what they are actually about is that one
 /// bin's failure is reported, is confined to that bin, and leaves a placeholder
 /// behind. None of that is a statement about geometry.
-fn build_scene_with(
-    p: &Params,
-    build: impl Fn(&Params, &LogicalBin) -> Result<Solid, String>,
-    gaps: bool,
-) -> (Vec<f32>, Vec<BinError>) {
-    let mut verts = Vec::new();
-    let mut errors = Vec::new();
-    if p.mode != Mode::Bin {
-        match try_whole(p).and_then(|s| plate_vertices(p, &s, gaps)) {
-            Ok(v) => verts = v,
-            Err(msg) => errors.push(BinError { bin: 0, msg }),
-        }
-        if !errors.is_empty() {
-            for bin in &p.bins {
-                verts.extend(placeholder(p, bin));
-            }
-        }
-        return (verts, errors);
-    }
-    for (i, bin) in p.bins.iter().enumerate() {
-        if bin.cells.is_empty() {
-            continue;
-        }
-        match build(p, bin).and_then(|solid| bin_vertices(bin, p.pitch, &solid, gaps)) {
-            Ok(piece_verts) => verts.extend(piece_verts),
-            Err(msg) => {
-                errors.push(BinError { bin: i, msg });
-                verts.extend(placeholder(p, bin));
-            }
-        }
-    }
-    (verts, errors)
-}
 
 /// Everything the viewer uploads for one construction-debugger subset.
 ///
@@ -639,16 +605,6 @@ fn build_scene_with(
 /// goes through `tessellate_shell`. `tessellate` states a watertight
 /// postcondition it cannot hold here, and asserting it turned every rollback
 /// into an unwind out of `regenerate`.
-fn debug_view(debugger: &Debugger, solid: &Solid) -> (Vec<f32>, wireframe::Wireframe) {
-    let verts = flagged(&tessellate_shell(solid, PREVIEW_RES), false);
-    let mut wf = wireframe::Wireframe::default();
-    for (profile, plane) in debugger.sketch_planes() {
-        wf.add_sketch(profile, plane, PREVIEW_RES, wireframe::SKETCH_BLACK);
-    }
-    wf.add_brep_edges(solid, PREVIEW_RES, wireframe::EDGE_ORANGE);
-    (verts, wf)
-}
-
 /// The command line: no subcommand opens the construction debugger, `optimize`
 /// runs the headless drawer fitter.
 ///
@@ -867,26 +823,15 @@ impl App {
             self.debugger.refresh(&self.params);
             self.program_dirty = false;
         }
-        let dbg_solid = self.debugger.build_solid();
-        let mut wf = wireframe::Wireframe::default();
-        let (mut verts, errors) = match &dbg_solid {
-            Some(s) => match catch(|| Ok(debug_view(&self.debugger, s))) {
-                Ok((v, w)) => {
-                    wf = w;
-                    (v, Vec::new())
-                }
-                Err(msg) => (Vec::new(), vec![BinError { bin: 0, msg }]),
-            },
-            None => build_scene(&self.params, self.show_gaps),
-        };
+        let debugging = false;
+        let wf = wireframe::Wireframe::default();
+        #[cfg(not(feature = "occt"))]
+        let (mut verts, errors) = build_scene(&self.params, self.show_gaps);
+        #[cfg(feature = "occt")]
+        let (mut verts, errors) = build_scene_occt(&self.params, self.show_gaps);
         self.errors = errors;
         self.tri_count = verts.len() / (3 * MESH_STRIDE);
 
-        if dbg_solid.is_none() && self.debugger.is_shown() {
-            for (profile, plane) in self.debugger.sketch_planes() {
-                wf.add_sketch(profile, plane, PREVIEW_RES, wireframe::SKETCH_BLACK);
-            }
-        }
         if self.show_object_boxes && !self.params.bins.is_empty() {
             verts.extend(object_box_vertices(
                 &self.object_boxes,
@@ -894,15 +839,18 @@ impl App {
                 self.show_gaps,
             ));
         }
-        if dbg_solid.is_none() && self.show_subbins {
+        if !debugging && self.show_subbins {
             let (insert_verts, insert_errors) =
                 subbin_vertices(&self.subbins, &self.params, self.show_gaps);
             verts.extend(insert_verts);
             self.errors.extend(insert_errors);
         }
-        if dbg_solid.is_none() && self.show_plate {
+        if !debugging && self.show_plate {
             if let Some(plate) = &self.plate {
+                #[cfg(not(feature = "occt"))]
                 let (plate_verts, plate_errors) = build_scene(plate, self.show_gaps);
+                #[cfg(feature = "occt")]
+                let (plate_verts, plate_errors) = build_scene_occt(plate, self.show_gaps);
                 verts.extend(plate_verts);
                 self.errors.extend(plate_errors);
             }
@@ -913,7 +861,7 @@ impl App {
             self.camera.frame(min, max);
         }
         self.labels = wf.labels;
-        if dbg_solid.is_none() {
+        if !debugging {
             let boxes: &[optimize::ObjectBox] = if self.show_object_boxes {
                 &self.object_boxes
             } else {
@@ -950,19 +898,11 @@ impl App {
     fn config_report(&self) -> String {
         let mut out = self.params.rust_literal();
         out.push('\n');
-        match catch(|| gridfinity::try_build_reporting(&self.params)) {
-            Ok((_, r)) => {
-                out.push_str(&format!(
-                    "// blends: {} requested, {} made, {} matched no edge, {} refused\n",
-                    r.requested,
-                    r.made(),
-                    r.unresolved,
-                    r.dropped.len()
-                ));
-                if let Some(why) = &r.refusal {
-                    out.push_str(&format!("// refused because: {why}\n"));
-                }
-            }
+        match catch(|| gridfinity::try_build_occt(&self.params)) {
+            Ok(shape) => match shape.volume() {
+                Ok(volume) => out.push_str(&format!("// OCCT body volume: {volume:.3} mm^3\n")),
+                Err(error) => out.push_str(&format!("// OCCT volume query failed: {error}\n")),
+            },
             // `catch` turns a panic into this too, which is the case worth
             // exporting most: a bin the kernel cannot build at all.
             Err(msg) => out.push_str(&format!("// build failed: {msg}\n")),
@@ -1005,20 +945,7 @@ impl App {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let solid = match try_whole(&self.params) {
-                Ok(s) => s,
-                Err(msg) => { self.status = format!("Export failed: {msg}"); return; }
-            };
-            let mesh = tessellate(&solid, EXPORT_RES).to_mesh();
-            download_bytes("gridfinity-bin.stl", "model/stl", &mesh.to_stl_binary());
-            self.status = format!("Downloaded gridfinity-bin.stl ({} triangles)", mesh.tri_count());
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(path) = rfd::FileDialog::new()
-            .set_file_name("gridfinity-bin.stl")
-            .add_filter("STL", &["stl"])
-            .save_file()
-        {
+            #[cfg(not(feature = "occt"))]
             let solid = match try_whole(&self.params) {
                 Ok(s) => s,
                 Err(msg) => {
@@ -1026,7 +953,50 @@ impl App {
                     return;
                 }
             };
+            #[cfg(not(feature = "occt"))]
             let mesh = tessellate(&solid, EXPORT_RES).to_mesh();
+            #[cfg(feature = "occt")]
+            let mesh = match gridfinity_model::try_build_occt(&self.params)
+                .and_then(|shape| shape.tessellate(0.02).map_err(|e| e.to_string()))
+            {
+                Ok(mesh) => mesh,
+                Err(msg) => {
+                    self.status = format!("Export failed: {msg}");
+                    return;
+                }
+            };
+            download_bytes("gridfinity-bin.stl", "model/stl", &mesh.to_stl_binary());
+            self.status = format!(
+                "Downloaded gridfinity-bin.stl ({} triangles)",
+                mesh.tri_count()
+            );
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name("gridfinity-bin.stl")
+            .add_filter("STL", &["stl"])
+            .save_file()
+        {
+            #[cfg(not(feature = "occt"))]
+            let solid = match try_whole(&self.params) {
+                Ok(s) => s,
+                Err(msg) => {
+                    self.status = format!("Export failed: {msg}");
+                    return;
+                }
+            };
+            #[cfg(not(feature = "occt"))]
+            let mesh = tessellate(&solid, EXPORT_RES).to_mesh();
+            #[cfg(feature = "occt")]
+            let mesh = match gridfinity_model::try_build_occt(&self.params)
+                .and_then(|shape| shape.tessellate(0.02).map_err(|e| e.to_string()))
+            {
+                Ok(mesh) => mesh,
+                Err(msg) => {
+                    self.status = format!("Export failed: {msg}");
+                    return;
+                }
+            };
             match std::fs::write(&path, mesh.to_stl_binary()) {
                 Ok(()) => {
                     self.status = format!(
@@ -1045,7 +1015,16 @@ impl App {
             self.status = "Cannot export: fix the failed bin first".into();
             return;
         }
+        #[cfg(not(feature = "occt"))]
         let pieces = match catch(|| gridfinity::try_build_pieces(&self.params)) {
+            Ok(p) => p,
+            Err(msg) => {
+                self.status = format!("Export failed: {msg}");
+                return;
+            }
+        };
+        #[cfg(feature = "occt")]
+        let pieces = match catch(|| gridfinity_model::try_build_pieces_occt(&self.params)) {
             Ok(p) => p,
             Err(msg) => {
                 self.status = format!("Export failed: {msg}");
@@ -1056,27 +1035,44 @@ impl App {
         {
             let n = pieces.len();
             for piece in &pieces {
+                #[cfg(not(feature = "occt"))]
                 let mesh = tessellate(&piece.solid, EXPORT_RES).to_mesh();
+                #[cfg(feature = "occt")]
+                let mesh = piece
+                    .solid
+                    .tessellate(0.02)
+                    .expect("previewed OCCT piece tessellates");
                 download_bytes(&piece.name, "model/stl", &mesh.to_stl_binary());
             }
             self.status = format!("Downloaded {n} piece(s)");
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-        let Some(dir) = rfd::FileDialog::new().pick_folder() else { return; };
-        let mut n = 0usize;
-        for piece in &pieces {
-            let mesh = tessellate(&piece.solid, EXPORT_RES).to_mesh();
-            let path = dir.join(&piece.name);
-            match std::fs::write(&path, mesh.to_stl_binary()) {
-                Ok(()) => n += 1,
-                Err(e) => {
-                    self.status = format!("Export failed at {}: {e}", piece.name);
-                    return;
+            let Some(dir) = rfd::FileDialog::new().pick_folder() else {
+                return;
+            };
+            let mut n = 0usize;
+            for piece in &pieces {
+                #[cfg(not(feature = "occt"))]
+                let mesh = tessellate(&piece.solid, EXPORT_RES).to_mesh();
+                #[cfg(feature = "occt")]
+                let mesh = match piece.solid.tessellate(0.02) {
+                    Ok(mesh) => mesh,
+                    Err(e) => {
+                        self.status = format!("Export failed at {}: {e}", piece.name);
+                        return;
+                    }
+                };
+                let path = dir.join(&piece.name);
+                match std::fs::write(&path, mesh.to_stl_binary()) {
+                    Ok(()) => n += 1,
+                    Err(e) => {
+                        self.status = format!("Export failed at {}: {e}", piece.name);
+                        return;
+                    }
                 }
             }
-        }
-        self.status = format!("Exported {n} piece(s) to {}", dir.display());
+            self.status = format!("Exported {n} piece(s) to {}", dir.display());
         }
     }
 }
@@ -1337,11 +1333,12 @@ impl App {
 mod tests {
     use super::*;
     use crate::explode::SPLIT_APART_MM;
-    use gridfinity_brep::math::Vec3 as KernelVec3;
     use gridfinity_model::layout::{Axis, GridCell, SplitLine};
+    use gridfinity_sketch::math::Vec3 as KernelVec3;
 
     /// A builder that refuses everything, so the failure path is exercised
     /// without asking the kernel for a bin it cannot make.
+    #[cfg(not(feature = "occt"))]
     fn always_fails(_: &Params, _: &LogicalBin) -> Result<Solid, String> {
         Err("refused by the test builder".to_string())
     }
@@ -1373,6 +1370,7 @@ mod tests {
         (good, bad)
     }
 
+    #[cfg(not(feature = "occt"))]
     #[test]
     fn a_bin_that_cannot_be_built_is_reported_not_fatal() {
         let p = bins_at(&[GridCell { x: 0, y: 0 }]);
@@ -1391,6 +1389,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "occt"))]
     #[test]
     fn a_valid_layout_reports_nothing_and_flags_nothing() {
         let (verts, errors) = build_scene(&Params::default(), true);
@@ -1404,6 +1403,7 @@ mod tests {
         assert_eq!(bad, 0, "a healthy bin must not be flagged");
     }
 
+    #[cfg(not(feature = "occt"))]
     #[test]
     fn a_failed_bin_does_not_take_its_neighbours_with_it() {
         let p = bins_at(&[GridCell { x: 0, y: 0 }, GridCell { x: 4, y: 0 }]);
@@ -1511,6 +1511,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "occt"))]
     #[test]
     fn a_split_bin_previews_as_pieces_a_gap_apart() {
         let cells = [GridCell { x: 0, y: 0 }, GridCell { x: 1, y: 0 }];
@@ -1865,6 +1866,7 @@ mod tests {
     /// The plate the bin drops into is cut and exploded exactly as the bin is,
     /// on its own lines. Without it a split baseplate previewed as one solid,
     /// which is the picture of an assembly that does not come apart.
+    #[cfg(not(feature = "occt"))]
     #[test]
     fn a_split_baseplate_previews_as_pieces_a_gap_apart() {
         let cells = [GridCell { x: 0, y: 0 }, GridCell { x: 1, y: 0 }];
@@ -2002,6 +2004,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "occt"))]
     #[test]
     fn the_placeholder_sits_on_the_failed_bin_footprint() {
         let p = bins_at(&[GridCell { x: 2, y: 1 }]);

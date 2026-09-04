@@ -144,7 +144,7 @@ fn emit_cap(
     b.face(surface, sense, mk(outer), holes.iter().map(mk).collect());
 }
 
-fn group_loops(loops: &[Vec<Seg>]) -> Vec<(Vec<Seg>, Vec<Vec<Seg>>)> {
+pub(crate) fn group_loops(loops: &[Vec<Seg>]) -> Vec<(Vec<Seg>, Vec<Vec<Seg>>)> {
     let mut out: Vec<(Vec<Seg>, Vec<Vec<Seg>>)> = loops
         .iter()
         .filter(|l| loop_area(l) > 0.0)

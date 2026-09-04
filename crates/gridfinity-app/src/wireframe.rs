@@ -6,14 +6,10 @@
 //! in it reads the solid it is drawn beside; every entry point takes the geometry
 //! and the colour to draw it in.
 
-use gridfinity_brep::math::Vec3;
-use gridfinity_brep::build::ring_on_plane;
-use gridfinity_brep::geom::Curve;
-use gridfinity_brep::sketch::Seg;
-use gridfinity_brep::topo::{Builder, Solid};
+use gridfinity_sketch::math::Vec3;
+use gridfinity_sketch::sketch::Seg;
 
 pub const SKETCH_BLACK: [f32; 3] = [0.05, 0.05, 0.06];
-pub const EDGE_ORANGE: [f32; 3] = [1.0, 0.45, 0.05];
 
 /// One piece of text drawn over the scene at a point in it: what the thing
 /// under it is called.
@@ -39,12 +35,7 @@ impl Wireframe {
         for idx in [0usize, 1, 2, 2, 1, 3] {
             let (end, side) = CORNERS[idx];
             self.lines.extend_from_slice(&[
-                a.x as f32,
-                a.y as f32,
-                a.z as f32,
-                b.x as f32,
-                b.y as f32,
-                b.z as f32,
+                a.x as f32, a.y as f32, a.z as f32, b.x as f32, b.y as f32, b.z as f32,
             ]);
             self.lines.extend_from_slice(&color);
             self.lines.push(end);
@@ -58,31 +49,43 @@ impl Wireframe {
         }
     }
 
-    pub fn add_brep_edges(&mut self, solid: &Solid, res: usize, color: [f32; 3]) {
-        for e in &solid.edges {
-            let pts = e.sample(true, e.seg_count(res));
-            self.push_polyline(&pts, color);
-            self.labels.push(Label {
-                at: midpoint(&pts),
-                text: curve_kind(&e.curve).to_string(),
-                color,
-            });
-        }
-    }
-
-    pub fn add_sketch(&mut self, profile: &[Seg], plane: (Vec3, Vec3), res: usize, color: [f32; 3]) {
+    pub fn add_sketch(
+        &mut self,
+        profile: &[Seg],
+        plane: (Vec3, Vec3),
+        res: usize,
+        color: [f32; 3],
+    ) {
         if profile.is_empty() {
             return;
         }
-        let mut b = Builder::default();
-        let ring = ring_on_plane(&mut b, profile, plane);
-        for (k, &(id, fwd)) in ring.edges.iter().enumerate() {
-            let e = b.edge(id);
-            let pts = e.sample(fwd, e.seg_count(res));
+        let (origin, normal) = plane;
+        assert!(normal.z.abs() > 0.999, "sketch overlays are horizontal");
+        for seg in profile {
+            let samples = match seg {
+                Seg::Line { .. } => 1,
+                Seg::Arc { a0, a1, .. } =>
+                    (((a1 - a0).abs() / std::f64::consts::FRAC_PI_2) * res as f64)
+                        .ceil()
+                        .max(1.0) as usize,
+            };
+            let pts: Vec<Vec3> = (0..=samples)
+                .map(|i| {
+                    let t = i as f64 / samples as f64;
+                    let p = match *seg {
+                        Seg::Line { a, b } => a + (b - a) * t,
+                        Seg::Arc { center, radius, a0, a1, .. } => {
+                            let angle = a0 + (a1 - a0) * t;
+                            center + gridfinity_sketch::math::Vec2::new(angle.cos(), angle.sin()) * radius
+                        }
+                    };
+                    Vec3::new(origin.x + p.x, origin.y + p.y, origin.z)
+                })
+                .collect();
             self.push_polyline(&pts, color);
             self.labels.push(Label {
                 at: midpoint(&pts),
-                text: seg_kind(&profile[k]).to_string(),
+                text: seg_kind(seg).to_string(),
                 color,
             });
         }
@@ -97,15 +100,6 @@ fn midpoint(pts: &[Vec3]) -> Vec3 {
     }
 }
 
-fn curve_kind(c: &Curve) -> &'static str {
-    match c {
-        Curve::Line { .. } => "Line",
-        Curve::Circle { .. } => "Circle",
-        Curve::Ellipse { .. } => "Ellipse",
-        Curve::TorusSection { .. } => "TorusSection",
-    }
-}
-
 fn seg_kind(s: &Seg) -> &'static str {
     match s {
         Seg::Line { .. } => "Line",
@@ -117,11 +111,14 @@ fn seg_kind(s: &Seg) -> &'static str {
 mod tests {
     use super::*;
     use gridfinity_render::LINE_STRIDE;
-    use gridfinity_brep::build::extrude;
-    use gridfinity_brep::sketch::Sketch;
+    use gridfinity_sketch::sketch::Sketch;
 
     fn verts(wf: &Wireframe) -> usize {
-        assert_eq!(wf.lines.len() % LINE_STRIDE, 0, "buffer must be whole vertices");
+        assert_eq!(
+            wf.lines.len() % LINE_STRIDE,
+            0,
+            "buffer must be whole vertices"
+        );
         wf.lines.len() / LINE_STRIDE
     }
 
@@ -130,23 +127,9 @@ mod tests {
     }
 
     #[test]
-    fn box_edges_expand_to_quads_and_are_all_labelled_line() {
-        let solid = extrude(&Sketch::rectangle(0.0, 0.0, 10.0, 20.0), 0.0, 5.0);
-        let mut wf = Wireframe::default();
-        wf.add_brep_edges(&solid, 5, EDGE_ORANGE);
-
-        assert_eq!(solid.edges.len(), 12);
-        assert_eq!(verts(&wf), 12 * 6);
-        assert_eq!(wf.labels.len(), 12);
-        assert!(wf.labels.iter().all(|l| l.text == "Line"));
-        assert!(wf.labels.iter().all(|l| l.color == EDGE_ORANGE));
-    }
-
-    #[test]
     fn each_segment_covers_all_four_corners() {
-        let solid = extrude(&Sketch::rectangle(0.0, 0.0, 4.0, 4.0), 0.0, 1.0);
         let mut wf = Wireframe::default();
-        wf.add_brep_edges(&solid, 5, EDGE_ORANGE);
+        wf.push_segment(Vec3::ZERO, Vec3::new(4.0, 4.0, 1.0), SKETCH_BLACK);
 
         for seg in 0..verts(&wf) / 6 {
             let corners: Vec<(f32, f32)> = (0..6)
@@ -156,11 +139,18 @@ mod tests {
                 })
                 .collect();
             for expect in [(0.0, -1.0), (0.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
-                assert!(corners.contains(&expect), "segment {seg} missing corner {expect:?}");
+                assert!(
+                    corners.contains(&expect),
+                    "segment {seg} missing corner {expect:?}"
+                );
             }
             let first = &vertex(&wf, seg * 6)[0..6];
             for k in 1..6 {
-                assert_eq!(&vertex(&wf, seg * 6 + k)[0..6], first, "endpoints must match");
+                assert_eq!(
+                    &vertex(&wf, seg * 6 + k)[0..6],
+                    first,
+                    "endpoints must match"
+                );
             }
         }
     }
@@ -169,7 +159,12 @@ mod tests {
     fn sketch_arcs_are_sampled_and_tagged() {
         let profile = Sketch::circle(0.0, 0.0, 5.0).loops.remove(0);
         let mut wf = Wireframe::default();
-        wf.add_sketch(&profile, (Vec3::new(0.0, 0.0, 3.0), Vec3::Z), 5, SKETCH_BLACK);
+        wf.add_sketch(
+            &profile,
+            (Vec3::new(0.0, 0.0, 3.0), Vec3::Z),
+            5,
+            SKETCH_BLACK,
+        );
 
         assert_eq!(wf.labels.len(), profile.len());
         assert!(wf.labels.iter().all(|l| l.text == "Arc"));
@@ -180,7 +175,10 @@ mod tests {
             profile.len()
         );
         for i in 0..verts(&wf) {
-            assert!((vertex(&wf, i)[2] - 3.0).abs() < 1e-4, "vertex not lifted to plane");
+            assert!(
+                (vertex(&wf, i)[2] - 3.0).abs() < 1e-4,
+                "vertex not lifted to plane"
+            );
         }
     }
 

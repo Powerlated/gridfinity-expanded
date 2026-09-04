@@ -1,13 +1,13 @@
 [package]
 name = "gridfinity-app"
-description = "The Gridfinity desktop app: an egui construction debugger, and the headless `optimize` command that fits a drawer"
+description = "The Gridfinity OCCT desktop editor and headless `optimize` command"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [features]
-default = []
-occt = ["dep:gridfinity-occt", "gridfinity-occt/occt"]
+default = ["occt"]
+occt = ["dep:gridfinity-occt", "dep:gridfinity-xt", "gridfinity-occt/occt", "gridfinity-model/occt", "gridfinity-xt/occt"]
 
 [build-dependencies]
 cc = "1"
@@ -17,11 +17,12 @@ name = "gridfinity-app"
 path = "src/main.rs"
 
 [dependencies]
-gridfinity-brep = { path = "../gridfinity-brep" }
 gridfinity-model = { path = "../gridfinity-model" }
+gridfinity-sketch = { path = "../gridfinity-sketch" }
 gridfinity-project = { path = "../gridfinity-project" }
 gridfinity-render = { path = "../gridfinity-render" }
 gridfinity-occt = { path = "../gridfinity-occt", optional = true }
+gridfinity-xt = { path = "../gridfinity-xt", optional = true }
 eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts"] }
 egui = "0.35"
 egui-wgpu = "0.35"

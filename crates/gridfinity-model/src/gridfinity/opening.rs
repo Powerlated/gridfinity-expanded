@@ -12,11 +12,11 @@
 //! given point of the profile falls in an opened run at all.
 
 use super::*;
-use gridfinity_brep::math::Vec2;
-use gridfinity_brep::region2d::region_intersection;
-use gridfinity_brep::round::{drop_degenerate, seg_mid};
-use gridfinity_brep::sketch::{COINCIDENT, Seg, loop_area};
 use crate::layout::{EffectiveWalls, GridCell, Orientation};
+use gridfinity_sketch::math::Vec2;
+use gridfinity_sketch::region2d::region_intersection;
+use gridfinity_sketch::round::{drop_degenerate, seg_mid};
+use gridfinity_sketch::sketch::{COINCIDENT, Seg, loop_area};
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug)]

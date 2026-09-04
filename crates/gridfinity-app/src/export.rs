@@ -16,15 +16,11 @@
 //! output names, and whether an output can hold the format that was named.
 
 use clap::ValueEnum;
-use crate::optimize::Body;
-use gridfinity_brep::topo::Solid;
-use gridfinity_model::{tessellate, to_xt_text};
 use std::path::{Path, PathBuf};
 
 /// How finely a piece is sampled on the way to triangles. The same resolution
 /// the window's own STL export uses, so a piece exported either way is the same
 /// file.
-const EXPORT_RES: usize = 48;
 
 /// The two wired export formats.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -49,7 +45,8 @@ impl Format {
     /// leaves the format to be stated.
     pub fn inferred_from(path: &Path) -> Option<Format> {
         let ext = path.extension()?.to_str()?;
-        ext.eq_ignore_ascii_case(XT_EXTENSION).then_some(Format::ParasolidXt)
+        ext.eq_ignore_ascii_case(XT_EXTENSION)
+            .then_some(Format::ParasolidXt)
     }
 
     /// `Ok` when `path`'s extension is one this format can be written to, and a
@@ -121,12 +118,76 @@ pub struct Written {
     pub contents: Contents,
 }
 
+/// One owned native body ready for an optimizer export.
+#[cfg(feature = "occt")]
+pub struct OcctBody<'a> {
+    pub name: &'a str,
+    pub shape: &'a gridfinity_occt::Shape,
+}
+
+/// Native OCCT bodies written as one binary STL apiece.
+#[cfg(feature = "occt")]
+pub fn write_occt_stl_dir(dir: &Path, bodies: &[OcctBody<'_>]) -> Result<Vec<Written>, String> {
+    assert!(
+        !bodies.is_empty(),
+        "an OCCT STL export contains at least one body"
+    );
+    let files: Vec<(PathBuf, Vec<u8>, usize)> = bodies
+        .iter()
+        .map(|body| {
+            let mesh = body
+                .shape
+                .tessellate(0.08)
+                .map_err(|e| format!("OCCT could not tessellate {}: {e}", body.name))?;
+            let triangles = mesh.tri_count();
+            Ok((dir.join(&body.name), mesh.to_stl_binary(), triangles))
+        })
+        .collect::<Result<_, String>>()?;
+    std::fs::create_dir_all(dir).map_err(|e| {
+        format!(
+            "could not create the output directory {}: {e}",
+            dir.display()
+        )
+    })?;
+    files
+        .into_iter()
+        .map(|(path, bytes, triangles)| {
+            std::fs::write(&path, &bytes)
+                .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+            Ok(Written {
+                path,
+                bytes: bytes.len(),
+                contents: Contents::Triangles(triangles),
+            })
+        })
+        .collect()
+}
+
+/// Native OCCT bodies written into one Parasolid transmit file.
+#[cfg(feature = "occt")]
+pub fn write_occt_xt(path: &Path, bodies: &[OcctBody<'_>]) -> Result<Written, String> {
+    assert!(
+        !bodies.is_empty(),
+        "an OCCT X_T export contains at least one body"
+    );
+    let shapes: Vec<&gridfinity_occt::Shape> = bodies.iter().map(|body| body.shape).collect();
+    let text = gridfinity_xt::occt::to_xt_text(&shapes).map_err(|e| e.to_string())?;
+    std::fs::write(path, text.as_bytes())
+        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    Ok(Written {
+        path: path.to_path_buf(),
+        bytes: text.len(),
+        contents: Contents::Bodies(bodies.len()),
+    })
+}
+
 /// Every piece written into `dir` as its own binary STL, named as the model
 /// names it. The directory is created when it does not exist.
 ///
 /// Every piece is tessellated before any file is written, so a piece the
 /// tessellator refuses -- `tessellate` asserts its own mesh is watertight --
 /// leaves the directory as it found it rather than half a set of parts.
+#[cfg(not(feature = "occt"))]
 pub fn write_stl_dir(dir: &Path, pieces: &[Body<'_>]) -> Result<Vec<Written>, String> {
     assert!(
         !pieces.is_empty(),
@@ -139,8 +200,12 @@ pub fn write_stl_dir(dir: &Path, pieces: &[Body<'_>]) -> Result<Vec<Written>, St
             (dir.join(piece.name), mesh.to_stl_binary(), mesh.tri_count())
         })
         .collect();
-    std::fs::create_dir_all(dir)
-        .map_err(|e| format!("could not create the output directory {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| {
+        format!(
+            "could not create the output directory {}: {e}",
+            dir.display()
+        )
+    })?;
     let mut out = Vec::with_capacity(pieces.len());
     for (path, bytes, tris) in files {
         std::fs::write(&path, &bytes)
@@ -156,6 +221,7 @@ pub fn write_stl_dir(dir: &Path, pieces: &[Body<'_>]) -> Result<Vec<Written>, St
 
 /// Every piece written into one Parasolid transmit file as its own body, in the
 /// order the model built them.
+#[cfg(not(feature = "occt"))]
 pub fn write_xt(path: &Path, pieces: &[Body<'_>]) -> Result<Written, String> {
     assert!(
         !pieces.is_empty(),

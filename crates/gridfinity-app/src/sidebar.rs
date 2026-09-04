@@ -32,7 +32,11 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) -> bool {
     widgets::segmented(
         ui,
         &mut app.editor.tab,
-        &[(Tab::Shape, "Shape"), (Tab::Walls, "Walls"), (Tab::Cuts, "Cuts")],
+        &[
+            (Tab::Shape, "Shape"),
+            (Tab::Walls, "Walls"),
+            (Tab::Cuts, "Cuts"),
+        ],
         true,
     );
     ui.add_space(4.0);
@@ -83,20 +87,27 @@ fn shape(app: &mut App, ui: &mut egui::Ui) -> bool {
     changed |= app.editor.canvas(ui, &mut app.params);
 
     let p = &app.params;
-    let cells: Vec<_> = p.bins.iter().flat_map(|b| b.cells.iter().copied()).collect();
+    let cells: Vec<_> = p
+        .bins
+        .iter()
+        .flat_map(|b| b.cells.iter().copied())
+        .collect();
     ui.label(
         RichText::new(format!(
             "{} cell{}{}",
             cells.len(),
             if cells.len() == 1 { "" } else { "s" },
-            if p.bins.len() > 1 { format!(" in {} bins", p.bins.len()) } else { String::new() }
+            if p.bins.len() > 1 {
+                format!(" in {} bins", p.bins.len())
+            } else {
+                String::new()
+            }
         ))
         .color(theme::TEXT_DIMMED),
     );
     if let Some((w, d)) = GridFootprint::from_cells(&cells).map(|f| f.mm(p.pitch)) {
         ui.label(
-            RichText::new(format!("{w:.0} × {d:.0} mm layout footprint"))
-                .color(theme::TEXT_DIMMED),
+            RichText::new(format!("{w:.0} × {d:.0} mm layout footprint")).color(theme::TEXT_DIMMED),
         );
     }
     changed
@@ -132,10 +143,18 @@ fn walls(app: &mut App, ui: &mut egui::Ui) -> bool {
 
     ui.horizontal(|ui| {
         widgets::label(ui, "Width");
-        ui.add(egui::DragValue::new(&mut app.editor.wall_width).range(0.4..=8.0).speed(0.1));
+        ui.add(
+            egui::DragValue::new(&mut app.editor.wall_width)
+                .range(0.4..=8.0)
+                .speed(0.1),
+        );
         ui.checkbox(&mut app.editor.wall_full, "Full height");
         if !app.editor.wall_full {
-            ui.add(egui::DragValue::new(&mut app.editor.wall_height).range(0.5..=60.0).speed(0.5));
+            ui.add(
+                egui::DragValue::new(&mut app.editor.wall_height)
+                    .range(0.5..=60.0)
+                    .speed(0.5),
+            );
         }
     });
 
@@ -144,7 +163,9 @@ fn walls(app: &mut App, ui: &mut egui::Ui) -> bool {
         let mut remove: Option<usize> = None;
         for (i, w) in app.params.inner_walls.iter().enumerate() {
             row(ui, |ui| {
-                let height = w.height.map_or("full".to_string(), |h| format!("{h:.1} mm"));
+                let height = w
+                    .height
+                    .map_or("full".to_string(), |h| format!("{h:.1} mm"));
                 ui.label(widgets::value_text(&format!(
                     "#{} · ({:.0},{:.0})→({:.0},{:.0})",
                     i + 1,
@@ -165,7 +186,10 @@ fn walls(app: &mut App, ui: &mut egui::Ui) -> bool {
             app.params.inner_walls.remove(i);
             changed = true;
         }
-        widgets::hint(ui, "Each wall reaches the rim unless it was drawn at a set height.");
+        widgets::hint(
+            ui,
+            "Each wall reaches the rim unless it was drawn at a set height.",
+        );
     }
     changed
 }
@@ -188,7 +212,8 @@ fn cuts(app: &mut App, ui: &mut egui::Ui) -> bool {
         let parts = Explosion::of(bin, pitch).pieces().len();
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-            ui.painter().circle_filled(rect.center(), 5.0, bin_color(bi));
+            ui.painter()
+                .circle_filled(rect.center(), 5.0, bin_color(bi));
             ui.label(RichText::new(format!("Bin {}", bi + 1)).color(theme::TEXT));
             ui.label(
                 RichText::new(format!("{parts} part{}", if parts == 1 { "" } else { "s" }))

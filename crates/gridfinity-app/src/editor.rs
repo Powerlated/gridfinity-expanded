@@ -169,7 +169,12 @@ impl Editor {
         let cell = (width / cols as f32).min(38.0);
         let size = Vec2::new(cols as f32 * cell, rows as f32 * cell);
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
-        let canvas = Canvas { rect, cell, cols, rows };
+        let canvas = Canvas {
+            rect,
+            cell,
+            cols,
+            rows,
+        };
         let painter = ui.painter_at(rect);
         let hover = resp.hover_pos().map(|pos| canvas.to_grid(pos));
 
@@ -184,7 +189,10 @@ impl Editor {
             Tab::Shape => {
                 if resp.clicked() {
                     if let Some((fx, fy)) = resp.interact_pointer_pos().map(|q| canvas.to_grid(q)) {
-                        let c = GridCell { x: fx.floor() as i32, y: fy.floor() as i32 };
+                        let c = GridCell {
+                            x: fx.floor() as i32,
+                            y: fy.floor() as i32,
+                        };
                         if c.x >= 0 && c.y >= 0 {
                             changed |= toggle_cell(p, self.active_bin, c);
                         }
@@ -269,7 +277,11 @@ impl Editor {
         let opacity = if self.tab == Tab::Shape { 1.0 } else { 0.35 };
         for (bi, b) in p.bins.iter().enumerate() {
             let col = bin_color(bi);
-            let col = if bi == self.active_bin { col } else { col.gamma_multiply(0.55) };
+            let col = if bi == self.active_bin {
+                col
+            } else {
+                col.gamma_multiply(0.55)
+            };
             for c in &b.cells {
                 painter.rect_filled(
                     canvas.cell_rect(c.x, c.y).shrink(1.5),
@@ -282,7 +294,9 @@ impl Editor {
             if let Some((fx, fy)) = hover {
                 if fx >= 0.0 && fy >= 0.0 {
                     painter.rect_stroke(
-                        canvas.cell_rect(fx.floor() as i32, fy.floor() as i32).shrink(1.5),
+                        canvas
+                            .cell_rect(fx.floor() as i32, fy.floor() as i32)
+                            .shrink(1.5),
                         CornerRadius::same(2),
                         Stroke::new(1.0, theme::DARK_2),
                         StrokeKind::Inside,
@@ -304,13 +318,23 @@ impl Editor {
         p: &Params,
         hover: Option<(f32, f32)>,
     ) {
-        let all: Vec<GridCell> = p.bins.iter().flat_map(|b| b.cells.iter().copied()).collect();
+        let all: Vec<GridCell> = p
+            .bins
+            .iter()
+            .flat_map(|b| b.cells.iter().copied())
+            .collect();
         let hovered = hover.and_then(|(fx, fy)| nearest_edge(fx, fy));
         for e in perimeter_edges(&all) {
             let lit = hovered == Some(e);
             if p.open_edges.contains(&e) {
                 let color = if lit { theme::DARK_1 } else { theme::DARK_2 };
-                widgets::dashed_line(painter, canvas.edge_pts(&e), Stroke::new(2.0, color), 4.0, 5.0);
+                widgets::dashed_line(
+                    painter,
+                    canvas.edge_pts(&e),
+                    Stroke::new(2.0, color),
+                    4.0,
+                    5.0,
+                );
             } else {
                 let color = if lit { theme::GRAY_3 } else { theme::GRAY_5 };
                 painter.line_segment(canvas.edge_pts(&e), Stroke::new(5.0, color));
@@ -322,12 +346,21 @@ impl Editor {
         for w in &p.inner_walls {
             let px = (w.width.max(0.4) as f32 / PITCH * canvas.cell).max(2.5);
             painter.line_segment(
-                [canvas.mm_to_pixel(w.x1, w.y1), canvas.mm_to_pixel(w.x2, w.y2)],
+                [
+                    canvas.mm_to_pixel(w.x1, w.y1),
+                    canvas.mm_to_pixel(w.x2, w.y2),
+                ],
                 Stroke::new(px, theme::TEAL),
             );
         }
         if let (Some(a), Some(b)) = (self.drag_start, self.drag_now) {
-            widgets::dashed_line(painter, [a, b], Stroke::new(3.0, theme::TEAL_LIGHT), 5.0, 4.0);
+            widgets::dashed_line(
+                painter,
+                [a, b],
+                Stroke::new(3.0, theme::TEAL_LIGHT),
+                5.0,
+                4.0,
+            );
             for end in [a, b] {
                 painter.circle_filled(end, 4.0, theme::TEAL_PALE);
             }
@@ -344,7 +377,9 @@ impl Editor {
         p: &Params,
         hover: Option<(f32, f32)>,
     ) {
-        let Some(bin) = p.bins.get(self.active_bin) else { return };
+        let Some(bin) = p.bins.get(self.active_bin) else {
+            return;
+        };
         if bin.cells.is_empty() {
             return;
         }
@@ -416,14 +451,26 @@ fn nearest_edge(fx: f32, fy: f32) -> Option<GridEdge> {
         return None;
     }
     Some(if dx < dy {
-        GridEdge { x: fx.round() as i32, y: fy.floor() as i32, orientation: Orientation::V }
+        GridEdge {
+            x: fx.round() as i32,
+            y: fy.floor() as i32,
+            orientation: Orientation::V,
+        }
     } else {
-        GridEdge { x: fx.floor() as i32, y: fy.round() as i32, orientation: Orientation::H }
+        GridEdge {
+            x: fx.floor() as i32,
+            y: fy.round() as i32,
+            orientation: Orientation::H,
+        }
     })
 }
 
 fn toggle_edge(p: &mut Params, e: GridEdge) -> bool {
-    let all: Vec<GridCell> = p.bins.iter().flat_map(|b| b.cells.iter().copied()).collect();
+    let all: Vec<GridCell> = p
+        .bins
+        .iter()
+        .flat_map(|b| b.cells.iter().copied())
+        .collect();
     match classify_edge(&all, e) {
         EdgeClass::Perimeter => toggle_in(&mut p.open_edges, e),
         EdgeClass::Internal => toggle_in(&mut p.divider_edges, e),
@@ -447,10 +494,16 @@ fn candidate_splits(cells: &[GridCell]) -> Vec<SplitLine> {
     let (min_x, max_x, min_y, max_y) = bounds(cells);
     let mut out = Vec::new();
     for index in (min_x + 1)..=max_x {
-        out.push(SplitLine { axis: Axis::X, index });
+        out.push(SplitLine {
+            axis: Axis::X,
+            index,
+        });
     }
     for index in (min_y + 1)..=max_y {
-        out.push(SplitLine { axis: Axis::Y, index });
+        out.push(SplitLine {
+            axis: Axis::Y,
+            index,
+        });
     }
     out
 }
@@ -469,16 +522,26 @@ fn candidate_split(cells: &[GridCell], fx: f32, fy: f32) -> Option<SplitLine> {
     }
     if dx < dy {
         let index = fx.round() as i32;
-        (index > min_x && index <= max_x).then_some(SplitLine { axis: Axis::X, index })
+        (index > min_x && index <= max_x).then_some(SplitLine {
+            axis: Axis::X,
+            index,
+        })
     } else {
         let index = fy.round() as i32;
-        (index > min_y && index <= max_y).then_some(SplitLine { axis: Axis::Y, index })
+        (index > min_y && index <= max_y).then_some(SplitLine {
+            axis: Axis::Y,
+            index,
+        })
     }
 }
 
 fn toggle_split(p: &mut Params, active: usize, fx: f32, fy: f32) -> bool {
-    let Some(bin) = p.bins.get_mut(active) else { return false };
-    let Some(sl) = candidate_split(&bin.cells, fx, fy) else { return false };
+    let Some(bin) = p.bins.get_mut(active) else {
+        return false;
+    };
+    let Some(sl) = candidate_split(&bin.cells, fx, fy) else {
+        return false;
+    };
     if let Some(k) = bin.split_lines.iter().position(|&x| x == sl) {
         bin.split_lines.remove(k);
     } else {

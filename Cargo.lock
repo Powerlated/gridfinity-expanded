@@ -1385,11 +1385,12 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "glam",
- "gridfinity-brep",
  "gridfinity-model",
  "gridfinity-occt",
  "gridfinity-project",
  "gridfinity-render",
+ "gridfinity-sketch",
+ "gridfinity-xt",
  "mimalloc",
  "rfd",
  "serde",
@@ -1405,6 +1406,7 @@ name = "gridfinity-brep"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "gridfinity-sketch",
  "mimalloc",
  "proc-macro2",
  "syn 2.0.119",
@@ -1415,6 +1417,8 @@ name = "gridfinity-model"
 version = "0.1.0"
 dependencies = [
  "gridfinity-brep",
+ "gridfinity-occt",
+ "gridfinity-sketch",
  "mimalloc",
  "proc-macro2",
  "rayon",
@@ -1447,6 +1451,16 @@ dependencies = [
  "glam",
  "naga",
  "wgpu",
+]
+
+[[package]]
+name = "gridfinity-sketch"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "mimalloc",
+ "proc-macro2",
+ "syn 2.0.119",
 ]
 
 [[package]]

@@ -15,11 +15,12 @@
 use crate::export::{Contents, Written};
 use crate::grouping::score as grouping_score;
 use crate::optimize::{Built, Run};
-use gridfinity_project::tidy::score as layout_score;
+#[cfg(feature = "occt")]
+use gridfinity_occt::Shape as Solid;
 use gridfinity_model::layout::{Axis, GridFootprint, Piece, SplitLine};
 use gridfinity_model::printers::{BED_MARGIN, BedFitResult, PrinterProfile, check_bed_fit};
-use gridfinity_brep::topo::Solid;
 use gridfinity_project::rects::{Rect, inflate_parts, parts_bounds, union_area};
+use gridfinity_project::tidy::score as layout_score;
 use std::time::Duration;
 
 /// How wide the label column of a `field` line is.
@@ -118,7 +119,11 @@ fn drawer(run: &Run) {
     heading("Drawer");
     field(
         "requested",
-        &format!("{} x {} mm", mm(run.spec.drawer_width), mm(run.spec.drawer_depth)),
+        &format!(
+            "{} x {} mm",
+            mm(run.spec.drawer_width),
+            mm(run.spec.drawer_depth)
+        ),
     );
     field(
         "grid",
@@ -130,7 +135,11 @@ fn drawer(run: &Run) {
         ),
     );
     field(
-        if run.spec.baseplate { "margin" } else { "unusable margin" },
+        if run.spec.baseplate {
+            "margin"
+        } else {
+            "unusable margin"
+        },
         &format!(
             "{} mm across, {} mm deep{}",
             mm(run.grid.margin_x),
@@ -529,7 +538,10 @@ fn dividers(run: &Run) {
     let (interior, whose) = match run.built {
         Built::Walls => (run.area.width * run.area.depth, "packing area"),
         Built::Bins | Built::Hybrid => (
-            run.bins.iter().map(|b| b.cells.len() as f64 * pitch * pitch).sum(),
+            run.bins
+                .iter()
+                .map(|b| b.cells.len() as f64 * pitch * pitch)
+                .sum(),
             "the bins cover",
         ),
     };
@@ -660,7 +672,11 @@ fn printing(run: &Run) {
                     "{} x {} mm -- {}",
                     fit.bin_width,
                     fit.bin_depth,
-                    if fit.fits { "fits the bed" } else { "too big for the bed" }
+                    if fit.fits {
+                        "fits the bed"
+                    } else {
+                        "too big for the bed"
+                    }
                 ),
             )
         }
@@ -711,7 +727,10 @@ fn printing(run: &Run) {
     if !run.baseplate.is_empty() {
         field("interlock", &interlock(run));
     }
-    for (pieces, parts) in [(&run.pieces, &run.parts), (&run.baseplate, &run.plate_parts)] {
+    for (pieces, parts) in [
+        (&run.pieces, &run.parts),
+        (&run.baseplate, &run.plate_parts),
+    ] {
         for (piece, part) in pieces.iter().zip(parts) {
             piece_row(&piece.name, part, &piece.solid, printer);
         }
@@ -738,7 +757,11 @@ fn cut_lines(lines: &[SplitLine]) -> String {
         "{} cut line{} ({})",
         lines.len(),
         if lines.len() == 1 { "" } else { "s" },
-        if named.is_empty() { "none".to_string() } else { named.join(", ") }
+        if named.is_empty() {
+            "none".to_string()
+        } else {
+            named.join(", ")
+        }
     )
 }
 
@@ -888,6 +911,13 @@ fn output(run: &Run, written: &[Written]) {
 /// cell count is not this one; the solid is the only thing that knows how big
 /// the body really is.
 fn footprint_mm(solid: &Solid) -> (f64, f64) {
+    #[cfg(feature = "occt")]
+    {
+        let bounds = solid.bounds().expect("a reported OCCT body has bounds");
+        return (bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1]);
+    }
+    #[cfg(not(feature = "occt"))]
+    {
     assert!(
         !solid.verts.is_empty(),
         "a built piece with no vertices has no footprint to measure"
@@ -900,7 +930,8 @@ fn footprint_mm(solid: &Solid) -> (f64, f64) {
         min_y = min_y.min(v.point.y);
         max_y = max_y.max(v.point.y);
     }
-    (max_x - min_x, max_y - min_y)
+        (max_x - min_x, max_y - min_y)
+    }
 }
 
 /// Everything worth a second look: rounding that did not land, objects that do
